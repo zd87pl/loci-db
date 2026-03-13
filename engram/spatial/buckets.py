@@ -60,14 +60,20 @@ def expand_bounding_box(
     curve = _make_curve(order)
     side = (1 << order) - 1
 
-    ix_lo = _clamp(int(x_min * side), 0, side)
-    ix_hi = _clamp(int(x_max * side), 0, side)
-    iy_lo = _clamp(int(y_min * side), 0, side)
-    iy_hi = _clamp(int(y_max * side), 0, side)
-    iz_lo = _clamp(int(z_min * side), 0, side)
-    iz_hi = _clamp(int(z_max * side), 0, side)
-    it_lo = _clamp(int(t_min * side), 0, side)
-    it_hi = _clamp(int(t_max * side), 0, side)
+    # Use floor for lower bounds and ceil for upper bounds so that
+    # every grid cell that could contain a point quantised with round()
+    # is included.  This fixes a mismatch where encode() uses round()
+    # but the old code used int() (truncation), causing boundary misses.
+    import math
+
+    ix_lo = _clamp(math.floor(x_min * side), 0, side)
+    ix_hi = _clamp(math.ceil(x_max * side), 0, side)
+    iy_lo = _clamp(math.floor(y_min * side), 0, side)
+    iy_hi = _clamp(math.ceil(y_max * side), 0, side)
+    iz_lo = _clamp(math.floor(z_min * side), 0, side)
+    iz_hi = _clamp(math.ceil(z_max * side), 0, side)
+    it_lo = _clamp(math.floor(t_min * side), 0, side)
+    it_hi = _clamp(math.ceil(t_max * side), 0, side)
 
     ids: set[int] = set()
     for ix, iy, iz, it in itertools.product(

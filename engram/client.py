@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Callable
@@ -17,7 +18,6 @@ from qdrant_client.models import (
     PayloadSchemaType,
     PointStruct,
     Range,
-    SearchRequest,
     VectorParams,
 )
 
@@ -27,6 +27,8 @@ from engram.spatial.buckets import expand_bounding_box
 from engram.spatial.hilbert import encode as hilbert_encode
 from engram.temporal.decay import apply_decay
 from engram.temporal.sharding import collection_name, epoch_id, epochs_in_range
+
+logger = logging.getLogger(__name__)
 
 
 class EngramClient:
@@ -66,9 +68,21 @@ class EngramClient:
         """Create a Qdrant collection if it does not already exist (idempotent)."""
         if name in self._known_collections:
             return
+
+        # Check whether the collection already exists.  Only catch the
+        # specific "not found" response — let network errors and auth
+        # failures propagate.
+        exists = False
         try:
             self._qdrant.get_collection(name)
-        except (UnexpectedResponse, Exception):
+            exists = True
+        except UnexpectedResponse as exc:
+            if exc.status_code != 404:
+                raise
+        except Exception:
+            raise
+
+        if not exists:
             self._qdrant.create_collection(
                 collection_name=name,
                 vectors_config=VectorParams(
@@ -86,6 +100,12 @@ class EngramClient:
                 field_name="timestamp_ms",
                 field_schema=PayloadSchemaType.INTEGER,
             )
+            self._qdrant.create_payload_index(
+                collection_name=name,
+                field_name="scale_level",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+
         self._known_collections.add(name)
 
     # ------------------------------------------------------------------
@@ -95,6 +115,9 @@ class EngramClient:
     def insert(self, state: WorldState) -> str:
         """Insert a single WorldState into the store.
 
+        The input *state* is not mutated; the assigned ID is only set on
+        the returned copy available via :meth:`_get_state_by_id`.
+
         Args:
             state: The world state to persist.
 
@@ -102,7 +125,6 @@ class EngramClient:
             The unique ID assigned to this state.
         """
         point_id = uuid.uuid4().hex
-        state.id = point_id
 
         ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
         col = collection_name(ep)
@@ -117,13 +139,24 @@ class EngramClient:
             resolution_order=self._spatial_resolution,
         )
 
+        # Build payload — causal links will be patched below if applicable.
+        payload = self._state_to_payload(state, hid)
+
+        # --- Causal linking ---
+        prev_id = self._find_latest_predecessor(
+            col, state.scene_id, state.timestamp_ms
+        )
+        if prev_id is not None:
+            payload["prev_state_id"] = prev_id
+            self._patch_next_link(prev_id, point_id)
+
         self._qdrant.upsert(
             collection_name=col,
             points=[
                 PointStruct(
                     id=point_id,
                     vector=state.vector,
-                    payload=self._state_to_payload(state, hid),
+                    payload=payload,
                 ),
             ],
         )
@@ -133,7 +166,7 @@ class EngramClient:
         """Insert a batch of WorldStates efficiently.
 
         Vectors are grouped by epoch and upserted in a single Qdrant
-        call per collection.
+        call per collection.  Input states are not mutated.
 
         Args:
             states: List of world states.
@@ -141,13 +174,11 @@ class EngramClient:
         Returns:
             List of assigned IDs (same order as *states*).
         """
-        # Group points by collection
         groups: dict[str, list[PointStruct]] = {}
         ids: list[str] = []
 
         for state in states:
             point_id = uuid.uuid4().hex
-            state.id = point_id
             ids.append(point_id)
 
             ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
@@ -257,6 +288,7 @@ class EngramClient:
                     query_vector=vector,
                     query_filter=query_filter,
                     limit=limit,
+                    with_vectors=True,
                 )
             except Exception:
                 continue
@@ -266,6 +298,7 @@ class EngramClient:
                         "score": hit.score,
                         "timestamp_ms": hit.payload.get("timestamp_ms", 0),
                         "payload": hit.payload,
+                        "vector": hit.vector,
                         "id": hit.id,
                     }
                 )
@@ -275,7 +308,10 @@ class EngramClient:
         apply_decay(all_results, now_ms, self._decay_lambda)
         all_results = all_results[:limit]
 
-        return [self._payload_to_state(r["payload"], r["id"]) for r in all_results]
+        return [
+            self._payload_to_state(r["payload"], r["id"], r["vector"])
+            for r in all_results
+        ]
 
     # ------------------------------------------------------------------
     # Read — novel primitive
@@ -383,13 +419,15 @@ class EngramClient:
         }
 
     @staticmethod
-    def _payload_to_state(payload: dict, point_id: str) -> WorldState:
+    def _payload_to_state(
+        payload: dict, point_id: str, vector: list[float] | None = None
+    ) -> WorldState:
         return WorldState(
             x=payload["x"],
             y=payload["y"],
             z=payload["z"],
             timestamp_ms=payload["timestamp_ms"],
-            vector=[],  # vectors are not returned in payload
+            vector=vector if vector is not None else [],
             scene_id=payload.get("scene_id", ""),
             scale_level=payload.get("scale_level", "patch"),
             confidence=payload.get("confidence", 1.0),
@@ -406,12 +444,63 @@ class EngramClient:
                     collection_name=col,
                     ids=[state_id],
                     with_payload=True,
+                    with_vectors=True,
                 )
                 if results:
-                    return self._payload_to_state(results[0].payload, results[0].id)
+                    vec = results[0].vector
+                    if isinstance(vec, dict):
+                        vec = list(vec.values())[0] if vec else []
+                    return self._payload_to_state(
+                        results[0].payload, results[0].id, vec
+                    )
             except Exception:
                 continue
         return None
+
+    def _find_latest_predecessor(
+        self, collection: str, scene_id: str, before_ms: int
+    ) -> str | None:
+        """Find the most recent state in the same scene before a timestamp.
+
+        Used for automatic causal linking on insert.
+        """
+        if not scene_id:
+            return None
+        try:
+            hits = self._qdrant.scroll(
+                collection_name=collection,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="scene_id", match=MatchValue(value=scene_id)
+                        ),
+                        FieldCondition(
+                            key="timestamp_ms", range=Range(lt=before_ms)
+                        ),
+                    ]
+                ),
+                limit=1,
+                order_by="timestamp_ms",
+            )
+            points = hits[0] if isinstance(hits, tuple) else hits
+            if points:
+                return str(points[0].id)
+        except Exception:
+            logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
+        return None
+
+    def _patch_next_link(self, prev_id: str, next_id: str) -> None:
+        """Update the predecessor's next_state_id payload field."""
+        for col in list(self._known_collections):
+            try:
+                self._qdrant.set_payload(
+                    collection_name=col,
+                    payload={"next_state_id": next_id},
+                    points=[prev_id],
+                )
+                return
+            except Exception:
+                continue
 
     def _list_active_epochs(self) -> list[int]:
         """Return epoch IDs for all known collections."""

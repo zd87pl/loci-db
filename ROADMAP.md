@@ -24,14 +24,14 @@
 
 ## v0.3 — Performance
 
-- [ ] Adaptive Hilbert resolution (auto-tune based on data density)
+- [ ] Integrate adaptive Hilbert resolution into clients (code in `spatial/adaptive.py`)
+- [ ] Integrate funnel search into client API (code in `retrieval/funnel.py`)
 - [ ] Result caching for repeated spatial queries
 - [ ] Benchmarks against Milvus and Weaviate spatial filters
 - [ ] Batch predict-then-retrieve (multiple context vectors)
 
 ## v0.4 — Multi-Scale
 
-- [ ] Full funnel search pipeline (sequence → frame → patch)
 - [ ] Cross-scale causal linking
 - [ ] Scale-aware temporal decay
 

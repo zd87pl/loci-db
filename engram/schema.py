@@ -54,6 +54,10 @@ class WorldState:
             raise ValueError(f"y must be in [0, 1], got {self.y}")
         if not (0.0 <= self.z <= 1.0):
             raise ValueError(f"z must be in [0, 1], got {self.z}")
+        if not (0.0 <= self.confidence <= 1.0):
+            raise ValueError(f"confidence must be in [0, 1], got {self.confidence}")
+        if self.timestamp_ms < 0:
+            raise ValueError(f"timestamp_ms must be non-negative, got {self.timestamp_ms}")
         if self.scale_level not in ("patch", "frame", "sequence"):
             raise ValueError(
                 f"scale_level must be 'patch', 'frame', or 'sequence', got {self.scale_level!r}"

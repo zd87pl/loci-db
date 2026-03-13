@@ -30,6 +30,9 @@ def funnel_search(
 ) -> list["WorldState"]:
     """Run a coarse-to-fine funnel search across scale levels.
 
+    Searches from coarsest (sequence) to finest (patch) granularity.
+    Returns results at the finest scale that produced any hits.
+
     Args:
         client: Initialised :class:`EngramClient`.
         vector: Query embedding.
@@ -40,7 +43,7 @@ def funnel_search(
     Returns:
         List of :class:`WorldState` results at the finest available scale.
     """
-    candidates: list[WorldState] = []
+    best: list[WorldState] = []
 
     for scale in _SCALE_ORDER:
         extra_filter = {"scale_level": scale}
@@ -52,10 +55,7 @@ def funnel_search(
             _extra_payload_filter=extra_filter,
         )
         if results:
-            candidates = results
-        # Each pass narrows the search space; if we got results at the
-        # finest level, return those directly.
-        if scale == "patch" and candidates:
-            break
+            # Always prefer finer-grained results over coarser ones.
+            best = results
 
-    return candidates[:limit]
+    return best[:limit]

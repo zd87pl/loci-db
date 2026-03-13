@@ -1,31 +1,33 @@
 # Engram Roadmap
 
-## v0.1 — Foundation (current)
+## v0.1 — Foundation
 
-- [x] WorldState data model
+- [x] WorldState data model with validation
 - [x] Hilbert curve spatial encoding (4D)
 - [x] Temporal sharding with epoch-based collections
 - [x] EngramClient: insert, insert_batch, query
 - [x] Predict-then-retrieve primitive
 - [x] Temporal decay scoring
 - [x] Basic test suite
-- [ ] CI pipeline (GitHub Actions)
 
-## v0.2 — Robustness
+## v0.2 — Robustness (current)
 
-- [ ] Async client (`EngramAsyncClient`)
+- [x] AsyncEngramClient with parallel shard fan-out
+- [x] Causal chain linking in insert and insert_batch
+- [x] Configurable distance metrics (cosine, dot, euclidean)
+- [x] Input validation (confidence, timestamps, spatial bounds)
+- [x] py.typed marker for downstream type checking
+- [x] CI pipeline (GitHub Actions, Python 3.11 + 3.12)
+- [x] Comprehensive test suite (70+ tests)
 - [ ] Connection pooling and retry logic
-- [ ] Causal chain maintenance (auto-link prev/next on insert)
 - [ ] Shard lifecycle: warm → cold migration policy
-- [ ] Configurable distance metrics (cosine, dot, euclidean)
-- [ ] Comprehensive integration test suite (with Qdrant testcontainer)
 
 ## v0.3 — Performance
 
 - [ ] Adaptive Hilbert resolution (auto-tune based on data density)
-- [ ] Parallel fan-out across shards (asyncio / threading)
 - [ ] Result caching for repeated spatial queries
 - [ ] Benchmarks against Milvus and Weaviate spatial filters
+- [ ] Batch predict-then-retrieve (multiple context vectors)
 
 ## v0.4 — Multi-Scale
 

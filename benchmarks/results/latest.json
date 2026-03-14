@@ -1,0 +1,27 @@
+{
+  "config": {
+    "num_vectors": 10000,
+    "num_queries": 100,
+    "vector_dim": 512,
+    "epoch_size_ms": 5000,
+    "spatial_resolution": 4,
+    "num_shards": 21,
+    "seed": 42
+  },
+  "naive_qdrant": {
+    "avg_latency_ms": 131.72,
+    "p95_latency_ms": 153.65,
+    "recall_at_10": 1.0,
+    "insert_time_s": 2.32
+  },
+  "engram": {
+    "avg_latency_ms": 96.33,
+    "p95_latency_ms": 174.75,
+    "recall_at_10": 1.0,
+    "insert_time_s": 2.49
+  },
+  "speedup": {
+    "avg_latency": 1.37,
+    "p95_latency": 0.88
+  }
+}

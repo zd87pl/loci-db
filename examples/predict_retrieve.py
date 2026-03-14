@@ -1,59 +1,155 @@
 #!/usr/bin/env python3
-"""Predict-then-retrieve demo with a dummy predictor.
+"""Predict-then-retrieve demo — anticipatory retrieval with a linear predictor.
 
-Requires a local Qdrant instance running on http://localhost:6333.
+Simulates a robot on a patrol loop (200 states), defines a simple linear
+predictor, and demonstrates predict_and_retrieve: finding stored states
+that are similar to where the robot is *predicted* to be in the future.
+
+Requires a local Qdrant instance running on http://localhost:6333, OR
+falls back to the zero-dependency LocalEngramClient automatically.
 """
 
 from __future__ import annotations
 
+import math
 import random
 import time
 
-from engram import EngramClient, WorldState
+from engram.schema import WorldState
 
 VECTOR_DIM = 128
+NUM_STATES = 200
+LOOP_DURATION_S = 20.0
 
 
-def dummy_predictor(context_vector: list[float]) -> list[float]:
-    """A trivial 'world model' that slightly perturbs the input."""
-    return [v + random.gauss(0, 0.1) for v in context_vector]
+def make_patrol_states(now_ms: int) -> list[WorldState]:
+    """Simulate a robot patrolling an oval loop in the xz-plane."""
+    states: list[WorldState] = []
+    for i in range(NUM_STATES):
+        t = i / NUM_STATES  # fraction of full loop
+        angle = 2 * math.pi * t
+        x = 0.5 + 0.35 * math.cos(angle)
+        y = 0.5  # constant height
+        z = 0.5 + 0.25 * math.sin(angle)
+        ts = now_ms + int(t * LOOP_DURATION_S * 1000)
+
+        # Embedding encodes position + velocity direction
+        vx = -math.sin(angle)
+        vz = math.cos(angle)
+        vec = [0.0] * VECTOR_DIM
+        vec[0] = x
+        vec[1] = y
+        vec[2] = z
+        vec[3] = vx * 0.5
+        vec[4] = vz * 0.5
+        for j in range(5, VECTOR_DIM):
+            vec[j] = random.gauss(0, 0.05)
+
+        states.append(
+            WorldState(
+                x=x,
+                y=y,
+                z=z,
+                timestamp_ms=ts,
+                vector=vec,
+                scene_id="patrol_loop",
+                scale_level="patch",
+                confidence=1.0,
+            )
+        )
+    return states
+
+
+def linear_predictor(context_vector: list[float]) -> list[float]:
+    """A simple linear 'world model' that extrapolates position along velocity.
+
+    Reads position from dims [0..2] and velocity from dims [3..4],
+    then shifts the position forward by the velocity + small noise.
+    """
+    predicted = list(context_vector)
+    # Extrapolate: pos += velocity * scale
+    predicted[0] = context_vector[0] + context_vector[3] * 0.5
+    predicted[2] = context_vector[2] + context_vector[4] * 0.5
+    # Add small perturbation
+    for j in range(5, len(predicted)):
+        predicted[j] += random.gauss(0, 0.02)
+    return predicted
 
 
 def main() -> None:
-    client = EngramClient(
-        qdrant_url="http://localhost:6333",
-        epoch_size_ms=5000,
-        spatial_resolution=4,
-        vector_size=VECTOR_DIM,
+    # Try Qdrant, fall back to local
+    try:
+        from engram import EngramClient
+
+        client = EngramClient(
+            qdrant_url="http://localhost:6333",
+            epoch_size_ms=5000,
+            spatial_resolution=4,
+            vector_size=VECTOR_DIM,
+        )
+        client._qdrant.get_collections()
+        print("Connected to Qdrant at localhost:6333")
+    except Exception:
+        from engram import LocalEngramClient
+
+        client = LocalEngramClient(
+            epoch_size_ms=5000,
+            spatial_resolution=4,
+            vector_size=VECTOR_DIM,
+        )
+        print("Qdrant not available — using LocalEngramClient (in-memory)")
+
+    now_ms = int(time.time() * 1000)
+    states = make_patrol_states(now_ms)
+
+    # --- Insert patrol trajectory ---
+    print(f"\nInserting {NUM_STATES} patrol states ({LOOP_DURATION_S:.0f}s loop)...")
+    ids = client.insert_batch(states)
+    print(f"  Inserted {len(ids)} states across the patrol loop.")
+
+    # --- Pick a point halfway through the patrol as "current" ---
+    current_idx = NUM_STATES // 4  # 25% through the loop
+    current_state = states[current_idx]
+    context_vector = current_state.vector
+
+    print(
+        f"\nCurrent robot position: ({current_state.x:.3f}, {current_state.y:.3f}, {current_state.z:.3f})"
+    )
+    print(f"  (patrol step {current_idx}/{NUM_STATES})")
+
+    # Show what the predictor thinks
+    predicted = linear_predictor(context_vector)
+    print(
+        f"\nPredictor says the robot will be near: ({predicted[0]:.3f}, {predicted[1]:.3f}, {predicted[2]:.3f})"
     )
 
-    # Seed some future states
-    now_ms = int(time.time() * 1000)
-    for i in range(50):
-        client.insert(
-            WorldState(
-                x=random.random(),
-                y=random.random(),
-                z=random.random(),
-                timestamp_ms=now_ms + i * 100,
-                vector=[random.gauss(0, 1) for _ in range(VECTOR_DIM)],
-                scene_id="predict_demo",
-            )
-        )
-
-    # Run predict-then-retrieve
-    context = [random.gauss(0, 1) for _ in range(VECTOR_DIM)]
-    print("Running predict-then-retrieve...")
+    # --- Run predict-then-retrieve ---
+    print("\nRunning predict_and_retrieve (future_horizon=2000ms)...")
     results = client.predict_and_retrieve(
-        context_vector=context,
-        predictor_fn=dummy_predictor,
-        future_horizon_ms=5000,
+        context_vector=context_vector,
+        predictor_fn=linear_predictor,
+        future_horizon_ms=2000,
         limit=5,
     )
 
-    print(f"Got {len(results)} results matching predicted future state:")
-    for r in results:
-        print(f"  id={r.id}  pos=({r.x:.2f}, {r.y:.2f}, {r.z:.2f})  t={r.timestamp_ms}")
+    print(f"\nRobot predicted it will see: {len(results)} similar past states")
+    print()
+    print(f"  {'#':<4} {'Position':>24}  {'Time offset':>12}  {'Desc'}")
+    print(f"  {'-' * 4} {'-' * 24}  {'-' * 12}  {'-' * 30}")
+    for i, r in enumerate(results, 1):
+        offset_s = (r.timestamp_ms - now_ms) / 1000
+        # Calculate patrol fraction
+        frac = (r.timestamp_ms - now_ms) / (LOOP_DURATION_S * 1000)
+        angle_deg = frac * 360
+        print(
+            f"  {i:<4} ({r.x:.3f}, {r.y:.3f}, {r.z:.3f})  {offset_s:>10.2f}s  patrol angle ~{angle_deg:.0f}°"
+        )
+
+    print("\n--- Anticipatory Retrieval Concept ---")
+    print("The robot is at step {}/{} of its patrol loop.".format(current_idx, NUM_STATES))
+    print("The predictor extrapolated its trajectory forward by 2 seconds.")
+    print("Engram found stored states that match where the robot is PREDICTED to be,")
+    print("enabling the agent to pre-load context about upcoming locations.")
 
 
 if __name__ == "__main__":

@@ -68,8 +68,10 @@ def bench_query(n_data: int = 5000, n_queries: int = 200) -> None:
 
     p50 = statistics.median(latencies)
     p99 = sorted(latencies)[int(len(latencies) * 0.99)]
-    print(f"QUERY   (no filter) {n_queries} queries on {n_data:,} points:  "
-          f"p50={p50:.2f}ms  p99={p99:.2f}ms")
+    print(
+        f"QUERY   (no filter) {n_queries} queries on {n_data:,} points:  "
+        f"p50={p50:.2f}ms  p99={p99:.2f}ms"
+    )
 
 
 def bench_spatial_query(n_data: int = 5000, n_queries: int = 200) -> None:
@@ -86,9 +88,12 @@ def bench_spatial_query(n_data: int = 5000, n_queries: int = 200) -> None:
         client.query(
             vector=qv,
             spatial_bounds={
-                "x_min": 0.2, "x_max": 0.6,
-                "y_min": 0.3, "y_max": 0.7,
-                "z_min": 0.0, "z_max": 1.0,
+                "x_min": 0.2,
+                "x_max": 0.6,
+                "y_min": 0.3,
+                "y_max": 0.7,
+                "z_min": 0.0,
+                "z_max": 1.0,
             },
             limit=10,
         )
@@ -98,15 +103,19 @@ def bench_spatial_query(n_data: int = 5000, n_queries: int = 200) -> None:
     p50 = statistics.median(latencies)
     p99 = sorted(latencies)[int(len(latencies) * 0.99)]
     avg_candidates = total_candidates / n_queries
-    print(f"QUERY   (spatial)   {n_queries} queries on {n_data:,} points:  "
-          f"p50={p50:.2f}ms  p99={p99:.2f}ms  avg_candidates={avg_candidates:.0f}")
+    print(
+        f"QUERY   (spatial)   {n_queries} queries on {n_data:,} points:  "
+        f"p50={p50:.2f}ms  p99={p99:.2f}ms  avg_candidates={avg_candidates:.0f}"
+    )
 
 
 def bench_temporal_query(n_data: int = 5000, n_queries: int = 200) -> None:
     random.seed(SEED)
     now_ms = int(time.time() * 1000)
     client = LocalEngramClient(
-        vector_size=VECTOR_DIM, epoch_size_ms=1000, decay_lambda=0,
+        vector_size=VECTOR_DIM,
+        epoch_size_ms=1000,
+        decay_lambda=0,
     )
     client.insert_batch(_random_states(n_data, now_ms))
 
@@ -125,8 +134,10 @@ def bench_temporal_query(n_data: int = 5000, n_queries: int = 200) -> None:
     p50 = statistics.median(latencies)
     p99 = sorted(latencies)[int(len(latencies) * 0.99)]
     shards = client.last_query_stats.shards_searched
-    print(f"QUERY   (temporal)  {n_queries} queries on {n_data:,} points:  "
-          f"p50={p50:.2f}ms  p99={p99:.2f}ms  shards={shards}")
+    print(
+        f"QUERY   (temporal)  {n_queries} queries on {n_data:,} points:  "
+        f"p50={p50:.2f}ms  p99={p99:.2f}ms  shards={shards}"
+    )
 
 
 def bench_adaptive_resolution(n: int = 10000) -> None:
@@ -150,9 +161,11 @@ def bench_adaptive_resolution(n: int = 10000) -> None:
     elapsed = (time.perf_counter() - t0) * 1000
 
     stats = ar.stats()
-    print(f"ADAPTIVE  {n:,} records:  {elapsed:.1f}ms  "
-          f"cells={stats.num_cells}  hot_cells={stats.hot_cells}  "
-          f"max_density={stats.max_density}")
+    print(
+        f"ADAPTIVE  {n:,} records:  {elapsed:.1f}ms  "
+        f"cells={stats.num_cells}  hot_cells={stats.hot_cells}  "
+        f"max_density={stats.max_density}"
+    )
 
 
 def bench_trajectory(n_data: int = 1000) -> None:
@@ -162,7 +175,9 @@ def bench_trajectory(n_data: int = 1000) -> None:
 
     states = [
         WorldState(
-            x=0.5, y=0.5, z=0.5,
+            x=0.5,
+            y=0.5,
+            z=0.5,
             timestamp_ms=now_ms + i * 10,
             vector=[random.gauss(0, 1) for _ in range(VECTOR_DIM)],
             scene_id="trajectory_scene",
@@ -175,8 +190,9 @@ def bench_trajectory(n_data: int = 1000) -> None:
     traj = client.get_trajectory(ids[n_data // 2], steps_back=50, steps_forward=50)
     elapsed = (time.perf_counter() - t0) * 1000
 
-    print(f"TRAJECTORY  {n_data:,} states, walk 100 steps:  "
-          f"{elapsed:.2f}ms  found={len(traj)} states")
+    print(
+        f"TRAJECTORY  {n_data:,} states, walk 100 steps:  {elapsed:.2f}ms  found={len(traj)} states"
+    )
 
 
 def main() -> None:

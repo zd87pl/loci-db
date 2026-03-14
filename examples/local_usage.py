@@ -49,9 +49,12 @@ def main() -> None:
     results = client.query(
         vector=query_vec,
         spatial_bounds={
-            "x_min": 0.2, "x_max": 0.8,
-            "y_min": 0.2, "y_max": 0.8,
-            "z_min": 0.0, "z_max": 1.0,
+            "x_min": 0.2,
+            "x_max": 0.8,
+            "y_min": 0.2,
+            "y_max": 0.8,
+            "z_min": 0.0,
+            "z_max": 1.0,
         },
         time_window_ms=(now_ms, now_ms + NUM_STATES * 50),
         limit=5,

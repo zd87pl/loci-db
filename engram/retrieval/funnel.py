@@ -22,12 +22,12 @@ _SCALE_ORDER = ("sequence", "frame", "patch")
 
 
 def funnel_search(
-    client: "EngramClient",
+    client: EngramClient,
     vector: list[float],
     spatial_bounds: dict | None = None,
     time_window_ms: tuple[int, int] | None = None,
     limit: int = 10,
-) -> list["WorldState"]:
+) -> list[WorldState]:
     """Run a coarse-to-fine funnel search across scale levels.
 
     Searches from coarsest (sequence) to finest (patch) granularity.

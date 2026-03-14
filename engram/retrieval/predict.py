@@ -8,7 +8,8 @@ store for nearest neighbours within a configurable future time window.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engram.client import EngramClient
@@ -16,12 +17,12 @@ if TYPE_CHECKING:
 
 
 def predict_and_retrieve(
-    client: "EngramClient",
+    client: EngramClient,
     context_vector: list[float],
     predictor_fn: Callable[[list[float]], list[float]],
     future_horizon_ms: int = 1000,
     limit: int = 5,
-) -> list["WorldState"]:
+) -> list[WorldState]:
     """Run the predict-then-retrieve primitive.
 
     1. Call ``predictor_fn(context_vector)`` to obtain a predicted

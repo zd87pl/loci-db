@@ -10,7 +10,7 @@
 - [x] Temporal decay scoring
 - [x] Basic test suite
 
-## v0.2 — Robustness (current)
+## v0.2 — Robustness
 
 - [x] AsyncEngramClient with parallel shard fan-out
 - [x] Causal chain linking in insert and insert_batch
@@ -19,19 +19,19 @@
 - [x] py.typed marker for downstream type checking
 - [x] CI pipeline (GitHub Actions, Python 3.11 + 3.12)
 - [x] Comprehensive test suite (70+ tests)
-- [ ] Connection pooling and retry logic
+- [x] Connection retry logic with exponential backoff
 - [ ] Shard lifecycle: warm → cold migration policy
 
-## v0.3 — Performance
+## v0.3 — Performance (current)
 
-- [ ] Adaptive Hilbert resolution (auto-tune based on data density)
+- [x] Integrate adaptive Hilbert resolution into clients (density tracking + stats)
+- [x] Integrate funnel search into client API (`funnel_query()` on all clients)
 - [ ] Result caching for repeated spatial queries
 - [ ] Benchmarks against Milvus and Weaviate spatial filters
 - [ ] Batch predict-then-retrieve (multiple context vectors)
 
 ## v0.4 — Multi-Scale
 
-- [ ] Full funnel search pipeline (sequence → frame → patch)
 - [ ] Cross-scale causal linking
 - [ ] Scale-aware temporal decay
 

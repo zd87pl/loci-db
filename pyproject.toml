@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "engram-db"
-version = "0.2.0"
+version = "0.3.0"
 description = "4D spatiotemporal vector database middleware for AI world models"
 readme = "README.md"
 license = "Apache-2.0"
@@ -32,6 +32,8 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "hypothesis>=6.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -39,3 +41,16 @@ packages = ["engram"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

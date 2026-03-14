@@ -42,4 +42,23 @@ jobs:
           pip install mypy
 
       - name: Run mypy
-        run: mypy engram/ --ignore-missing-imports --no-error-summary || true
+        run: mypy engram/ --ignore-missing-imports
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Check formatting
+        run: ruff format --check engram/ tests/
+
+      - name: Lint
+        run: ruff check engram/ tests/

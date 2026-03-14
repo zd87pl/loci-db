@@ -22,7 +22,6 @@ Usage:
 
 from __future__ import annotations
 
-import math
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -113,7 +112,6 @@ class AdaptiveResolution:
         count = self._cell_counts[cell_id]
         if count >= self._density_threshold and cell_id not in self._resolution_cache:
             # Escalate resolution for this cell
-            current = self._base_order
             # Each threshold multiple bumps resolution by 1
             escalation = min(
                 self._max_order - self._base_order,

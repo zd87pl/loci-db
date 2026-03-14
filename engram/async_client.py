@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Callable
+from collections.abc import Callable
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -23,6 +23,7 @@ from qdrant_client.models import (
 )
 
 from engram.schema import WorldState
+from engram.spatial.adaptive import AdaptiveResolution
 from engram.spatial.buckets import expand_bounding_box
 from engram.spatial.hilbert import encode as hilbert_encode
 from engram.temporal.decay import apply_decay
@@ -52,6 +53,8 @@ class AsyncEngramClient:
         vector_size: Dimensionality of the embedding vectors.
         decay_lambda: Temporal decay rate for recency weighting.
         distance: Distance metric — ``"cosine"``, ``"dot"``, or ``"euclidean"``.
+        max_retries: Maximum number of retry attempts for transient Qdrant failures.
+        retry_backoff: Base delay in seconds for exponential backoff between retries.
     """
 
     def __init__(
@@ -62,6 +65,9 @@ class AsyncEngramClient:
         vector_size: int = 512,
         decay_lambda: float = 1e-4,
         distance: str = "cosine",
+        adaptive: bool = False,
+        max_retries: int = 3,
+        retry_backoff: float = 0.5,
     ) -> None:
         self._qdrant = AsyncQdrantClient(url=qdrant_url)
         self._epoch_size_ms = epoch_size_ms
@@ -69,12 +75,38 @@ class AsyncEngramClient:
         self._vector_size = vector_size
         self._decay_lambda = decay_lambda
         if distance not in _DISTANCE_MAP:
-            raise ValueError(
-                f"distance must be one of {list(_DISTANCE_MAP)}, got {distance!r}"
-            )
+            raise ValueError(f"distance must be one of {list(_DISTANCE_MAP)}, got {distance!r}")
         self._distance = _DISTANCE_MAP[distance]
+        self._max_retries = max_retries
+        self._retry_backoff = retry_backoff
         self._known_collections: set[str] = set()
         self._collection_locks: dict[str, asyncio.Lock] = {}
+        self._adaptive = (
+            AdaptiveResolution(
+                base_order=spatial_resolution,
+                max_order=spatial_resolution + 2,
+                density_threshold=50,
+            )
+            if adaptive
+            else None
+        )
+
+    async def _retry(self, fn, *args, **kwargs):
+        """Execute an async fn with retry logic."""
+        from engram.retry import async_with_retry
+
+        return await async_with_retry(
+            fn,
+            *args,
+            max_retries=self._max_retries,
+            backoff_base=self._retry_backoff,
+            **kwargs,
+        )
+
+    @property
+    def density_stats(self):
+        """Return adaptive resolution density stats, or None if not enabled."""
+        return self._adaptive.stats() if self._adaptive is not None else None
 
     async def close(self) -> None:
         """Close the underlying Qdrant connection."""
@@ -159,21 +191,26 @@ class AsyncEngramClient:
 
         t_norm = _normalise_time(state.timestamp_ms, ep, self._epoch_size_ms)
         hid = hilbert_encode(
-            state.x, state.y, state.z, t_norm,
+            state.x,
+            state.y,
+            state.z,
+            t_norm,
             resolution_order=self._spatial_resolution,
         )
+
+        if self._adaptive is not None:
+            self._adaptive.record(state.x, state.y, state.z, t_norm)
 
         payload = _state_to_payload(state, hid)
 
         # Causal linking
-        prev_id = await self._find_latest_predecessor(
-            col, state.scene_id, state.timestamp_ms
-        )
+        prev_id = await self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
         if prev_id is not None:
             payload["prev_state_id"] = prev_id
             await self._patch_next_link(prev_id, point_id)
 
-        await self._qdrant.upsert(
+        await self._retry(
+            self._qdrant.upsert,
             collection_name=col,
             points=[PointStruct(id=point_id, vector=state.vector, payload=payload)],
         )
@@ -198,9 +235,7 @@ class AsyncEngramClient:
         scene_chains: dict[str, str] = {}  # scene_id → latest point_id
 
         # Sort indices by (scene_id, timestamp_ms) for correct linking
-        indexed = sorted(
-            enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms)
-        )
+        indexed = sorted(enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms))
         id_by_index: dict[int, str] = {}
 
         for orig_idx, state in indexed:
@@ -213,9 +248,15 @@ class AsyncEngramClient:
 
             t_norm = _normalise_time(state.timestamp_ms, ep, self._epoch_size_ms)
             hid = hilbert_encode(
-                state.x, state.y, state.z, t_norm,
+                state.x,
+                state.y,
+                state.z,
+                t_norm,
                 resolution_order=self._spatial_resolution,
             )
+            if self._adaptive is not None:
+                self._adaptive.record(state.x, state.y, state.z, t_norm)
+
             payload = _state_to_payload(state, hid)
 
             # Link within the batch
@@ -230,7 +271,7 @@ class AsyncEngramClient:
         # Fan out upserts concurrently
         await asyncio.gather(
             *(
-                self._qdrant.upsert(collection_name=col, points=points)
+                self._retry(self._qdrant.upsert, collection_name=col, points=points)
                 for col, points in groups.items()
             )
         )
@@ -238,13 +279,14 @@ class AsyncEngramClient:
         # Patch next_state_id links within the batch
         for col, points in groups.items():
             for i, point in enumerate(points):
-                prev_id = point.payload.get("prev_state_id")
+                prev_id = (point.payload or {}).get("prev_state_id")
                 if prev_id:
                     # Find the predecessor in this batch and update it
                     for p in points:
                         if p.id == prev_id:
                             try:
-                                await self._qdrant.set_payload(
+                                await self._retry(
+                                    self._qdrant.set_payload,
                                     collection_name=col,
                                     payload={"next_state_id": point.id},
                                     points=[prev_id],
@@ -252,7 +294,9 @@ class AsyncEngramClient:
                             except Exception:
                                 logger.debug(
                                     "Failed to patch next link %s→%s",
-                                    prev_id, point.id, exc_info=True,
+                                    prev_id,
+                                    point.id,
+                                    exc_info=True,
                                 )
                             break
 
@@ -293,9 +337,7 @@ class AsyncEngramClient:
             epochs = self._list_active_epochs()
 
         collections = [
-            collection_name(e)
-            for e in epochs
-            if collection_name(e) in self._known_collections
+            collection_name(e) for e in epochs if collection_name(e) in self._known_collections
         ]
         if not collections:
             return []
@@ -311,13 +353,12 @@ class AsyncEngramClient:
                 spatial_bounds.get("y_max", 1.0),
                 spatial_bounds.get("z_min", 0.0),
                 spatial_bounds.get("z_max", 1.0),
-                0.0, 1.0,
+                0.0,
+                1.0,
                 resolution_order=self._spatial_resolution,
             )
             if hids:
-                must_conditions.append(
-                    FieldCondition(key="hilbert_id", match=MatchAny(any=hids))
-                )
+                must_conditions.append(FieldCondition(key="hilbert_id", match=MatchAny(any=hids)))
             else:
                 return []
 
@@ -331,22 +372,22 @@ class AsyncEngramClient:
 
         if _extra_payload_filter:
             for key, value in _extra_payload_filter.items():
-                must_conditions.append(
-                    FieldCondition(key=key, match=MatchValue(value=value))
-                )
+                must_conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
 
         query_filter = Filter(must=must_conditions) if must_conditions else None
 
         # Parallel fan-out across shards
         async def _search_shard(col: str) -> list[dict]:
             try:
-                hits = await self._qdrant.search(
+                resp = await self._retry(
+                    self._qdrant.query_points,
                     collection_name=col,
-                    query_vector=vector,
+                    query=vector,
                     query_filter=query_filter,
                     limit=limit,
                     with_vectors=True,
                 )
+                hits = resp.points
                 return [
                     {
                         "score": hit.score,
@@ -361,9 +402,7 @@ class AsyncEngramClient:
                 logger.debug("Search failed on %s", col, exc_info=True)
                 return []
 
-        shard_results = await asyncio.gather(
-            *(_search_shard(col) for col in collections)
-        )
+        shard_results = await asyncio.gather(*(_search_shard(col) for col in collections))
         all_results: list[dict] = []
         for batch in shard_results:
             all_results.extend(batch)
@@ -373,10 +412,7 @@ class AsyncEngramClient:
         apply_decay(all_results, now_ms, self._decay_lambda)
         all_results = all_results[:limit]
 
-        return [
-            _payload_to_state(r["payload"], r["id"], r["vector"])
-            for r in all_results
-        ]
+        return [_payload_to_state(r["payload"], r["id"], r["vector"]) for r in all_results]
 
     async def predict_and_retrieve(
         self,
@@ -403,6 +439,41 @@ class AsyncEngramClient:
             time_window_ms=(now_ms, now_ms + future_horizon_ms),
             limit=limit,
         )
+
+    async def funnel_query(
+        self,
+        vector: list[float],
+        spatial_bounds: dict | None = None,
+        time_window_ms: tuple[int, int] | None = None,
+        limit: int = 10,
+    ) -> list[WorldState]:
+        """Multi-scale coarse-to-fine search across scale levels.
+
+        Cascades from sequence → frame → patch, returning results at the
+        finest scale that produced hits.
+
+        Args:
+            vector: Query embedding vector.
+            spatial_bounds: Optional spatial bounding box.
+            time_window_ms: Optional ``(start_ms, end_ms)`` time window.
+            limit: Maximum number of results.
+
+        Returns:
+            List of :class:`WorldState` at the finest available scale.
+        """
+        _SCALE_ORDER = ("sequence", "frame", "patch")
+        best: list[WorldState] = []
+        for scale in _SCALE_ORDER:
+            results = await self.query(
+                vector=vector,
+                spatial_bounds=spatial_bounds,
+                time_window_ms=time_window_ms,
+                limit=limit * 3,
+                _extra_payload_filter={"scale_level": scale},
+            )
+            if results:
+                best = results
+        return best[:limit]
 
     async def get_trajectory(
         self,
@@ -456,7 +527,8 @@ class AsyncEngramClient:
     async def _get_state_by_id(self, state_id: str) -> WorldState | None:
         for col in list(self._known_collections):
             try:
-                results = await self._qdrant.retrieve(
+                results = await self._retry(
+                    self._qdrant.retrieve,
                     collection_name=col,
                     ids=[state_id],
                     with_payload=True,
@@ -477,16 +549,13 @@ class AsyncEngramClient:
         if not scene_id:
             return None
         try:
-            hits = await self._qdrant.scroll(
+            hits = await self._retry(
+                self._qdrant.scroll,
                 collection_name=collection,
                 scroll_filter=Filter(
                     must=[
-                        FieldCondition(
-                            key="scene_id", match=MatchValue(value=scene_id)
-                        ),
-                        FieldCondition(
-                            key="timestamp_ms", range=Range(lt=before_ms)
-                        ),
+                        FieldCondition(key="scene_id", match=MatchValue(value=scene_id)),
+                        FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
                     ]
                 ),
                 limit=1,
@@ -496,15 +565,14 @@ class AsyncEngramClient:
             if points:
                 return str(points[0].id)
         except Exception:
-            logger.debug(
-                "Failed to find predecessor in %s", collection, exc_info=True
-            )
+            logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
         return None
 
     async def _patch_next_link(self, prev_id: str, next_id: str) -> None:
         for col in list(self._known_collections):
             try:
-                await self._qdrant.set_payload(
+                await self._retry(
+                    self._qdrant.set_payload,
                     collection_name=col,
                     payload={"next_state_id": next_id},
                     points=[prev_id],
@@ -527,6 +595,7 @@ class AsyncEngramClient:
 # ---------------------------------------------------------------------------
 # Shared helpers (used by both sync and async clients)
 # ---------------------------------------------------------------------------
+
 
 def _normalise_time(timestamp_ms: int, ep: int, epoch_size_ms: int) -> float:
     epoch_start = ep * epoch_size_ms

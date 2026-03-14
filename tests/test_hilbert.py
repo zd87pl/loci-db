@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from engram.spatial.hilbert import decode, encode
 
-
 # ------------------------------------------------------------------
 # Roundtrip property test
 # ------------------------------------------------------------------
+
 
 @given(
     x=st.floats(min_value=0.0, max_value=1.0),
@@ -36,6 +35,7 @@ def test_encode_decode_roundtrip(x: float, y: float, z: float, t: float) -> None
 # Locality preservation
 # ------------------------------------------------------------------
 
+
 def test_nearby_points_have_similar_hilbert_ids() -> None:
     """Points close in 4D space should have Hilbert IDs closer together
     on average than distant points."""
@@ -50,6 +50,7 @@ def test_nearby_points_have_similar_hilbert_ids() -> None:
 # ------------------------------------------------------------------
 # Edge cases
 # ------------------------------------------------------------------
+
 
 def test_origin() -> None:
     hid = encode(0.0, 0.0, 0.0, 0.0)

@@ -25,8 +25,8 @@ def test_decay_score_formula() -> None:
 
 def test_apply_decay_reranks() -> None:
     results = [
-        {"score": 0.8, "timestamp_ms": 1000},   # old → big age
-        {"score": 0.7, "timestamp_ms": 9000},    # recent → small age
+        {"score": 0.8, "timestamp_ms": 1000},  # old → big age
+        {"score": 0.7, "timestamp_ms": 9000},  # recent → small age
     ]
     apply_decay(results, now_ms=10_000, lambda_=1e-3)
 

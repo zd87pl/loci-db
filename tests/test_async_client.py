@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -10,7 +9,6 @@ import pytest
 
 from engram.async_client import AsyncEngramClient
 from engram.schema import WorldState
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -37,7 +35,9 @@ def mock_async_qdrant():
         instance.create_collection = AsyncMock()
         instance.create_payload_index = AsyncMock()
         instance.upsert = AsyncMock()
-        instance.search = AsyncMock(return_value=[])
+        _empty_qr = MagicMock()
+        _empty_qr.points = []
+        instance.query_points = AsyncMock(return_value=_empty_qr)
         instance.scroll = AsyncMock(return_value=([], None))
         instance.set_payload = AsyncMock()
         instance.retrieve = AsyncMock(return_value=[])
@@ -60,8 +60,12 @@ def async_client(mock_async_qdrant):
 
 def _make_state(**overrides) -> WorldState:
     defaults = dict(
-        x=0.5, y=0.5, z=0.5, timestamp_ms=10_000,
-        vector=[1.0, 2.0, 3.0, 4.0], scene_id="test_scene",
+        x=0.5,
+        y=0.5,
+        z=0.5,
+        timestamp_ms=10_000,
+        vector=[1.0, 2.0, 3.0, 4.0],
+        scene_id="test_scene",
     )
     defaults.update(overrides)
     return WorldState(**defaults)
@@ -93,8 +97,10 @@ async def test_ensure_collection_propagates_500(mock_async_qdrant):
 
     mock_async_qdrant.get_collection = AsyncMock(
         side_effect=UnexpectedResponse(
-            status_code=500, reason_phrase="Internal",
-            content=b"", headers=httpx.Headers(),
+            status_code=500,
+            reason_phrase="Internal",
+            content=b"",
+            headers=httpx.Headers(),
         )
     )
     client = AsyncEngramClient.__new__(AsyncEngramClient)
@@ -210,13 +216,17 @@ async def test_query_with_vectors(async_client, mock_async_qdrant):
     hit.id = "abc123"
     hit.vector = [1.0, 2.0, 3.0, 4.0]
     hit.payload = {
-        "x": 0.5, "y": 0.5, "z": 0.5,
+        "x": 0.5,
+        "y": 0.5,
+        "z": 0.5,
         "timestamp_ms": 10_000,
         "scene_id": "s1",
         "scale_level": "patch",
         "confidence": 1.0,
     }
-    mock_async_qdrant.search = AsyncMock(return_value=[hit])
+    qr = MagicMock()
+    qr.points = [hit]
+    mock_async_qdrant.query_points = AsyncMock(return_value=qr)
 
     results = await async_client.query(
         vector=[1.0, 2.0, 3.0, 4.0],
@@ -232,14 +242,16 @@ async def test_query_parallel_fanout(async_client, mock_async_qdrant):
     # Create states in two different epochs
     await async_client.insert(_make_state(timestamp_ms=3000))  # epoch 0
     await async_client.insert(_make_state(timestamp_ms=8000))  # epoch 1
-    mock_async_qdrant.search = AsyncMock(return_value=[])
+    _empty_qr = MagicMock()
+    _empty_qr.points = []
+    mock_async_qdrant.query_points = AsyncMock(return_value=_empty_qr)
 
     await async_client.query(
         vector=[1.0, 2.0, 3.0, 4.0],
         time_window_ms=(0, 10_000),
     )
     # Both collections should have been searched
-    assert mock_async_qdrant.search.call_count == 2
+    assert mock_async_qdrant.query_points.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +278,9 @@ async def test_predict_and_retrieve(async_client, mock_async_qdrant):
 
     now_ms = int(_time.time() * 1000)
     await async_client.insert(_make_state(timestamp_ms=now_ms))
-    mock_async_qdrant.search = AsyncMock(return_value=[])
+    _empty_qr = MagicMock()
+    _empty_qr.points = []
+    mock_async_qdrant.query_points = AsyncMock(return_value=_empty_qr)
 
     predicted = [9.0, 8.0, 7.0, 6.0]
     predictor = MagicMock(return_value=predicted)
@@ -287,8 +301,6 @@ async def test_predict_and_retrieve(async_client, mock_async_qdrant):
 
 @pytest.mark.asyncio
 async def test_context_manager(mock_async_qdrant):
-    async with AsyncEngramClient(
-        qdrant_url="http://fake:6333", vector_size=4
-    ) as client:
+    async with AsyncEngramClient(qdrant_url="http://fake:6333", vector_size=4) as client:
         assert isinstance(client, AsyncEngramClient)
     mock_async_qdrant.close.assert_called_once()

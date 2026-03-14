@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from engram.client import EngramClient
 from engram.schema import WorldState
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def mock_qdrant():
@@ -23,18 +22,21 @@ def mock_qdrant():
         MockCls.return_value = instance
 
         # get_collection raises 404 by default → triggers creation
+        import httpx
         from qdrant_client.http.exceptions import UnexpectedResponse
 
-        import httpx
-
         resp_404 = UnexpectedResponse(
-            status_code=404, reason_phrase="Not Found", content=b"",
+            status_code=404,
+            reason_phrase="Not Found",
+            content=b"",
             headers=httpx.Headers(),
         )
         instance.get_collection.side_effect = resp_404
 
-        # search returns empty by default
-        instance.search.return_value = []
+        # query_points returns empty by default
+        _empty_qr = MagicMock()
+        _empty_qr.points = []
+        instance.query_points.return_value = _empty_qr
         # scroll returns empty by default
         instance.scroll.return_value = ([], None)
 
@@ -69,6 +71,7 @@ def _make_state(**overrides) -> WorldState:
 # _ensure_collection
 # ---------------------------------------------------------------------------
 
+
 class TestEnsureCollection:
     def test_creates_collection_on_404(self, client, mock_qdrant):
         """Collection should be created when Qdrant returns 404."""
@@ -102,12 +105,13 @@ class TestEnsureCollection:
 
     def test_propagates_non_404_errors(self, mock_qdrant):
         """Non-404 errors from get_collection should propagate."""
+        import httpx
         from qdrant_client.http.exceptions import UnexpectedResponse
 
-        import httpx
-
         mock_qdrant.get_collection.side_effect = UnexpectedResponse(
-            status_code=500, reason_phrase="Internal", content=b"",
+            status_code=500,
+            reason_phrase="Internal",
+            content=b"",
             headers=httpx.Headers(),
         )
         c = EngramClient.__new__(EngramClient)
@@ -130,6 +134,7 @@ class TestEnsureCollection:
 # ---------------------------------------------------------------------------
 # insert
 # ---------------------------------------------------------------------------
+
 
 class TestInsert:
     def test_returns_id(self, client, mock_qdrant):
@@ -161,9 +166,7 @@ class TestInsert:
         assert isinstance(point.payload["hilbert_id"], int)
 
     def test_payload_stores_all_fields(self, client, mock_qdrant):
-        state = _make_state(
-            scene_id="s1", scale_level="frame", confidence=0.9
-        )
+        state = _make_state(scene_id="s1", scale_level="frame", confidence=0.9)
         client.insert(state)
 
         payload = mock_qdrant.upsert.call_args.kwargs["points"][0].payload
@@ -178,6 +181,7 @@ class TestInsert:
 # ---------------------------------------------------------------------------
 # insert_batch
 # ---------------------------------------------------------------------------
+
 
 class TestInsertBatch:
     def test_returns_correct_count(self, client, mock_qdrant):
@@ -205,7 +209,8 @@ class TestInsertBatch:
 
         # Filter to only upsert calls for engram_2
         upsert_calls = [
-            c for c in mock_qdrant.upsert.call_args_list
+            c
+            for c in mock_qdrant.upsert.call_args_list
             if c.kwargs["collection_name"] == "engram_2"
         ]
         assert len(upsert_calls) == 1
@@ -222,6 +227,7 @@ class TestInsertBatch:
 # query
 # ---------------------------------------------------------------------------
 
+
 class TestQuery:
     def test_returns_empty_when_no_collections(self, client, mock_qdrant):
         results = client.query(vector=[1.0, 2.0, 3.0, 4.0])
@@ -236,13 +242,17 @@ class TestQuery:
         hit.id = "abc123"
         hit.vector = [1.0, 2.0, 3.0, 4.0]
         hit.payload = {
-            "x": 0.5, "y": 0.5, "z": 0.5,
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
             "timestamp_ms": 10_000,
             "scene_id": "s1",
             "scale_level": "patch",
             "confidence": 1.0,
         }
-        mock_qdrant.search.return_value = [hit]
+        qr = MagicMock()
+        qr.points = [hit]
+        mock_qdrant.query_points.return_value = qr
 
         results = client.query(
             vector=[1.0, 2.0, 3.0, 4.0],
@@ -254,31 +264,32 @@ class TestQuery:
 
     def test_search_called_with_vectors_flag(self, client, mock_qdrant):
         client.insert(_make_state())
-        mock_qdrant.search.return_value = []
 
         client.query(
             vector=[1.0, 2.0, 3.0, 4.0],
             time_window_ms=(10_000, 15_000),
         )
 
-        search_kwargs = mock_qdrant.search.call_args.kwargs
+        search_kwargs = mock_qdrant.query_points.call_args.kwargs
         assert search_kwargs.get("with_vectors") is True
 
     def test_spatial_filter_uses_match_any(self, client, mock_qdrant):
         client.insert(_make_state())
-        mock_qdrant.search.return_value = []
 
         client.query(
             vector=[1.0, 2.0, 3.0, 4.0],
             spatial_bounds={
-                "x_min": 0.2, "x_max": 0.8,
-                "y_min": 0.2, "y_max": 0.8,
-                "z_min": 0.0, "z_max": 1.0,
+                "x_min": 0.2,
+                "x_max": 0.8,
+                "y_min": 0.2,
+                "y_max": 0.8,
+                "z_min": 0.0,
+                "z_max": 1.0,
             },
             time_window_ms=(10_000, 15_000),
         )
 
-        search_kwargs = mock_qdrant.search.call_args.kwargs
+        search_kwargs = mock_qdrant.query_points.call_args.kwargs
         filt = search_kwargs["query_filter"]
         assert filt is not None
         # Should have at least a hilbert_id MatchAny and a timestamp Range
@@ -289,6 +300,7 @@ class TestQuery:
 # predict_and_retrieve
 # ---------------------------------------------------------------------------
 
+
 class TestPredictAndRetrieve:
     def test_uses_predicted_vector(self, client, mock_qdrant):
         # Insert a state at "now" so the future-horizon collection is known
@@ -296,8 +308,6 @@ class TestPredictAndRetrieve:
 
         now_ms = int(_time.time() * 1000)
         client.insert(_make_state(timestamp_ms=now_ms))
-        mock_qdrant.search.return_value = []
-
         predicted = [9.0, 8.0, 7.0, 6.0]
         predictor = MagicMock(return_value=predicted)
 
@@ -308,15 +318,16 @@ class TestPredictAndRetrieve:
         )
 
         predictor.assert_called_once_with([1.0, 2.0, 3.0, 4.0])
-        # search should have been called with the predicted vector
-        assert mock_qdrant.search.called
-        search_kwargs = mock_qdrant.search.call_args.kwargs
-        assert search_kwargs["query_vector"] == predicted
+        # query_points should have been called with the predicted vector
+        assert mock_qdrant.query_points.called
+        search_kwargs = mock_qdrant.query_points.call_args.kwargs
+        assert search_kwargs["query"] == predicted
 
 
 # ---------------------------------------------------------------------------
 # Bounding-box quantisation consistency
 # ---------------------------------------------------------------------------
+
 
 class TestBoundingBoxConsistency:
     def test_point_inside_box_is_found(self):
@@ -330,10 +341,14 @@ class TestBoundingBoxConsistency:
         hid = encode(x, y, z, t, resolution_order=4)
 
         box_ids = expand_bounding_box(
-            0.0, 0.53,  # x range includes the point
-            0.0, 1.0,
-            0.0, 1.0,
-            0.0, 1.0,
+            0.0,
+            0.53,  # x range includes the point
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
             resolution_order=4,
         )
         assert hid in box_ids, (

@@ -20,8 +20,10 @@ def mock_qdrant():
         from qdrant_client.http.exceptions import UnexpectedResponse
 
         instance.get_collection.side_effect = UnexpectedResponse(
-            status_code=404, reason_phrase="Not Found",
-            content=b"", headers=httpx.Headers(),
+            status_code=404,
+            reason_phrase="Not Found",
+            content=b"",
+            headers=httpx.Headers(),
         )
         instance.scroll.return_value = ([], None)
         yield instance
@@ -39,7 +41,9 @@ def client(mock_qdrant):
 
 def _make(ts: int, scene: str = "scene_a") -> WorldState:
     return WorldState(
-        x=0.5, y=0.5, z=0.5,
+        x=0.5,
+        y=0.5,
+        z=0.5,
         timestamp_ms=ts,
         vector=[1.0, 2.0, 3.0, 4.0],
         scene_id=scene,

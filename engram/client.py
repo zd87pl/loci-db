@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Callable
+from collections.abc import Callable
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -23,6 +23,7 @@ from qdrant_client.models import (
 
 from engram.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
 from engram.schema import WorldState
+from engram.spatial.adaptive import AdaptiveResolution
 from engram.spatial.buckets import expand_bounding_box
 from engram.spatial.hilbert import encode as hilbert_encode
 from engram.temporal.decay import apply_decay
@@ -51,6 +52,8 @@ class EngramClient:
         vector_size: Dimensionality of the embedding vectors.
         decay_lambda: Temporal decay rate for recency weighting.
         distance: Distance metric — ``"cosine"``, ``"dot"``, or ``"euclidean"``.
+        max_retries: Maximum number of retry attempts for transient Qdrant failures.
+        retry_backoff: Base delay in seconds for exponential backoff between retries.
     """
 
     def __init__(
@@ -61,6 +64,9 @@ class EngramClient:
         vector_size: int = 512,
         decay_lambda: float = 1e-4,
         distance: str = "cosine",
+        adaptive: bool = False,
+        max_retries: int = 3,
+        retry_backoff: float = 0.5,
     ) -> None:
         self._qdrant = QdrantClient(url=qdrant_url)
         self._epoch_size_ms = epoch_size_ms
@@ -68,11 +74,32 @@ class EngramClient:
         self._vector_size = vector_size
         self._decay_lambda = decay_lambda
         if distance not in _DISTANCE_MAP:
-            raise ValueError(
-                f"distance must be one of {list(_DISTANCE_MAP)}, got {distance!r}"
-            )
+            raise ValueError(f"distance must be one of {list(_DISTANCE_MAP)}, got {distance!r}")
         self._distance = _DISTANCE_MAP[distance]
+        self._max_retries = max_retries
+        self._retry_backoff = retry_backoff
         self._known_collections: set[str] = set()
+        self._adaptive = (
+            AdaptiveResolution(
+                base_order=spatial_resolution,
+                max_order=spatial_resolution + 2,
+                density_threshold=50,
+            )
+            if adaptive
+            else None
+        )
+
+    def _retry(self, fn, *args, **kwargs):
+        """Execute fn with retry logic."""
+        from engram.retry import with_retry
+
+        wrapped = with_retry(self._max_retries, self._retry_backoff)(fn)
+        return wrapped(*args, **kwargs)
+
+    @property
+    def density_stats(self):
+        """Return adaptive resolution density stats, or None if not enabled."""
+        return self._adaptive.stats() if self._adaptive is not None else None
 
     # ------------------------------------------------------------------
     # Collection management
@@ -142,21 +169,26 @@ class EngramClient:
 
         t_norm = self._normalise_time(state.timestamp_ms, ep)
         hid = hilbert_encode(
-            state.x, state.y, state.z, t_norm,
+            state.x,
+            state.y,
+            state.z,
+            t_norm,
             resolution_order=self._spatial_resolution,
         )
+
+        if self._adaptive is not None:
+            self._adaptive.record(state.x, state.y, state.z, t_norm)
 
         payload = self._state_to_payload(state, hid)
 
         # Causal linking
-        prev_id = self._find_latest_predecessor(
-            col, state.scene_id, state.timestamp_ms
-        )
+        prev_id = self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
         if prev_id is not None:
             payload["prev_state_id"] = prev_id
             self._patch_next_link(prev_id, point_id)
 
-        self._qdrant.upsert(
+        self._retry(
+            self._qdrant.upsert,
             collection_name=col,
             points=[PointStruct(id=point_id, vector=state.vector, payload=payload)],
         )
@@ -181,9 +213,7 @@ class EngramClient:
         scene_chains: dict[str, str] = {}  # scene_id → latest point_id
 
         # Sort by (scene_id, timestamp) to build correct causal chains
-        indexed = sorted(
-            enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms)
-        )
+        indexed = sorted(enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms))
 
         for orig_idx, state in indexed:
             point_id = uuid.uuid4().hex
@@ -195,9 +225,15 @@ class EngramClient:
 
             t_norm = self._normalise_time(state.timestamp_ms, ep)
             hid = hilbert_encode(
-                state.x, state.y, state.z, t_norm,
+                state.x,
+                state.y,
+                state.z,
+                t_norm,
                 resolution_order=self._spatial_resolution,
             )
+            if self._adaptive is not None:
+                self._adaptive.record(state.x, state.y, state.z, t_norm)
+
             payload = self._state_to_payload(state, hid)
 
             # Causal link within the batch
@@ -211,15 +247,16 @@ class EngramClient:
             )
 
         for col, points in groups.items():
-            self._qdrant.upsert(collection_name=col, points=points)
+            self._retry(self._qdrant.upsert, collection_name=col, points=points)
 
         # Patch next_state_id for intra-batch links
         for col, points in groups.items():
             for point in points:
-                prev_id = point.payload.get("prev_state_id")
+                prev_id = (point.payload or {}).get("prev_state_id")
                 if prev_id:
                     try:
-                        self._qdrant.set_payload(
+                        self._retry(
+                            self._qdrant.set_payload,
                             collection_name=col,
                             payload={"next_state_id": point.id},
                             points=[prev_id],
@@ -227,7 +264,9 @@ class EngramClient:
                     except Exception:
                         logger.debug(
                             "Failed to patch next link %s→%s",
-                            prev_id, point.id, exc_info=True,
+                            prev_id,
+                            point.id,
+                            exc_info=True,
                         )
 
         return [id_by_index[i] for i in range(len(states))]
@@ -275,13 +314,12 @@ class EngramClient:
                 spatial_bounds.get("y_max", 1.0),
                 spatial_bounds.get("z_min", 0.0),
                 spatial_bounds.get("z_max", 1.0),
-                0.0, 1.0,
+                0.0,
+                1.0,
                 resolution_order=self._spatial_resolution,
             )
             if hids:
-                must_conditions.append(
-                    FieldCondition(key="hilbert_id", match=MatchAny(any=hids))
-                )
+                must_conditions.append(FieldCondition(key="hilbert_id", match=MatchAny(any=hids)))
             else:
                 return []
 
@@ -295,9 +333,7 @@ class EngramClient:
 
         if _extra_payload_filter:
             for key, value in _extra_payload_filter.items():
-                must_conditions.append(
-                    FieldCondition(key=key, match=MatchValue(value=value))
-                )
+                must_conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
 
         query_filter = Filter(must=must_conditions) if must_conditions else None
 
@@ -306,13 +342,15 @@ class EngramClient:
             if col not in self._known_collections:
                 continue
             try:
-                hits = self._qdrant.search(
+                resp = self._retry(
+                    self._qdrant.query_points,
                     collection_name=col,
-                    query_vector=vector,
+                    query=vector,
                     query_filter=query_filter,
                     limit=limit,
                     with_vectors=True,
                 )
+                hits = resp.points
             except Exception:
                 continue
             for hit in hits:
@@ -330,10 +368,7 @@ class EngramClient:
         apply_decay(all_results, now_ms, self._decay_lambda)
         all_results = all_results[:limit]
 
-        return [
-            self._payload_to_state(r["payload"], r["id"], r["vector"])
-            for r in all_results
-        ]
+        return [self._payload_to_state(r["payload"], r["id"], r["vector"]) for r in all_results]
 
     # ------------------------------------------------------------------
     # Read — novel primitive
@@ -358,9 +393,37 @@ class EngramClient:
             List of :class:`WorldState` neighbours of the predicted vector.
         """
         return _predict_and_retrieve(
-            self, context_vector, predictor_fn,
-            future_horizon_ms=future_horizon_ms, limit=limit,
+            self,
+            context_vector,
+            predictor_fn,
+            future_horizon_ms=future_horizon_ms,
+            limit=limit,
         )
+
+    def funnel_query(
+        self,
+        vector: list[float],
+        spatial_bounds: dict | None = None,
+        time_window_ms: tuple[int, int] | None = None,
+        limit: int = 10,
+    ) -> list[WorldState]:
+        """Multi-scale coarse-to-fine search across scale levels.
+
+        Cascades from sequence → frame → patch, returning results at the
+        finest scale that produced hits.
+
+        Args:
+            vector: Query embedding vector.
+            spatial_bounds: Optional spatial bounding box.
+            time_window_ms: Optional ``(start_ms, end_ms)`` time window.
+            limit: Maximum number of results.
+
+        Returns:
+            List of :class:`WorldState` at the finest available scale.
+        """
+        from engram.retrieval.funnel import funnel_search
+
+        return funnel_search(self, vector, spatial_bounds, time_window_ms, limit)
 
     # ------------------------------------------------------------------
     # Temporal navigation
@@ -458,7 +521,8 @@ class EngramClient:
         """Retrieve a single state by its ID (scans known collections)."""
         for col in list(self._known_collections):
             try:
-                results = self._qdrant.retrieve(
+                results = self._retry(
+                    self._qdrant.retrieve,
                     collection_name=col,
                     ids=[state_id],
                     with_payload=True,
@@ -468,9 +532,7 @@ class EngramClient:
                     vec = results[0].vector
                     if isinstance(vec, dict):
                         vec = list(vec.values())[0] if vec else []
-                    return self._payload_to_state(
-                        results[0].payload, results[0].id, vec
-                    )
+                    return self._payload_to_state(results[0].payload, results[0].id, vec)
             except Exception:
                 continue
         return None
@@ -482,16 +544,13 @@ class EngramClient:
         if not scene_id:
             return None
         try:
-            hits = self._qdrant.scroll(
+            hits = self._retry(
+                self._qdrant.scroll,
                 collection_name=collection,
                 scroll_filter=Filter(
                     must=[
-                        FieldCondition(
-                            key="scene_id", match=MatchValue(value=scene_id)
-                        ),
-                        FieldCondition(
-                            key="timestamp_ms", range=Range(lt=before_ms)
-                        ),
+                        FieldCondition(key="scene_id", match=MatchValue(value=scene_id)),
+                        FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
                     ]
                 ),
                 limit=1,
@@ -501,16 +560,15 @@ class EngramClient:
             if points:
                 return str(points[0].id)
         except Exception:
-            logger.debug(
-                "Failed to find predecessor in %s", collection, exc_info=True
-            )
+            logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
         return None
 
     def _patch_next_link(self, prev_id: str, next_id: str) -> None:
         """Update the predecessor's next_state_id payload field."""
         for col in list(self._known_collections):
             try:
-                self._qdrant.set_payload(
+                self._retry(
+                    self._qdrant.set_payload,
                     collection_name=col,
                     payload={"next_state_id": next_id},
                     points=[prev_id],

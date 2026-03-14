@@ -7,15 +7,13 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from engram.client import EngramClient, _DISTANCE_MAP
+from engram.client import _DISTANCE_MAP, EngramClient
 
 
 def test_valid_distances():
     for name in ("cosine", "dot", "euclidean"):
         with patch("engram.client.QdrantClient"):
-            client = EngramClient(
-                qdrant_url="http://fake:6333", distance=name
-            )
+            client = EngramClient(qdrant_url="http://fake:6333", distance=name)
             assert client._distance == _DISTANCE_MAP[name]
 
 
@@ -33,8 +31,10 @@ def test_collection_uses_configured_distance():
         instance = MagicMock()
         MockCls.return_value = instance
         instance.get_collection.side_effect = UnexpectedResponse(
-            status_code=404, reason_phrase="Not Found",
-            content=b"", headers=httpx.Headers(),
+            status_code=404,
+            reason_phrase="Not Found",
+            content=b"",
+            headers=httpx.Headers(),
         )
 
         client = EngramClient(

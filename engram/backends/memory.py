@@ -10,7 +10,6 @@ using brute-force cosine/dot/euclidean similarity.  Designed for:
 from __future__ import annotations
 
 import math
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,9 +44,7 @@ class MemoryStore:
     # Collection lifecycle
     # ------------------------------------------------------------------
 
-    def create_collection(
-        self, name: str, vector_size: int, distance: str = "cosine"
-    ) -> None:
+    def create_collection(self, name: str, vector_size: int, distance: str = "cosine") -> None:
         if name not in self._collections:
             self._collections[name] = _Collection(
                 name=name, vector_size=vector_size, distance=distance
@@ -71,13 +68,9 @@ class MemoryStore:
         """
         col = self._collections[collection]
         for p in points:
-            col.points[p["id"]] = _Point(
-                id=p["id"], vector=p["vector"], payload=dict(p["payload"])
-            )
+            col.points[p["id"]] = _Point(id=p["id"], vector=p["vector"], payload=dict(p["payload"]))
 
-    def set_payload(
-        self, collection: str, point_id: str, payload: dict
-    ) -> None:
+    def set_payload(self, collection: str, point_id: str, payload: dict) -> None:
         col = self._collections[collection]
         if point_id in col.points:
             col.points[point_id].payload.update(payload)
@@ -86,9 +79,7 @@ class MemoryStore:
     # Read
     # ------------------------------------------------------------------
 
-    def retrieve(
-        self, collection: str, ids: list[str]
-    ) -> list[dict]:
+    def retrieve(self, collection: str, ids: list[str]) -> list[dict]:
         col = self._collections.get(collection)
         if col is None:
             return []
@@ -96,9 +87,7 @@ class MemoryStore:
         for pid in ids:
             if pid in col.points:
                 p = col.points[pid]
-                results.append(
-                    {"id": p.id, "vector": p.vector, "payload": p.payload}
-                )
+                results.append({"id": p.id, "vector": p.vector, "payload": p.payload})
         return results
 
     def search(
@@ -134,11 +123,9 @@ class MemoryStore:
         scored = []
         for p in candidates:
             score = dist_fn(query_vector, p.vector)
-            scored.append(
-                {"id": p.id, "vector": p.vector, "payload": p.payload, "score": score}
-            )
+            scored.append({"id": p.id, "vector": p.vector, "payload": p.payload, "score": score})
 
-        scored.sort(key=lambda x: x["score"], reverse=True)
+        scored.sort(key=lambda x: float(x["score"]),  reverse=True)  # type: ignore[arg-type]
         return scored[:limit]
 
     def scroll(
@@ -157,14 +144,9 @@ class MemoryStore:
             candidates = [p for p in candidates if _matches(p.payload, payload_filter)]
 
         if order_by:
-            candidates.sort(
-                key=lambda p: p.payload.get(order_by, 0), reverse=True
-            )
+            candidates.sort(key=lambda p: p.payload.get(order_by, 0), reverse=True)
 
-        return [
-            {"id": p.id, "vector": p.vector, "payload": p.payload}
-            for p in candidates[:limit]
-        ]
+        return [{"id": p.id, "vector": p.vector, "payload": p.payload} for p in candidates[:limit]]
 
     @property
     def total_points(self) -> int:
@@ -178,6 +160,7 @@ class MemoryStore:
 # ------------------------------------------------------------------
 # Distance functions
 # ------------------------------------------------------------------
+
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
@@ -207,6 +190,7 @@ _DISTANCE_FNS = {
 # ------------------------------------------------------------------
 # Filter matching
 # ------------------------------------------------------------------
+
 
 def _matches(payload: dict, filters: dict) -> bool:
     """Check if a payload matches all filter conditions."""

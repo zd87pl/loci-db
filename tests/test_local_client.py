@@ -6,9 +6,8 @@ import time
 
 import pytest
 
-from engram.local_client import LocalEngramClient, QueryStats
+from engram.local_client import LocalEngramClient
 from engram.schema import WorldState
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -26,7 +25,9 @@ def _make_state(
     vector: list[float] | None = None,
 ) -> WorldState:
     return WorldState(
-        x=x, y=y, z=z,
+        x=x,
+        y=y,
+        z=z,
         timestamp_ms=ts,
         vector=vector or [1.0, 0.0, 0.0, 0.0],
         scene_id=scene,
@@ -46,6 +47,7 @@ def client():
 # ---------------------------------------------------------------------------
 # Insert
 # ---------------------------------------------------------------------------
+
 
 class TestInsert:
     def test_insert_returns_id(self, client):
@@ -72,6 +74,7 @@ class TestInsert:
 # ---------------------------------------------------------------------------
 # Insert batch
 # ---------------------------------------------------------------------------
+
 
 class TestInsertBatch:
     def test_batch_returns_ids(self, client):
@@ -102,6 +105,7 @@ class TestInsertBatch:
 # Query
 # ---------------------------------------------------------------------------
 
+
 class TestQuery:
     def test_query_returns_results(self, client):
         client.insert(_make_state(vector=[1.0, 0.0, 0.0, 0.0]))
@@ -131,9 +135,12 @@ class TestQuery:
         results = client.query(
             vector=[1, 0, 0, 0],
             spatial_bounds={
-                "x_min": 0.0, "x_max": 0.3,
-                "y_min": 0.0, "y_max": 0.3,
-                "z_min": 0.0, "z_max": 0.3,
+                "x_min": 0.0,
+                "x_max": 0.3,
+                "y_min": 0.0,
+                "y_max": 0.3,
+                "z_min": 0.0,
+                "z_max": 0.3,
             },
         )
         assert len(results) == 1
@@ -154,6 +161,7 @@ class TestQuery:
 # QueryStats
 # ---------------------------------------------------------------------------
 
+
 class TestQueryStats:
     def test_stats_populated_after_query(self, client):
         client.insert(_make_state())
@@ -167,9 +175,14 @@ class TestQueryStats:
         client.insert(_make_state(x=0.5, y=0.5, z=0.5))
         client.query(
             vector=[1, 0, 0, 0],
-            spatial_bounds={"x_min": 0.0, "x_max": 1.0,
-                            "y_min": 0.0, "y_max": 1.0,
-                            "z_min": 0.0, "z_max": 1.0},
+            spatial_bounds={
+                "x_min": 0.0,
+                "x_max": 1.0,
+                "y_min": 0.0,
+                "y_max": 1.0,
+                "z_min": 0.0,
+                "z_max": 1.0,
+            },
         )
         stats = client.last_query_stats
         assert stats.hilbert_ids_in_filter > 0
@@ -193,6 +206,7 @@ class TestQueryStats:
 # Temporal decay
 # ---------------------------------------------------------------------------
 
+
 class TestDecay:
     def test_decay_reranks_results(self):
         c = LocalEngramClient(vector_size=VEC_SIZE, decay_lambda=0.01)
@@ -210,15 +224,16 @@ class TestDecay:
 # Causal linking (single inserts)
 # ---------------------------------------------------------------------------
 
+
 class TestCausalLinking:
     def test_single_insert_links(self, client):
-        id1 = client.insert(_make_state(ts=100, scene="s1"))
+        client.insert(_make_state(ts=100, scene="s1"))
         id2 = client.insert(_make_state(ts=200, scene="s1"))
         traj = client.get_trajectory(id2, steps_back=5, steps_forward=5)
         assert len(traj) == 2
 
     def test_no_cross_scene_linking(self, client):
-        id1 = client.insert(_make_state(ts=100, scene="s1"))
+        client.insert(_make_state(ts=100, scene="s1"))
         id2 = client.insert(_make_state(ts=200, scene="s2"))
         traj = client.get_trajectory(id2, steps_back=5, steps_forward=5)
         assert len(traj) == 1  # only the anchor, no cross-scene link
@@ -228,14 +243,17 @@ class TestCausalLinking:
 # get_trajectory
 # ---------------------------------------------------------------------------
 
+
 class TestTrajectory:
     def test_full_trajectory(self, client):
-        ids = client.insert_batch([
-            _make_state(ts=100, scene="s1"),
-            _make_state(ts=200, scene="s1"),
-            _make_state(ts=300, scene="s1"),
-            _make_state(ts=400, scene="s1"),
-        ])
+        ids = client.insert_batch(
+            [
+                _make_state(ts=100, scene="s1"),
+                _make_state(ts=200, scene="s1"),
+                _make_state(ts=300, scene="s1"),
+                _make_state(ts=400, scene="s1"),
+            ]
+        )
         traj = client.get_trajectory(ids[1], steps_back=10, steps_forward=10)
         assert len(traj) == 4
         # Ordered by time
@@ -249,6 +267,7 @@ class TestTrajectory:
 # ---------------------------------------------------------------------------
 # predict_and_retrieve
 # ---------------------------------------------------------------------------
+
 
 class TestPredictAndRetrieve:
     def test_predict_and_retrieve(self, client):
@@ -266,6 +285,7 @@ class TestPredictAndRetrieve:
 # ---------------------------------------------------------------------------
 # Distance metrics
 # ---------------------------------------------------------------------------
+
 
 class TestDistanceMetrics:
     def test_dot_product_distance(self):

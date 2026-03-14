@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from engram.backends.memory import MemoryStore
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture()
 def store():
@@ -28,6 +26,7 @@ def _vec(x: float, y: float = 0.0, z: float = 0.0, w: float = 0.0) -> list[float
 # ---------------------------------------------------------------------------
 # Collection lifecycle
 # ---------------------------------------------------------------------------
+
 
 class TestCollectionLifecycle:
     def test_create_and_exists(self):
@@ -56,23 +55,33 @@ class TestCollectionLifecycle:
 # Upsert and retrieve
 # ---------------------------------------------------------------------------
 
+
 class TestUpsertRetrieve:
     def test_upsert_and_retrieve(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": _vec(1.0), "payload": {"x": 1}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": _vec(1.0), "payload": {"x": 1}},
+            ],
+        )
         results = store.retrieve("test", ["a"])
         assert len(results) == 1
         assert results[0]["id"] == "a"
         assert results[0]["payload"]["x"] == 1
 
     def test_upsert_overwrites(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": _vec(1.0), "payload": {"x": 1}},
-        ])
-        store.upsert("test", [
-            {"id": "a", "vector": _vec(2.0), "payload": {"x": 2}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": _vec(1.0), "payload": {"x": 1}},
+            ],
+        )
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": _vec(2.0), "payload": {"x": 2}},
+            ],
+        )
         results = store.retrieve("test", ["a"])
         assert results[0]["payload"]["x"] == 2
 
@@ -83,10 +92,13 @@ class TestUpsertRetrieve:
         assert store.retrieve("nonexistent", ["a"]) == []
 
     def test_total_points_after_upsert(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": _vec(1.0), "payload": {}},
-            {"id": "b", "vector": _vec(2.0), "payload": {}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": _vec(1.0), "payload": {}},
+                {"id": "b", "vector": _vec(2.0), "payload": {}},
+            ],
+        )
         assert store.total_points == 2
         assert store.collection_count("test") == 2
 
@@ -95,11 +107,15 @@ class TestUpsertRetrieve:
 # set_payload
 # ---------------------------------------------------------------------------
 
+
 class TestSetPayload:
     def test_set_payload_updates(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": _vec(1.0), "payload": {"x": 1}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": _vec(1.0), "payload": {"x": 1}},
+            ],
+        )
         store.set_payload("test", "a", {"y": 2})
         results = store.retrieve("test", ["a"])
         assert results[0]["payload"]["x"] == 1
@@ -114,13 +130,17 @@ class TestSetPayload:
 # Search
 # ---------------------------------------------------------------------------
 
+
 class TestSearch:
     def test_cosine_search_basic(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": [1, 0, 0, 0], "payload": {}},
-            {"id": "b", "vector": [0, 1, 0, 0], "payload": {}},
-            {"id": "c", "vector": [0.9, 0.1, 0, 0], "payload": {}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": [1, 0, 0, 0], "payload": {}},
+                {"id": "b", "vector": [0, 1, 0, 0], "payload": {}},
+                {"id": "c", "vector": [0.9, 0.1, 0, 0], "payload": {}},
+            ],
+        )
         results = store.search("test", [1, 0, 0, 0], limit=2)
         assert len(results) == 2
         assert results[0]["id"] == "a"  # exact match
@@ -128,9 +148,12 @@ class TestSearch:
 
     def test_search_with_limit(self, store):
         for i in range(20):
-            store.upsert("test", [
-                {"id": f"p{i}", "vector": [float(i), 0, 0, 0], "payload": {}},
-            ])
+            store.upsert(
+                "test",
+                [
+                    {"id": f"p{i}", "vector": [float(i), 0, 0, 0], "payload": {}},
+                ],
+            )
         results = store.search("test", [10, 0, 0, 0], limit=5)
         assert len(results) == 5
 
@@ -143,10 +166,13 @@ class TestSearch:
     def test_dot_product_search(self):
         s = MemoryStore()
         s.create_collection("dots", vector_size=2, distance="dot")
-        s.upsert("dots", [
-            {"id": "a", "vector": [3, 0], "payload": {}},
-            {"id": "b", "vector": [1, 1], "payload": {}},
-        ])
+        s.upsert(
+            "dots",
+            [
+                {"id": "a", "vector": [3, 0], "payload": {}},
+                {"id": "b", "vector": [1, 1], "payload": {}},
+            ],
+        )
         results = s.search("dots", [1, 0], limit=2)
         assert results[0]["id"] == "a"
         assert results[0]["score"] == 3.0
@@ -154,18 +180,24 @@ class TestSearch:
     def test_euclidean_search(self):
         s = MemoryStore()
         s.create_collection("euc", vector_size=2, distance="euclidean")
-        s.upsert("euc", [
-            {"id": "a", "vector": [1, 0], "payload": {}},
-            {"id": "b", "vector": [10, 10], "payload": {}},
-        ])
+        s.upsert(
+            "euc",
+            [
+                {"id": "a", "vector": [1, 0], "payload": {}},
+                {"id": "b", "vector": [10, 10], "payload": {}},
+            ],
+        )
         results = s.search("euc", [1, 0], limit=2)
         assert results[0]["id"] == "a"
         assert results[0]["score"] == 0.0  # neg euclidean, 0 distance
 
     def test_search_zero_vector(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": [1, 0, 0, 0], "payload": {}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": [1, 0, 0, 0], "payload": {}},
+            ],
+        )
         results = store.search("test", [0, 0, 0, 0])
         assert len(results) == 1
         assert results[0]["score"] == 0.0  # cosine with zero = 0
@@ -175,25 +207,31 @@ class TestSearch:
 # Payload filter matching
 # ---------------------------------------------------------------------------
 
+
 class TestPayloadFilters:
     def test_exact_match_filter(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": [1, 0, 0, 0], "payload": {"scene": "s1"}},
-            {"id": "b", "vector": [0.9, 0.1, 0, 0], "payload": {"scene": "s2"}},
-        ])
-        results = store.search(
-            "test", [1, 0, 0, 0], payload_filter={"scene": "s1"}
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": [1, 0, 0, 0], "payload": {"scene": "s1"}},
+                {"id": "b", "vector": [0.9, 0.1, 0, 0], "payload": {"scene": "s2"}},
+            ],
         )
+        results = store.search("test", [1, 0, 0, 0], payload_filter={"scene": "s1"})
         assert len(results) == 1
         assert results[0]["id"] == "a"
 
     def test_range_filter_gte_lte(self, store):
         for i in range(10):
-            store.upsert("test", [
-                {"id": f"p{i}", "vector": [1, 0, 0, 0], "payload": {"ts": i * 100}},
-            ])
+            store.upsert(
+                "test",
+                [
+                    {"id": f"p{i}", "vector": [1, 0, 0, 0], "payload": {"ts": i * 100}},
+                ],
+            )
         results = store.search(
-            "test", [1, 0, 0, 0],
+            "test",
+            [1, 0, 0, 0],
             payload_filter={"ts": {"gte": 300, "lte": 500}},
         )
         ids = {r["id"] for r in results}
@@ -201,48 +239,64 @@ class TestPayloadFilters:
 
     def test_range_filter_lt_gt(self, store):
         for i in range(5):
-            store.upsert("test", [
-                {"id": f"p{i}", "vector": [1, 0, 0, 0], "payload": {"val": i}},
-            ])
+            store.upsert(
+                "test",
+                [
+                    {"id": f"p{i}", "vector": [1, 0, 0, 0], "payload": {"val": i}},
+                ],
+            )
         results = store.search(
-            "test", [1, 0, 0, 0],
+            "test",
+            [1, 0, 0, 0],
             payload_filter={"val": {"gt": 1, "lt": 4}},
         )
         ids = {r["id"] for r in results}
         assert ids == {"p2", "p3"}
 
     def test_any_filter(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": [1, 0, 0, 0], "payload": {"hid": 5}},
-            {"id": "b", "vector": [0.9, 0.1, 0, 0], "payload": {"hid": 10}},
-            {"id": "c", "vector": [0.8, 0.2, 0, 0], "payload": {"hid": 15}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": [1, 0, 0, 0], "payload": {"hid": 5}},
+                {"id": "b", "vector": [0.9, 0.1, 0, 0], "payload": {"hid": 10}},
+                {"id": "c", "vector": [0.8, 0.2, 0, 0], "payload": {"hid": 15}},
+            ],
+        )
         results = store.search(
-            "test", [1, 0, 0, 0],
+            "test",
+            [1, 0, 0, 0],
             payload_filter={"hid": {"any": [5, 15]}},
         )
         ids = {r["id"] for r in results}
         assert ids == {"a", "c"}
 
     def test_combined_filters(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": [1, 0, 0, 0], "payload": {"hid": 5, "ts": 100}},
-            {"id": "b", "vector": [0.9, 0.1, 0, 0], "payload": {"hid": 5, "ts": 200}},
-            {"id": "c", "vector": [0.8, 0.2, 0, 0], "payload": {"hid": 10, "ts": 100}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": [1, 0, 0, 0], "payload": {"hid": 5, "ts": 100}},
+                {"id": "b", "vector": [0.9, 0.1, 0, 0], "payload": {"hid": 5, "ts": 200}},
+                {"id": "c", "vector": [0.8, 0.2, 0, 0], "payload": {"hid": 10, "ts": 100}},
+            ],
+        )
         results = store.search(
-            "test", [1, 0, 0, 0],
+            "test",
+            [1, 0, 0, 0],
             payload_filter={"hid": {"any": [5]}, "ts": {"gte": 150}},
         )
         assert len(results) == 1
         assert results[0]["id"] == "b"
 
     def test_filter_none_value_excluded(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": [1, 0, 0, 0], "payload": {}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": [1, 0, 0, 0], "payload": {}},
+            ],
+        )
         results = store.search(
-            "test", [1, 0, 0, 0],
+            "test",
+            [1, 0, 0, 0],
             payload_filter={"ts": {"gte": 0}},
         )
         assert len(results) == 0  # None < 0 → excluded
@@ -252,30 +306,40 @@ class TestPayloadFilters:
 # Scroll
 # ---------------------------------------------------------------------------
 
+
 class TestScroll:
     def test_scroll_basic(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": [1, 0, 0, 0], "payload": {"ts": 100}},
-            {"id": "b", "vector": [0, 1, 0, 0], "payload": {"ts": 200}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": [1, 0, 0, 0], "payload": {"ts": 100}},
+                {"id": "b", "vector": [0, 1, 0, 0], "payload": {"ts": 200}},
+            ],
+        )
         results = store.scroll("test")
         assert len(results) == 2
 
     def test_scroll_with_filter(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": [1, 0, 0, 0], "payload": {"scene": "s1"}},
-            {"id": "b", "vector": [0, 1, 0, 0], "payload": {"scene": "s2"}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": [1, 0, 0, 0], "payload": {"scene": "s1"}},
+                {"id": "b", "vector": [0, 1, 0, 0], "payload": {"scene": "s2"}},
+            ],
+        )
         results = store.scroll("test", payload_filter={"scene": "s1"})
         assert len(results) == 1
         assert results[0]["id"] == "a"
 
     def test_scroll_with_order_by(self, store):
-        store.upsert("test", [
-            {"id": "a", "vector": [1, 0, 0, 0], "payload": {"ts": 100}},
-            {"id": "b", "vector": [0, 1, 0, 0], "payload": {"ts": 300}},
-            {"id": "c", "vector": [0, 0, 1, 0], "payload": {"ts": 200}},
-        ])
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": [1, 0, 0, 0], "payload": {"ts": 100}},
+                {"id": "b", "vector": [0, 1, 0, 0], "payload": {"ts": 300}},
+                {"id": "c", "vector": [0, 0, 1, 0], "payload": {"ts": 200}},
+            ],
+        )
         results = store.scroll("test", order_by="ts", limit=2)
         assert results[0]["id"] == "b"
         assert results[1]["id"] == "c"

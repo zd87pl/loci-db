@@ -16,11 +16,12 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from engram.backends.memory import MemoryStore
 from engram.schema import WorldState
+from engram.spatial.adaptive import AdaptiveResolution
 from engram.spatial.buckets import expand_bounding_box
 from engram.spatial.hilbert import encode as hilbert_encode
 from engram.temporal.decay import apply_decay
@@ -68,6 +69,7 @@ class LocalEngramClient:
         vector_size: int = 512,
         decay_lambda: float = 1e-4,
         distance: str = "cosine",
+        adaptive: bool = False,
     ) -> None:
         self._store = MemoryStore()
         self._epoch_size_ms = epoch_size_ms
@@ -77,6 +79,20 @@ class LocalEngramClient:
         self._distance = distance
         self._known_collections: set[str] = set()
         self._last_query_stats: QueryStats | None = None
+        self._adaptive = (
+            AdaptiveResolution(
+                base_order=spatial_resolution,
+                max_order=spatial_resolution + 2,
+                density_threshold=50,
+            )
+            if adaptive
+            else None
+        )
+
+    @property
+    def density_stats(self):
+        """Return adaptive resolution density stats, or None if not enabled."""
+        return self._adaptive.stats() if self._adaptive is not None else None
 
     @property
     def last_query_stats(self) -> QueryStats | None:
@@ -115,9 +131,15 @@ class LocalEngramClient:
 
         t_norm = self._normalise_time(state.timestamp_ms, ep)
         hid = hilbert_encode(
-            state.x, state.y, state.z, t_norm,
+            state.x,
+            state.y,
+            state.z,
+            t_norm,
             resolution_order=self._spatial_resolution,
         )
+
+        if self._adaptive is not None:
+            self._adaptive.record(state.x, state.y, state.z, t_norm)
 
         payload = _state_to_payload(state, hid)
 
@@ -136,9 +158,7 @@ class LocalEngramClient:
         scene_chains: dict[str, str] = {}
         groups: dict[str, list[dict]] = {}
 
-        indexed = sorted(
-            enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms)
-        )
+        indexed = sorted(enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms))
 
         for orig_idx, state in indexed:
             point_id = uuid.uuid4().hex
@@ -150,9 +170,15 @@ class LocalEngramClient:
 
             t_norm = self._normalise_time(state.timestamp_ms, ep)
             hid = hilbert_encode(
-                state.x, state.y, state.z, t_norm,
+                state.x,
+                state.y,
+                state.z,
+                t_norm,
                 resolution_order=self._spatial_resolution,
             )
+            if self._adaptive is not None:
+                self._adaptive.record(state.x, state.y, state.z, t_norm)
+
             payload = _state_to_payload(state, hid)
 
             if state.scene_id and state.scene_id in scene_chains:
@@ -203,8 +229,7 @@ class LocalEngramClient:
             epochs = self._list_active_epochs()
 
         collections = [
-            collection_name(e) for e in epochs
-            if collection_name(e) in self._known_collections
+            collection_name(e) for e in epochs if collection_name(e) in self._known_collections
         ]
         stats.shards_searched = len(collections)
 
@@ -219,7 +244,8 @@ class LocalEngramClient:
                 spatial_bounds.get("y_max", 1.0),
                 spatial_bounds.get("z_min", 0.0),
                 spatial_bounds.get("z_max", 1.0),
-                0.0, 1.0,
+                0.0,
+                1.0,
                 resolution_order=self._spatial_resolution,
             )
             if not hids:
@@ -246,13 +272,15 @@ class LocalEngramClient:
             )
             stats.total_candidates += len(hits)
             for hit in hits:
-                all_results.append({
-                    "score": hit["score"],
-                    "timestamp_ms": hit["payload"].get("timestamp_ms", 0),
-                    "payload": hit["payload"],
-                    "vector": hit["vector"],
-                    "id": hit["id"],
-                })
+                all_results.append(
+                    {
+                        "score": hit["score"],
+                        "timestamp_ms": hit["payload"].get("timestamp_ms", 0),
+                        "payload": hit["payload"],
+                        "vector": hit["vector"],
+                        "id": hit["id"],
+                    }
+                )
 
         # Decay and re-rank
         now_ms = int(time.time() * 1000)
@@ -264,10 +292,7 @@ class LocalEngramClient:
         stats.elapsed_ms = (time.perf_counter() - t_start) * 1000
         self._last_query_stats = stats
 
-        return [
-            _payload_to_state(r["payload"], r["id"], r["vector"])
-            for r in all_results
-        ]
+        return [_payload_to_state(r["payload"], r["id"], r["vector"]) for r in all_results]
 
     def predict_and_retrieve(
         self,
@@ -284,6 +309,41 @@ class LocalEngramClient:
             time_window_ms=(now_ms, now_ms + future_horizon_ms),
             limit=limit,
         )
+
+    def funnel_query(
+        self,
+        vector: list[float],
+        spatial_bounds: dict | None = None,
+        time_window_ms: tuple[int, int] | None = None,
+        limit: int = 10,
+    ) -> list[WorldState]:
+        """Multi-scale coarse-to-fine search across scale levels.
+
+        Cascades from sequence → frame → patch, returning results at the
+        finest scale that produced hits.
+
+        Args:
+            vector: Query embedding vector.
+            spatial_bounds: Optional spatial bounding box.
+            time_window_ms: Optional ``(start_ms, end_ms)`` time window.
+            limit: Maximum number of results.
+
+        Returns:
+            List of :class:`WorldState` at the finest available scale.
+        """
+        _SCALE_ORDER = ("sequence", "frame", "patch")
+        best: list[WorldState] = []
+        for scale in _SCALE_ORDER:
+            results = self.query(
+                vector=vector,
+                spatial_bounds=spatial_bounds,
+                time_window_ms=time_window_ms,
+                limit=limit * 3,
+                _extra_payload_filter={"scale_level": scale},
+            )
+            if results:
+                best = results
+        return best[:limit]
 
     def get_trajectory(
         self,
@@ -369,6 +429,7 @@ class LocalEngramClient:
 # ------------------------------------------------------------------
 # Shared payload helpers
 # ------------------------------------------------------------------
+
 
 def _state_to_payload(state: WorldState, hilbert_id: int) -> dict:
     return {

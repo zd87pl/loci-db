@@ -63,7 +63,8 @@ def with_retry(
                         exc,
                     )
                     time.sleep(delay)
-            raise last_exc  # should not reach here
+            assert last_exc is not None  # pragma: no cover
+            raise last_exc
 
         return wrapper
 
@@ -103,4 +104,5 @@ async def async_with_retry(
                 exc,
             )
             await asyncio.sleep(delay)
-    raise last_exc  # should not reach here
+    assert last_exc is not None  # pragma: no cover
+    raise last_exc

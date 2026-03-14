@@ -252,7 +252,7 @@ class EngramClient:
         # Patch next_state_id for intra-batch links
         for col, points in groups.items():
             for point in points:
-                prev_id = point.payload.get("prev_state_id")
+                prev_id = (point.payload or {}).get("prev_state_id")
                 if prev_id:
                     try:
                         self._retry(
@@ -342,14 +342,15 @@ class EngramClient:
             if col not in self._known_collections:
                 continue
             try:
-                hits = self._retry(
-                    self._qdrant.search,
+                resp = self._retry(
+                    self._qdrant.query_points,
                     collection_name=col,
-                    query_vector=vector,
+                    query=vector,
                     query_filter=query_filter,
                     limit=limit,
                     with_vectors=True,
                 )
+                hits = resp.points
             except Exception:
                 continue
             for hit in hits:

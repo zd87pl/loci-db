@@ -279,7 +279,7 @@ class AsyncEngramClient:
         # Patch next_state_id links within the batch
         for col, points in groups.items():
             for i, point in enumerate(points):
-                prev_id = point.payload.get("prev_state_id")
+                prev_id = (point.payload or {}).get("prev_state_id")
                 if prev_id:
                     # Find the predecessor in this batch and update it
                     for p in points:
@@ -379,14 +379,15 @@ class AsyncEngramClient:
         # Parallel fan-out across shards
         async def _search_shard(col: str) -> list[dict]:
             try:
-                hits = await self._retry(
-                    self._qdrant.search,
+                resp = await self._retry(
+                    self._qdrant.query_points,
                     collection_name=col,
-                    query_vector=vector,
+                    query=vector,
                     query_filter=query_filter,
                     limit=limit,
                     with_vectors=True,
                 )
+                hits = resp.points
                 return [
                     {
                         "score": hit.score,

@@ -60,7 +60,7 @@ def encode(
         _clamp(int(round(z * side)), 0, side),
         _clamp(int(round(t_norm * side)), 0, side),
     ]
-    return curve.distance_from_point(coords)
+    return int(curve.distance_from_point(coords))
 
 
 def decode(

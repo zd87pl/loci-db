@@ -35,7 +35,9 @@ def mock_async_qdrant():
         instance.create_collection = AsyncMock()
         instance.create_payload_index = AsyncMock()
         instance.upsert = AsyncMock()
-        instance.search = AsyncMock(return_value=[])
+        _empty_qr = MagicMock()
+        _empty_qr.points = []
+        instance.query_points = AsyncMock(return_value=_empty_qr)
         instance.scroll = AsyncMock(return_value=([], None))
         instance.set_payload = AsyncMock()
         instance.retrieve = AsyncMock(return_value=[])
@@ -222,7 +224,9 @@ async def test_query_with_vectors(async_client, mock_async_qdrant):
         "scale_level": "patch",
         "confidence": 1.0,
     }
-    mock_async_qdrant.search = AsyncMock(return_value=[hit])
+    qr = MagicMock()
+    qr.points = [hit]
+    mock_async_qdrant.query_points = AsyncMock(return_value=qr)
 
     results = await async_client.query(
         vector=[1.0, 2.0, 3.0, 4.0],
@@ -238,14 +242,16 @@ async def test_query_parallel_fanout(async_client, mock_async_qdrant):
     # Create states in two different epochs
     await async_client.insert(_make_state(timestamp_ms=3000))  # epoch 0
     await async_client.insert(_make_state(timestamp_ms=8000))  # epoch 1
-    mock_async_qdrant.search = AsyncMock(return_value=[])
+    _empty_qr = MagicMock()
+    _empty_qr.points = []
+    mock_async_qdrant.query_points = AsyncMock(return_value=_empty_qr)
 
     await async_client.query(
         vector=[1.0, 2.0, 3.0, 4.0],
         time_window_ms=(0, 10_000),
     )
     # Both collections should have been searched
-    assert mock_async_qdrant.search.call_count == 2
+    assert mock_async_qdrant.query_points.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +278,9 @@ async def test_predict_and_retrieve(async_client, mock_async_qdrant):
 
     now_ms = int(_time.time() * 1000)
     await async_client.insert(_make_state(timestamp_ms=now_ms))
-    mock_async_qdrant.search = AsyncMock(return_value=[])
+    _empty_qr = MagicMock()
+    _empty_qr.points = []
+    mock_async_qdrant.query_points = AsyncMock(return_value=_empty_qr)
 
     predicted = [9.0, 8.0, 7.0, 6.0]
     predictor = MagicMock(return_value=predicted)

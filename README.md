@@ -195,9 +195,9 @@ pytest tests/ -v
 
 | Method | Avg latency (ms) | P95 latency (ms) | Recall@10 |
 |:--|--:|--:|--:|
-| Naive Qdrant (3 float-range filters) | 131.72 | 153.65 | 1.000 |
-| Engram (Hilbert bucketing + temporal sharding) | 96.33 | 174.75 | 1.000 |
-| **Speedup** | **1.37×** | — | — |
+| Naive Qdrant (3 float-range filters) | 166.36 | 197.23 | 1.000 |
+| Engram (Hilbert bucketing + temporal sharding) | 120.04 | 216.85 | 1.000 |
+| **Speedup** | **1.39×** | — | — |
 
 Engram's temporal sharding reduces the search space per query by routing
 only to epochs that overlap the time window.  On a production Qdrant server

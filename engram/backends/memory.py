@@ -125,7 +125,7 @@ class MemoryStore:
             score = dist_fn(query_vector, p.vector)
             scored.append({"id": p.id, "vector": p.vector, "payload": p.payload, "score": score})
 
-        scored.sort(key=lambda x: float(x["score"]),  reverse=True)  # type: ignore[arg-type]
+        scored.sort(key=lambda x: float(x["score"]), reverse=True)  # type: ignore[arg-type]
         return scored[:limit]
 
     def scroll(

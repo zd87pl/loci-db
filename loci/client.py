@@ -21,6 +21,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
 from loci.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
 from loci.schema import WorldState
 from loci.spatial.adaptive import AdaptiveResolution
@@ -369,18 +370,43 @@ class LociClient:
         predictor_fn: Callable[[list[float]], list[float]],
         future_horizon_ms: int = 1000,
         limit: int = 5,
-    ) -> list[WorldState]:
+        current_position: tuple[float, float, float] | None = None,
+        spatial_search_radius: float = 0.3,
+        alpha: float = 0.7,
+        return_prediction: bool = False,
+    ) -> list[WorldState] | PredictRetrieveResult:
         """Predict a future state then retrieve nearest neighbours to it.
+
+        When ``current_position`` is provided, returns a full
+        :class:`PredictRetrieveResult` with novelty scoring and timing.
+        Otherwise falls back to the legacy API returning a plain list.
 
         Args:
             context_vector: Current-state embedding.
             predictor_fn: User-supplied world model.
             future_horizon_ms: How far ahead to search (milliseconds).
             limit: Maximum number of results.
+            current_position: Optional (x, y, z) for spatial + novelty scoring.
+            spatial_search_radius: Search radius around current_position.
+            alpha: Weight for vector_sim vs temporal_proximity (default 0.7).
+            return_prediction: Include predicted vector in result.
 
         Returns:
-            List of :class:`WorldState` neighbours of the predicted vector.
+            :class:`PredictRetrieveResult` when current_position is set,
+            otherwise a plain list of :class:`WorldState`.
         """
+        if current_position is not None or return_prediction:
+            ptr = PredictThenRetrieve(self)
+            return ptr.retrieve(
+                context_vector=context_vector,
+                predictor_fn=predictor_fn,
+                future_horizon_ms=future_horizon_ms,
+                current_position=current_position,
+                spatial_search_radius=spatial_search_radius,
+                limit=limit,
+                alpha=alpha,
+                return_prediction=return_prediction,
+            )
         return _predict_and_retrieve(
             self,
             context_vector,

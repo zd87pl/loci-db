@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from loci.backends.memory import MemoryStore
+from loci.retrieval.predict import PredictRetrieveResult
 from loci.schema import WorldState
 from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.hilbert import HilbertIndex
@@ -286,8 +287,30 @@ class LocalLociClient:
         predictor_fn: Callable[[list[float]], list[float]],
         future_horizon_ms: int = 1000,
         limit: int = 5,
-    ) -> list[WorldState]:
-        """Predict-then-retrieve using the local backend."""
+        current_position: tuple[float, float, float] | None = None,
+        spatial_search_radius: float = 0.3,
+        alpha: float = 0.7,
+        return_prediction: bool = False,
+    ) -> list[WorldState] | PredictRetrieveResult:
+        """Predict-then-retrieve using the local backend.
+
+        When ``current_position`` is provided, returns a full
+        :class:`PredictRetrieveResult` with novelty scoring.
+        """
+        if current_position is not None or return_prediction:
+            from loci.retrieval.predict import PredictThenRetrieve
+
+            ptr = PredictThenRetrieve(self)
+            return ptr.retrieve(
+                context_vector=context_vector,
+                predictor_fn=predictor_fn,
+                future_horizon_ms=future_horizon_ms,
+                current_position=current_position,
+                spatial_search_radius=spatial_search_radius,
+                limit=limit,
+                alpha=alpha,
+                return_prediction=return_prediction,
+            )
         predicted = predictor_fn(context_vector)
         now_ms = int(time.time() * 1000)
         return self.query(

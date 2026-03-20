@@ -3,6 +3,7 @@
 from loci.async_client import AsyncLociClient
 from loci.client import LociClient
 from loci.local_client import LocalLociClient, QueryStats
+from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
 from loci.schema import WorldState
 from loci.spatial.adaptive import DensityStats
 from loci.spatial.hilbert import HilbertIndex, SpatialBounds
@@ -13,6 +14,8 @@ __all__ = [
     "HilbertIndex",
     "LociClient",
     "LocalLociClient",
+    "PredictRetrieveResult",
+    "PredictThenRetrieve",
     "QueryStats",
     "SpatialBounds",
     "WorldState",

@@ -1,18 +1,18 @@
-# Engram Roadmap
+# Loci Roadmap
 
 ## v0.1 — Foundation
 
 - [x] WorldState data model with validation
 - [x] Hilbert curve spatial encoding (4D)
 - [x] Temporal sharding with epoch-based collections
-- [x] EngramClient: insert, insert_batch, query
+- [x] LociClient: insert, insert_batch, query
 - [x] Predict-then-retrieve primitive
 - [x] Temporal decay scoring
 - [x] Basic test suite
 
 ## v0.2 — Robustness
 
-- [x] AsyncEngramClient with parallel shard fan-out
+- [x] AsyncLociClient with parallel shard fan-out
 - [x] Causal chain linking in insert and insert_batch
 - [x] Configurable distance metrics (cosine, dot, euclidean)
 - [x] Input validation (confidence, timestamps, spatial bounds)

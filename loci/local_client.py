@@ -1,12 +1,12 @@
-"""LocalEngramClient — full Engram with zero external dependencies.
+"""LocalLociClient — full Loci with zero external dependencies.
 
 Uses the in-memory backend instead of Qdrant.  Identical API surface
-to :class:`EngramClient`, so code that works with LocalEngramClient
+to :class:`LociClient`, so code that works with LocalLociClient
 works with the real client by swapping the constructor.
 
 Use cases:
 - Tests without Docker
-- Benchmarks that isolate Engram's indexing overhead
+- Benchmarks that isolate Loci's indexing overhead
 - Demos and prototyping
 - CI environments
 """
@@ -19,13 +19,13 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from engram.backends.memory import MemoryStore
-from engram.schema import WorldState
-from engram.spatial.adaptive import AdaptiveResolution
-from engram.spatial.buckets import expand_bounding_box
-from engram.spatial.hilbert import encode as hilbert_encode
-from engram.temporal.decay import apply_decay
-from engram.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.backends.memory import MemoryStore
+from loci.schema import WorldState
+from loci.spatial.adaptive import AdaptiveResolution
+from loci.spatial.buckets import expand_bounding_box
+from loci.spatial.hilbert import encode as hilbert_encode
+from loci.temporal.decay import apply_decay
+from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +49,10 @@ class QueryStats:
     elapsed_ms: float = 0.0
 
 
-class LocalEngramClient:
-    """Full Engram client backed by an in-memory store.
+class LocalLociClient:
+    """Full Loci client backed by an in-memory store.
 
-    API-compatible with :class:`EngramClient`.  No Qdrant required.
+    API-compatible with :class:`LociClient`.  No Qdrant required.
 
     Args:
         epoch_size_ms: Width of each temporal shard in milliseconds.
@@ -418,7 +418,7 @@ class LocalEngramClient:
     def _list_active_epochs(self) -> list[int]:
         epochs: list[int] = []
         for col in self._known_collections:
-            if col.startswith("engram_"):
+            if col.startswith("loci_"):
                 try:
                     epochs.append(int(col.split("_", 1)[1]))
                 except ValueError:

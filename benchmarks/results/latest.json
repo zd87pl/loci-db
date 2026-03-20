@@ -14,7 +14,7 @@
     "recall_at_10": 1.0,
     "insert_time_s": 3.15
   },
-  "engram": {
+  "loci": {
     "avg_latency_ms": 120.04,
     "p95_latency_ms": 216.85,
     "recall_at_10": 1.0,

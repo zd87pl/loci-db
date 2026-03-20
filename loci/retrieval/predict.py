@@ -12,12 +12,12 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from engram.client import EngramClient
-    from engram.schema import WorldState
+    from loci.client import LociClient
+    from loci.schema import WorldState
 
 
 def predict_and_retrieve(
-    client: EngramClient,
+    client: LociClient,
     context_vector: list[float],
     predictor_fn: Callable[[list[float]], list[float]],
     future_horizon_ms: int = 1000,
@@ -31,7 +31,7 @@ def predict_and_retrieve(
        filtered to the time window ``[now, now + future_horizon_ms]``.
 
     Args:
-        client: An initialised :class:`EngramClient`.
+        client: An initialised :class:`LociClient`.
         context_vector: The current-state embedding vector.
         predictor_fn: A callable that maps an embedding to a predicted
             future embedding.  This is the user's world model.

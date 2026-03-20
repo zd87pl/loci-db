@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from engram.local_client import LocalEngramClient
-from engram.schema import WorldState
-from engram.spatial.adaptive import DensityStats
+from loci.local_client import LocalLociClient
+from loci.schema import WorldState
+from loci.spatial.adaptive import DensityStats
 
 VEC_SIZE = 4
 
@@ -29,11 +29,11 @@ def _make_state(
 
 class TestAdaptiveDisabled:
     def test_density_stats_none_when_disabled(self):
-        c = LocalEngramClient(vector_size=VEC_SIZE, decay_lambda=0)
+        c = LocalLociClient(vector_size=VEC_SIZE, decay_lambda=0)
         assert c.density_stats is None
 
     def test_works_normally_without_adaptive(self):
-        c = LocalEngramClient(vector_size=VEC_SIZE, decay_lambda=0)
+        c = LocalLociClient(vector_size=VEC_SIZE, decay_lambda=0)
         sid = c.insert(_make_state())
         assert isinstance(sid, str)
         results = c.query(vector=[1, 0, 0, 0])
@@ -43,7 +43,7 @@ class TestAdaptiveDisabled:
 class TestAdaptiveEnabled:
     @pytest.fixture()
     def client(self):
-        return LocalEngramClient(
+        return LocalLociClient(
             vector_size=VEC_SIZE,
             decay_lambda=0,
             adaptive=True,
@@ -90,9 +90,9 @@ class TestAdaptiveEnabled:
 
     def test_hot_cells_detected(self):
         # Use a low density threshold so we can trigger hot cells easily
-        from engram.spatial.adaptive import AdaptiveResolution
+        from loci.spatial.adaptive import AdaptiveResolution
 
-        c = LocalEngramClient(
+        c = LocalLociClient(
             vector_size=VEC_SIZE,
             decay_lambda=0,
             adaptive=True,

@@ -1,4 +1,4 @@
-"""Core data model for Engram — the WorldState dataclass."""
+"""Core data model for Loci — the WorldState dataclass."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 class WorldState:
     """A single spatiotemporal embedding with a 4D address.
 
-    Every vector stored in Engram has a position in (x, y, z, t) space
+    Every vector stored in Loci has a position in (x, y, z, t) space
     plus an arbitrary-dimension embedding vector produced by a world model.
 
     Attributes:

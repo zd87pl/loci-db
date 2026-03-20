@@ -6,7 +6,7 @@ predictor, and demonstrates predict_and_retrieve: finding stored states
 that are similar to where the robot is *predicted* to be in the future.
 
 Requires a local Qdrant instance running on http://localhost:6333, OR
-falls back to the zero-dependency LocalEngramClient automatically.
+falls back to the zero-dependency LocalLociClient automatically.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import math
 import random
 import time
 
-from engram.schema import WorldState
+from loci.schema import WorldState
 
 VECTOR_DIM = 128
 NUM_STATES = 200
@@ -79,9 +79,9 @@ def linear_predictor(context_vector: list[float]) -> list[float]:
 def main() -> None:
     # Try Qdrant, fall back to local
     try:
-        from engram import EngramClient
+        from loci import LociClient
 
-        client = EngramClient(
+        client = LociClient(
             qdrant_url="http://localhost:6333",
             epoch_size_ms=5000,
             spatial_resolution=4,
@@ -90,14 +90,14 @@ def main() -> None:
         client._qdrant.get_collections()
         print("Connected to Qdrant at localhost:6333")
     except Exception:
-        from engram import LocalEngramClient
+        from loci import LocalLociClient
 
-        client = LocalEngramClient(
+        client = LocalLociClient(
             epoch_size_ms=5000,
             spatial_resolution=4,
             vector_size=VECTOR_DIM,
         )
-        print("Qdrant not available — using LocalEngramClient (in-memory)")
+        print("Qdrant not available — using LocalLociClient (in-memory)")
 
     now_ms = int(time.time() * 1000)
     states = make_patrol_states(now_ms)
@@ -148,7 +148,7 @@ def main() -> None:
     print("\n--- Anticipatory Retrieval Concept ---")
     print("The robot is at step {}/{} of its patrol loop.".format(current_idx, NUM_STATES))
     print("The predictor extrapolated its trajectory forward by 2 seconds.")
-    print("Engram found stored states that match where the robot is PREDICTED to be,")
+    print("Loci found stored states that match where the robot is PREDICTED to be,")
     print("enabling the agent to pre-load context about upcoming locations.")
 
 

@@ -1,4 +1,4 @@
-"""Tests for AsyncEngramClient with mocked async Qdrant backend."""
+"""Tests for AsyncLociClient with mocked async Qdrant backend."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from engram.async_client import AsyncEngramClient
-from engram.schema import WorldState
+from loci.async_client import AsyncLociClient
+from loci.schema import WorldState
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -18,7 +18,7 @@ from engram.schema import WorldState
 @pytest.fixture()
 def mock_async_qdrant():
     """Patch AsyncQdrantClient so no real Qdrant is needed."""
-    with patch("engram.async_client.AsyncQdrantClient") as MockCls:
+    with patch("loci.async_client.AsyncQdrantClient") as MockCls:
         instance = MagicMock()
         MockCls.return_value = instance
 
@@ -48,7 +48,7 @@ def mock_async_qdrant():
 
 @pytest.fixture()
 def async_client(mock_async_qdrant):
-    return AsyncEngramClient(
+    return AsyncLociClient(
         qdrant_url="http://fake:6333",
         epoch_size_ms=5000,
         spatial_resolution=4,
@@ -78,16 +78,16 @@ def _make_state(**overrides) -> WorldState:
 
 @pytest.mark.asyncio
 async def test_ensure_collection_creates_on_404(async_client, mock_async_qdrant):
-    await async_client._ensure_collection("engram_0")
+    await async_client._ensure_collection("loci_0")
     mock_async_qdrant.create_collection.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_ensure_collection_idempotent(async_client, mock_async_qdrant):
-    await async_client._ensure_collection("engram_0")
+    await async_client._ensure_collection("loci_0")
     mock_async_qdrant.reset_mock()
 
-    await async_client._ensure_collection("engram_0")
+    await async_client._ensure_collection("loci_0")
     mock_async_qdrant.get_collection.assert_not_called()
 
 
@@ -103,7 +103,7 @@ async def test_ensure_collection_propagates_500(mock_async_qdrant):
             headers=httpx.Headers(),
         )
     )
-    client = AsyncEngramClient.__new__(AsyncEngramClient)
+    client = AsyncLociClient.__new__(AsyncLociClient)
     client._qdrant = mock_async_qdrant
     client._vector_size = 4
     client._distance = MagicMock()
@@ -111,7 +111,7 @@ async def test_ensure_collection_propagates_500(mock_async_qdrant):
     client._collection_locks = {}
 
     with pytest.raises(UnexpectedResponse):
-        await client._ensure_collection("engram_0")
+        await client._ensure_collection("loci_0")
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +138,7 @@ async def test_insert_does_not_mutate(async_client, mock_async_qdrant):
 async def test_insert_routes_to_correct_collection(async_client, mock_async_qdrant):
     await async_client.insert(_make_state(timestamp_ms=10_000))
     upsert_call = mock_async_qdrant.upsert.call_args
-    assert upsert_call.kwargs["collection_name"] == "engram_2"
+    assert upsert_call.kwargs["collection_name"] == "loci_2"
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +261,7 @@ async def test_query_parallel_fanout(async_client, mock_async_qdrant):
 
 def test_invalid_distance_raises():
     with pytest.raises(ValueError, match="distance"):
-        AsyncEngramClient(
+        AsyncLociClient(
             qdrant_url="http://fake:6333",
             distance="manhattan",
         )
@@ -301,6 +301,6 @@ async def test_predict_and_retrieve(async_client, mock_async_qdrant):
 
 @pytest.mark.asyncio
 async def test_context_manager(mock_async_qdrant):
-    async with AsyncEngramClient(qdrant_url="http://fake:6333", vector_size=4) as client:
-        assert isinstance(client, AsyncEngramClient)
+    async with AsyncLociClient(qdrant_url="http://fake:6333", vector_size=4) as client:
+        assert isinstance(client, AsyncLociClient)
     mock_async_qdrant.close.assert_called_once()

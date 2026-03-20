@@ -1,8 +1,8 @@
-# Engram
+# Loci
 
 **A 4D spatiotemporal vector database middleware for AI world models.**
 
-[![CI](https://github.com/zd87pl/engram-db/actions/workflows/ci.yml/badge.svg)](https://github.com/zd87pl/engram-db/actions)
+[![CI](https://github.com/zd87pl/loci-db/actions/workflows/ci.yml/badge.svg)](https://github.com/zd87pl/loci-db/actions)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
@@ -19,7 +19,7 @@ concept of "predict the future then find what's nearby."
 
 ## The Solution
 
-Engram is a middleware layer on top of [Qdrant](https://qdrant.tech) that makes
+Loci is a middleware layer on top of [Qdrant](https://qdrant.tech) that makes
 spatiotemporal structure **first-class** through three novel primitives:
 
 ### 1. Hilbert Curve Spatial Bucketing
@@ -29,7 +29,7 @@ Spatial bounding-box queries decompose into a `MatchAny` filter on Hilbert bucke
 IDs — replacing 3 independent float-range filters with a single integer set lookup.
 
 ```
-         Naive Qdrant               Engram
+         Naive Qdrant               Loci
     ┌──────────────────┐     ┌──────────────────┐
     │ x_min ≤ x ≤ x_max│     │                  │
     │ y_min ≤ y ≤ y_max│ →   │ hilbert_id ∈ {…} │
@@ -40,7 +40,7 @@ IDs — replacing 3 independent float-range filters with a single integer set lo
 ### 2. Temporal Sharding
 
 Automatic routing of vectors to **time-partitioned Qdrant collections**
-(`engram_{epoch_id}`). Configurable epoch size. Queries fan out only to
+(`loci_{epoch_id}`). Configurable epoch size. Queries fan out only to
 epochs that overlap the requested time window — with the async client,
 all shards are searched **concurrently** via `asyncio.gather`.
 
@@ -67,16 +67,16 @@ are similar to what the world model *predicts will happen next*.
 ## Quick Start
 
 ```bash
-pip install engram-db          # or: pip install -e ".[dev]"
+pip install loci-db          # or: pip install -e ".[dev]"
 docker run -p 6333:6333 qdrant/qdrant
 ```
 
 ### Sync API
 
 ```python
-from engram import EngramClient, WorldState
+from loci import LociClient, WorldState
 
-client = EngramClient(
+client = LociClient(
     "http://localhost:6333",
     vector_size=512,
     epoch_size_ms=5000,
@@ -120,9 +120,9 @@ trajectory = client.get_trajectory(state_id, steps_back=20, steps_forward=20)
 ### Async API (parallel shard fan-out)
 
 ```python
-from engram import AsyncEngramClient
+from loci import AsyncLociClient
 
-async with AsyncEngramClient(
+async with AsyncLociClient(
     "http://localhost:6333",
     vector_size=512,
     distance="cosine",
@@ -162,7 +162,7 @@ class WorldState:
 ```
 ┌───────────────────────────────────────────────┐
 │              Application Layer                │
-│  EngramClient / AsyncEngramClient             │
+│  LociClient / AsyncLociClient             │
 │  insert · query · predict_and_retrieve        │
 ├───────────────────────────────────────────────┤
 │              Retrieval Layer                  │
@@ -183,8 +183,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design document.
 ## Development
 
 ```bash
-git clone https://github.com/zd87pl/engram-db.git
-cd engram-db
+git clone https://github.com/zd87pl/loci-db.git
+cd loci-db
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
@@ -196,10 +196,10 @@ pytest tests/ -v
 | Method | Avg latency (ms) | P95 latency (ms) | Recall@10 |
 |:--|--:|--:|--:|
 | Naive Qdrant (3 float-range filters) | 166.36 | 197.23 | 1.000 |
-| Engram (Hilbert bucketing + temporal sharding) | 120.04 | 216.85 | 1.000 |
+| Loci (Hilbert bucketing + temporal sharding) | 120.04 | 216.85 | 1.000 |
 | **Speedup** | **1.39×** | — | — |
 
-Engram's temporal sharding reduces the search space per query by routing
+Loci's temporal sharding reduces the search space per query by routing
 only to epochs that overlap the time window.  On a production Qdrant server
 with payload indexes, the Hilbert `MatchAny` integer-set pre-filter provides
 additional speedup over float-range evaluation — the numbers above use

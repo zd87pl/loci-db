@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from engram.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 
 def test_epoch_id_basic() -> None:
@@ -13,8 +13,8 @@ def test_epoch_id_basic() -> None:
 
 
 def test_collection_name() -> None:
-    assert collection_name(0) == "engram_0"
-    assert collection_name(42) == "engram_42"
+    assert collection_name(0) == "loci_0"
+    assert collection_name(42) == "loci_42"
 
 
 def test_epochs_in_range_single() -> None:

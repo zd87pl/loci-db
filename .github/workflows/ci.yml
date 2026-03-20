@@ -42,7 +42,7 @@ jobs:
           pip install mypy
 
       - name: Run mypy
-        run: mypy engram/ --ignore-missing-imports
+        run: mypy loci/ --ignore-missing-imports
 
   lint:
     runs-on: ubuntu-latest
@@ -58,7 +58,7 @@ jobs:
         run: pip install ruff
 
       - name: Check formatting
-        run: ruff format --check engram/ tests/
+        run: ruff format --check loci/ tests/
 
       - name: Lint
-        run: ruff check engram/ tests/
+        run: ruff check loci/ tests/

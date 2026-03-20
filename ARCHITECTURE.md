@@ -1,11 +1,11 @@
-# Engram Architecture
+# Loci Architecture
 
 ## Four-Layer Design
 
 ```
 ┌───────────────────────────────────────────────┐
 │              Application Layer                │
-│  EngramClient / AsyncEngramClient             │
+│  LociClient / AsyncLociClient             │
 │  insert · query · predict_and_retrieve        │
 ├───────────────────────────────────────────────┤
 │              Retrieval Layer                  │
@@ -23,7 +23,7 @@
 
 ### Layer 1: Storage (Qdrant)
 
-Each temporal epoch maps to a separate Qdrant collection (`engram_{epoch_id}`).
+Each temporal epoch maps to a separate Qdrant collection (`loci_{epoch_id}`).
 Collections are created lazily on first insert.  Payload indices:
 
 | Field          | Type      | Purpose                        |
@@ -69,8 +69,8 @@ Always returns results at the finest available granularity.
 
 Two client implementations share identical APIs:
 
-- **`EngramClient`** — Synchronous.  Sequential shard iteration.
-- **`AsyncEngramClient`** — Asynchronous.  Parallel shard fan-out via
+- **`LociClient`** — Synchronous.  Sequential shard iteration.
+- **`AsyncLociClient`** — Asynchronous.  Parallel shard fan-out via
   `asyncio.gather`.  Async-safe collection creation with per-collection locks.
 
 Both support:
@@ -105,7 +105,7 @@ predict_and_retrieve(context_vector, predictor_fn, horizon)
 
 ## Causal Linking
 
-On `insert()`, Engram automatically finds the most recent state in the
+On `insert()`, Loci automatically finds the most recent state in the
 same `scene_id` and links `prev_state_id` / `next_state_id`.  On
 `insert_batch()`, states are sorted by `(scene_id, timestamp_ms)` and
 linked within the batch.  This enables `get_trajectory()` to walk the

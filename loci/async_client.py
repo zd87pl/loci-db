@@ -1,4 +1,4 @@
-"""Async EngramClient — parallel shard fan-out for high-throughput workloads."""
+"""Async LociClient — parallel shard fan-out for high-throughput workloads."""
 
 from __future__ import annotations
 
@@ -22,12 +22,12 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from engram.schema import WorldState
-from engram.spatial.adaptive import AdaptiveResolution
-from engram.spatial.buckets import expand_bounding_box
-from engram.spatial.hilbert import encode as hilbert_encode
-from engram.temporal.decay import apply_decay
-from engram.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.schema import WorldState
+from loci.spatial.adaptive import AdaptiveResolution
+from loci.spatial.buckets import expand_bounding_box
+from loci.spatial.hilbert import encode as hilbert_encode
+from loci.temporal.decay import apply_decay
+from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ _DISTANCE_MAP: dict[str, Distance] = {
 }
 
 
-class AsyncEngramClient:
+class AsyncLociClient:
     """Async high-level client with parallel shard fan-out.
 
     All query operations fan out across temporal shards concurrently
@@ -93,7 +93,7 @@ class AsyncEngramClient:
 
     async def _retry(self, fn, *args, **kwargs):
         """Execute an async fn with retry logic."""
-        from engram.retry import async_with_retry
+        from loci.retry import async_with_retry
 
         return await async_with_retry(
             fn,
@@ -112,7 +112,7 @@ class AsyncEngramClient:
         """Close the underlying Qdrant connection."""
         await self._qdrant.close()
 
-    async def __aenter__(self) -> AsyncEngramClient:
+    async def __aenter__(self) -> AsyncLociClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -584,7 +584,7 @@ class AsyncEngramClient:
     def _list_active_epochs(self) -> list[int]:
         epochs: list[int] = []
         for col in self._known_collections:
-            if col.startswith("engram_"):
+            if col.startswith("loci_"):
                 try:
                     epochs.append(int(col.split("_", 1)[1]))
                 except ValueError:

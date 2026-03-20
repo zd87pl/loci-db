@@ -1,4 +1,4 @@
-"""Integration tests for LocalEngramClient — full Engram with no Qdrant."""
+"""Integration tests for LocalLociClient — full Loci with no Qdrant."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import time
 
 import pytest
 
-from engram.local_client import LocalEngramClient
-from engram.schema import WorldState
+from loci.local_client import LocalLociClient
+from loci.schema import WorldState
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -36,7 +36,7 @@ def _make_state(
 
 @pytest.fixture()
 def client():
-    return LocalEngramClient(
+    return LocalLociClient(
         epoch_size_ms=5000,
         spatial_resolution=4,
         vector_size=VEC_SIZE,
@@ -193,7 +193,7 @@ class TestQueryStats:
         assert client.last_query_stats.decay_applied is False
 
     def test_stats_decay_enabled(self):
-        c = LocalEngramClient(vector_size=VEC_SIZE, decay_lambda=1e-4)
+        c = LocalLociClient(vector_size=VEC_SIZE, decay_lambda=1e-4)
         c.insert(_make_state())
         c.query(vector=[1, 0, 0, 0])
         assert c.last_query_stats.decay_applied is True
@@ -209,7 +209,7 @@ class TestQueryStats:
 
 class TestDecay:
     def test_decay_reranks_results(self):
-        c = LocalEngramClient(vector_size=VEC_SIZE, decay_lambda=0.01)
+        c = LocalLociClient(vector_size=VEC_SIZE, decay_lambda=0.01)
         # Insert old and new states with same vector
         c.insert(_make_state(ts=1000, vector=[1, 0, 0, 0]))
         now_ms = int(time.time() * 1000)
@@ -289,14 +289,14 @@ class TestPredictAndRetrieve:
 
 class TestDistanceMetrics:
     def test_dot_product_distance(self):
-        c = LocalEngramClient(vector_size=VEC_SIZE, distance="dot", decay_lambda=0)
+        c = LocalLociClient(vector_size=VEC_SIZE, distance="dot", decay_lambda=0)
         c.insert(_make_state(vector=[3, 0, 0, 0]))
         c.insert(_make_state(x=0.1, y=0.1, z=0.1, vector=[1, 0, 0, 0]))
         results = c.query(vector=[1, 0, 0, 0], limit=2)
         assert len(results) >= 1
 
     def test_euclidean_distance(self):
-        c = LocalEngramClient(vector_size=VEC_SIZE, distance="euclidean", decay_lambda=0)
+        c = LocalLociClient(vector_size=VEC_SIZE, distance="euclidean", decay_lambda=0)
         c.insert(_make_state(vector=[1, 0, 0, 0]))
         results = c.query(vector=[1, 0, 0, 0], limit=1)
         assert len(results) == 1

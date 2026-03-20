@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from engram.spatial.adaptive import AdaptiveResolution
+from loci.spatial.adaptive import AdaptiveResolution
 
 
 class TestAdaptiveResolution:

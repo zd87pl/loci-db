@@ -9,7 +9,7 @@ from __future__ import annotations
 import itertools
 import math
 
-from engram.spatial.hilbert import _DEFAULT_ORDER, _clamp, _make_curve
+from loci.spatial.hilbert import _DEFAULT_ORDER, _clamp, _make_curve
 
 
 def compute_bucket_id(
@@ -22,9 +22,9 @@ def compute_bucket_id(
 ) -> int:
     """Return the Hilbert bucket ID for a single point.
 
-    This is a convenience wrapper that mirrors :func:`engram.spatial.hilbert.encode`.
+    This is a convenience wrapper that mirrors :func:`loci.spatial.hilbert.encode`.
     """
-    from engram.spatial.hilbert import encode
+    from loci.spatial.hilbert import encode
 
     return encode(x, y, z, t_norm, resolution_order=resolution_order)
 

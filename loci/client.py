@@ -1,4 +1,4 @@
-"""Main EngramClient class — primary API surface for the Engram database."""
+"""Main LociClient class — primary API surface for the Loci database."""
 
 from __future__ import annotations
 
@@ -21,13 +21,13 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from engram.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
-from engram.schema import WorldState
-from engram.spatial.adaptive import AdaptiveResolution
-from engram.spatial.buckets import expand_bounding_box
-from engram.spatial.hilbert import encode as hilbert_encode
-from engram.temporal.decay import apply_decay
-from engram.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
+from loci.schema import WorldState
+from loci.spatial.adaptive import AdaptiveResolution
+from loci.spatial.buckets import expand_bounding_box
+from loci.spatial.hilbert import encode as hilbert_encode
+from loci.temporal.decay import apply_decay
+from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ _DISTANCE_MAP: dict[str, Distance] = {
 }
 
 
-class EngramClient:
+class LociClient:
     """High-level client for inserting, querying, and navigating WorldStates.
 
     Wraps a Qdrant instance and adds Hilbert-curve spatial bucketing,
@@ -91,7 +91,7 @@ class EngramClient:
 
     def _retry(self, fn, *args, **kwargs):
         """Execute fn with retry logic."""
-        from engram.retry import with_retry
+        from loci.retry import with_retry
 
         wrapped = with_retry(self._max_retries, self._retry_backoff)(fn)
         return wrapped(*args, **kwargs)
@@ -421,7 +421,7 @@ class EngramClient:
         Returns:
             List of :class:`WorldState` at the finest available scale.
         """
-        from engram.retrieval.funnel import funnel_search
+        from loci.retrieval.funnel import funnel_search
 
         return funnel_search(self, vector, spatial_bounds, time_window_ms, limit)
 
@@ -581,7 +581,7 @@ class EngramClient:
         """Return epoch IDs for all known collections."""
         epochs: list[int] = []
         for col in self._known_collections:
-            if col.startswith("engram_"):
+            if col.startswith("loci_"):
                 try:
                     epochs.append(int(col.split("_", 1)[1]))
                 except ValueError:

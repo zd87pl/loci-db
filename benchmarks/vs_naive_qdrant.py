@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark: Engram middleware (Hilbert bucketing + temporal sharding)
+"""Benchmark: Loci middleware (Hilbert bucketing + temporal sharding)
 vs naive Qdrant float-range filters.
 
 Uses qdrant-client's in-memory mode — same HNSW engine, zero external deps.
@@ -29,9 +29,9 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from engram.spatial.buckets import expand_bounding_box
-from engram.spatial.hilbert import encode as hilbert_encode
-from engram.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.spatial.buckets import expand_bounding_box
+from loci.spatial.hilbert import encode as hilbert_encode
+from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 # ── Configuration ──────────────────────────────────────────────────────────
 VECTOR_DIM = 512
@@ -164,10 +164,10 @@ def query_naive(qdrant: QdrantClient, q: dict) -> list[str]:
     return [str(h.id) for h in resp.points]
 
 
-# ── Engram (Hilbert bucketing + temporal sharding) ─────────────────────────
+# ── Loci (Hilbert bucketing + temporal sharding) ─────────────────────────
 
 
-def setup_engram(qdrant: QdrantClient, data: list[dict]) -> dict[str, int]:
+def setup_loci(qdrant: QdrantClient, data: list[dict]) -> dict[str, int]:
     """Insert all points into epoch-sharded collections with Hilbert payloads.
 
     Returns a mapping from Qdrant point ID → data index.
@@ -212,8 +212,8 @@ def setup_engram(qdrant: QdrantClient, data: list[dict]) -> dict[str, int]:
     return id_map
 
 
-def query_engram(qdrant: QdrantClient, q: dict, known_collections: set[str]) -> list[str]:
-    """Run an Engram query: Hilbert MatchAny + temporal shard routing.
+def query_loci(qdrant: QdrantClient, q: dict, known_collections: set[str]) -> list[str]:
+    """Run an Loci query: Hilbert MatchAny + temporal shard routing.
 
     Each shard is over-fetched (limit * 3) to account for cross-shard
     merging, then results are globally ranked and truncated to LIMIT.
@@ -338,11 +338,11 @@ def main() -> None:
     qdrant_url = os.environ.get("QDRANT_URL", "")
     if qdrant_url:
         naive_client = QdrantClient(url=qdrant_url)
-        engram_qdrant = QdrantClient(url=qdrant_url)
+        loci_qdrant = QdrantClient(url=qdrant_url)
         print(f"  Using remote Qdrant at {qdrant_url}")
     else:
         naive_client = QdrantClient(location=":memory:")
-        engram_qdrant = QdrantClient(location=":memory:")
+        loci_qdrant = QdrantClient(location=":memory:")
         print("  Using in-memory Qdrant (set QDRANT_URL for remote)")
 
     t0 = time.perf_counter()
@@ -350,14 +350,14 @@ def main() -> None:
     naive_insert_s = time.perf_counter() - t0
     print(f"  Inserted {NUM_VECTORS} points in {naive_insert_s:.2f}s")
 
-    # ── Setup Engram ───────────────────────────────────────────────────
-    print("Setting up Engram (Hilbert bucketing + temporal sharding)...")
+    # ── Setup Loci ───────────────────────────────────────────────────
+    print("Setting up Loci (Hilbert bucketing + temporal sharding)...")
     t0 = time.perf_counter()
-    engram_id_map = setup_engram(engram_qdrant, data)
-    engram_insert_s = time.perf_counter() - t0
+    loci_id_map = setup_loci(loci_qdrant, data)
+    loci_insert_s = time.perf_counter() - t0
     known_collections = {collection_name(epoch_id(d["timestamp_ms"], EPOCH_SIZE_MS)) for d in data}
     num_shards = len(known_collections)
-    print(f"  Inserted {NUM_VECTORS} points across {num_shards} shards in {engram_insert_s:.2f}s")
+    print(f"  Inserted {NUM_VECTORS} points across {num_shards} shards in {loci_insert_s:.2f}s")
 
     # ── Ground truth ───────────────────────────────────────────────────
     print("\nComputing brute-force ground truth for recall@10...")
@@ -375,29 +375,29 @@ def main() -> None:
         naive_latencies.append(elapsed_ms)
         naive_recalls.append(compute_recall(results, ground_truths[i], naive_id_map))
 
-    engram_latencies = []
-    engram_recalls = []
+    loci_latencies = []
+    loci_recalls = []
     for i, q in enumerate(queries):
         t0 = time.perf_counter()
-        results = query_engram(engram_qdrant, q, known_collections)
+        results = query_loci(loci_qdrant, q, known_collections)
         elapsed_ms = (time.perf_counter() - t0) * 1000
-        engram_latencies.append(elapsed_ms)
-        engram_recalls.append(compute_recall(results, ground_truths[i], engram_id_map))
+        loci_latencies.append(elapsed_ms)
+        loci_recalls.append(compute_recall(results, ground_truths[i], loci_id_map))
 
     # ── Results ────────────────────────────────────────────────────────
     naive_avg = statistics.mean(naive_latencies)
     naive_p95 = sorted(naive_latencies)[int(0.95 * len(naive_latencies))]
     naive_recall = statistics.mean(naive_recalls)
 
-    engram_avg = statistics.mean(engram_latencies)
-    engram_p95 = sorted(engram_latencies)[int(0.95 * len(engram_latencies))]
-    engram_recall = statistics.mean(engram_recalls)
+    loci_avg = statistics.mean(loci_latencies)
+    loci_p95 = sorted(loci_latencies)[int(0.95 * len(loci_latencies))]
+    loci_recall = statistics.mean(loci_recalls)
 
-    speedup_avg = naive_avg / engram_avg if engram_avg > 0 else float("inf")
-    speedup_p95 = naive_p95 / engram_p95 if engram_p95 > 0 else float("inf")
+    speedup_avg = naive_avg / loci_avg if loci_avg > 0 else float("inf")
+    speedup_p95 = naive_p95 / loci_p95 if loci_p95 > 0 else float("inf")
 
     print("=" * 68)
-    print(f"  Engram Benchmark — {NUM_VECTORS:,} points, {NUM_QUERIES} queries, dim={VECTOR_DIM}")
+    print(f"  Loci Benchmark — {NUM_VECTORS:,} points, {NUM_QUERIES} queries, dim={VECTOR_DIM}")
     print(f"  {num_shards} temporal shards, Hilbert resolution={SPATIAL_RESOLUTION}")
     print("=" * 68)
     header = (
@@ -406,7 +406,7 @@ def main() -> None:
     print(header)
     print("-" * 20 + "+" + "-" * 19 + "+" + "-" * 19 + "+" + "-" * 11)
     print(f"{'Naive Qdrant':<20}| {naive_avg:>17.2f} | {naive_p95:>17.2f} | {naive_recall:>9.3f}")
-    print(f"{'Engram':<20}| {engram_avg:>17.2f} | {engram_p95:>17.2f} | {engram_recall:>9.3f}")
+    print(f"{'Loci':<20}| {loci_avg:>17.2f} | {loci_p95:>17.2f} | {loci_recall:>9.3f}")
     print(f"{'Speedup':<20}| {speedup_avg:>16.2f}x | {speedup_p95:>16.2f}x |")
     print("=" * 68)
 
@@ -427,11 +427,11 @@ def main() -> None:
             "recall_at_10": round(naive_recall, 3),
             "insert_time_s": round(naive_insert_s, 2),
         },
-        "engram": {
-            "avg_latency_ms": round(engram_avg, 2),
-            "p95_latency_ms": round(engram_p95, 2),
-            "recall_at_10": round(engram_recall, 3),
-            "insert_time_s": round(engram_insert_s, 2),
+        "loci": {
+            "avg_latency_ms": round(loci_avg, 2),
+            "p95_latency_ms": round(loci_p95, 2),
+            "recall_at_10": round(loci_recall, 3),
+            "insert_time_s": round(loci_insert_s, 2),
         },
         "speedup": {
             "avg_latency": round(speedup_avg, 2),

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from engram.retrieval.predict import predict_and_retrieve
-from engram.schema import WorldState
+from loci.retrieval.predict import predict_and_retrieve
+from loci.schema import WorldState
 
 
 def test_predict_and_retrieve_calls_predictor() -> None:
@@ -40,7 +40,7 @@ def test_predict_and_retrieve_time_window() -> None:
     mock_client = MagicMock()
     mock_client.query.return_value = []
 
-    with patch("engram.retrieval.predict.time") as mock_time:
+    with patch("loci.retrieval.predict.time") as mock_time:
         mock_time.time.return_value = 10.0  # 10 000 ms
         predict_and_retrieve(mock_client, [0.0], predictor_fn, future_horizon_ms=500)
 

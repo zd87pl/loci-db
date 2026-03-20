@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from engram.backends.memory import MemoryStore
+from loci.backends.memory import MemoryStore
 
 # ---------------------------------------------------------------------------
 # Fixtures

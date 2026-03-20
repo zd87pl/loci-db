@@ -470,44 +470,118 @@ class AsyncLociClient:
         steps_back: int = 10,
         steps_forward: int = 10,
     ) -> list[WorldState]:
-        """Follow causal links to reconstruct a trajectory.
-
-        Args:
-            state_id: ID of the anchor state.
-            steps_back: Number of predecessors to follow.
-            steps_forward: Number of successors to follow.
-
-        Returns:
-            Ordered list of states from oldest to newest.
-        """
+        """Reconstruct a trajectory using scroll API with scene_id filter."""
         anchor = await self._get_state_by_id(state_id)
         if anchor is None:
             return []
+        if not anchor.scene_id:
+            return [anchor]
 
-        backward: list[WorldState] = []
-        current = anchor
-        for _ in range(steps_back):
-            if current.prev_state_id is None:
-                break
-            prev = await self._get_state_by_id(current.prev_state_id)
-            if prev is None:
-                break
-            backward.append(prev)
-            current = prev
-        backward.reverse()
+        total_needed = steps_back + 1 + steps_forward
 
-        forward: list[WorldState] = []
-        current = anchor
-        for _ in range(steps_forward):
-            if current.next_state_id is None:
-                break
-            nxt = await self._get_state_by_id(current.next_state_id)
-            if nxt is None:
-                break
-            forward.append(nxt)
-            current = nxt
+        async def _scroll_shard(col: str) -> list[WorldState]:
+            try:
+                hits = await self._retry(
+                    self._qdrant.scroll,
+                    collection_name=col,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="scene_id",
+                                match=MatchValue(value=anchor.scene_id),
+                            ),
+                        ]
+                    ),
+                    limit=total_needed * 2,
+                    order_by="timestamp_ms",
+                    with_vectors=True,
+                )
+                points = hits[0] if isinstance(hits, tuple) else hits
+                results = []
+                for pt in points:
+                    vec = pt.vector
+                    if isinstance(vec, dict):
+                        vec = list(vec.values())[0] if vec else []
+                    results.append(_payload_to_state(pt.payload, pt.id, vec))
+                return results
+            except Exception:
+                return []
 
-        return backward + [anchor] + forward
+        shard_results = await asyncio.gather(
+            *(_scroll_shard(col) for col in list(self._known_collections))
+        )
+        all_states: list[WorldState] = []
+        for batch in shard_results:
+            all_states.extend(batch)
+
+        all_states.sort(key=lambda s: s.timestamp_ms)
+        anchor_idx = None
+        for i, s in enumerate(all_states):
+            if s.id == state_id:
+                anchor_idx = i
+                break
+
+        if anchor_idx is None:
+            return [anchor]
+
+        start = max(0, anchor_idx - steps_back)
+        end = min(len(all_states), anchor_idx + steps_forward + 1)
+        return all_states[start:end]
+
+    async def get_causal_context(
+        self,
+        state_id: str,
+        window_ms: int = 5000,
+    ) -> list[WorldState]:
+        """Return all states within ±window_ms in the same scene_id."""
+        anchor = await self._get_state_by_id(state_id)
+        if anchor is None or not anchor.scene_id:
+            return []
+
+        t_min = anchor.timestamp_ms - window_ms
+        t_max = anchor.timestamp_ms + window_ms
+
+        async def _scroll_shard(col: str) -> list[WorldState]:
+            try:
+                hits = await self._retry(
+                    self._qdrant.scroll,
+                    collection_name=col,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="scene_id",
+                                match=MatchValue(value=anchor.scene_id),
+                            ),
+                            FieldCondition(
+                                key="timestamp_ms",
+                                range=Range(gte=t_min, lte=t_max),
+                            ),
+                        ]
+                    ),
+                    limit=100,
+                    order_by="timestamp_ms",
+                    with_vectors=True,
+                )
+                points = hits[0] if isinstance(hits, tuple) else hits
+                results = []
+                for pt in points:
+                    vec = pt.vector
+                    if isinstance(vec, dict):
+                        vec = list(vec.values())[0] if vec else []
+                    results.append(_payload_to_state(pt.payload, pt.id, vec))
+                return results
+            except Exception:
+                return []
+
+        shard_results = await asyncio.gather(
+            *(_scroll_shard(col) for col in list(self._known_collections))
+        )
+        context: list[WorldState] = []
+        for batch in shard_results:
+            context.extend(batch)
+
+        context.sort(key=lambda s: s.timestamp_ms)
+        return context
 
     # ------------------------------------------------------------------
     # Helpers

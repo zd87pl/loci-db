@@ -360,34 +360,68 @@ class LocalLociClient:
         steps_back: int = 10,
         steps_forward: int = 10,
     ) -> list[WorldState]:
+        """Reconstruct a trajectory using scroll with scene_id filter."""
         anchor = self._get_state_by_id(state_id)
         if anchor is None:
             return []
+        if not anchor.scene_id:
+            return [anchor]
 
-        backward: list[WorldState] = []
-        current = anchor
-        for _ in range(steps_back):
-            if current.prev_state_id is None:
-                break
-            prev = self._get_state_by_id(current.prev_state_id)
-            if prev is None:
-                break
-            backward.append(prev)
-            current = prev
-        backward.reverse()
+        total_needed = steps_back + 1 + steps_forward
+        all_states: list[WorldState] = []
+        for col in list(self._known_collections):
+            hits = self._store.scroll(
+                collection=col,
+                payload_filter={"scene_id": anchor.scene_id},
+                limit=total_needed * 2,
+                order_by="timestamp_ms",
+            )
+            for hit in hits:
+                all_states.append(_payload_to_state(hit["payload"], hit["id"], hit["vector"]))
 
-        forward: list[WorldState] = []
-        current = anchor
-        for _ in range(steps_forward):
-            if current.next_state_id is None:
+        all_states.sort(key=lambda s: s.timestamp_ms)
+        anchor_idx = None
+        for i, s in enumerate(all_states):
+            if s.id == state_id:
+                anchor_idx = i
                 break
-            nxt = self._get_state_by_id(current.next_state_id)
-            if nxt is None:
-                break
-            forward.append(nxt)
-            current = nxt
 
-        return backward + [anchor] + forward
+        if anchor_idx is None:
+            return [anchor]
+
+        start = max(0, anchor_idx - steps_back)
+        end = min(len(all_states), anchor_idx + steps_forward + 1)
+        return all_states[start:end]
+
+    def get_causal_context(
+        self,
+        state_id: str,
+        window_ms: int = 5000,
+    ) -> list[WorldState]:
+        """Return all states within ±window_ms of the given state in the same scene."""
+        anchor = self._get_state_by_id(state_id)
+        if anchor is None or not anchor.scene_id:
+            return []
+
+        t_min = anchor.timestamp_ms - window_ms
+        t_max = anchor.timestamp_ms + window_ms
+
+        context: list[WorldState] = []
+        for col in list(self._known_collections):
+            hits = self._store.scroll(
+                collection=col,
+                payload_filter={
+                    "scene_id": anchor.scene_id,
+                    "timestamp_ms": {"gte": t_min, "lte": t_max},
+                },
+                limit=100,
+                order_by="timestamp_ms",
+            )
+            for hit in hits:
+                context.append(_payload_to_state(hit["payload"], hit["id"], hit["vector"]))
+
+        context.sort(key=lambda s: s.timestamp_ms)
+        return context
 
     # ------------------------------------------------------------------
     # Helpers

@@ -22,8 +22,7 @@ from dataclasses import dataclass
 from loci.backends.memory import MemoryStore
 from loci.schema import WorldState
 from loci.spatial.adaptive import AdaptiveResolution
-from loci.spatial.buckets import expand_bounding_box
-from loci.spatial.hilbert import encode as hilbert_encode
+from loci.spatial.hilbert import HilbertIndex
 from loci.temporal.decay import apply_decay
 from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
@@ -70,6 +69,7 @@ class LocalLociClient:
         decay_lambda: float = 1e-4,
         distance: str = "cosine",
         adaptive: bool = False,
+        resolutions: list[int] | None = None,
     ) -> None:
         self._store = MemoryStore()
         self._epoch_size_ms = epoch_size_ms
@@ -79,6 +79,7 @@ class LocalLociClient:
         self._distance = distance
         self._known_collections: set[str] = set()
         self._last_query_stats: QueryStats | None = None
+        self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
             AdaptiveResolution(
                 base_order=spatial_resolution,
@@ -112,7 +113,8 @@ class LocalLociClient:
         if name in self._known_collections:
             return
         self._store.create_collection(name, self._vector_size, self._distance)
-        self._store.create_payload_index(name, "hilbert_id")
+        for r in self._hilbert.resolutions:
+            self._store.create_payload_index(name, f"hilbert_r{r}")
         self._store.create_payload_index(name, "timestamp_ms")
         self._store.create_payload_index(name, "scale_level")
         self._known_collections.add(name)
@@ -130,18 +132,12 @@ class LocalLociClient:
         self._ensure_collection(col)
 
         t_norm = self._normalise_time(state.timestamp_ms, ep)
-        hid = hilbert_encode(
-            state.x,
-            state.y,
-            state.z,
-            t_norm,
-            resolution_order=self._spatial_resolution,
-        )
+        hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
 
         if self._adaptive is not None:
             self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-        payload = _state_to_payload(state, hid)
+        payload = _state_to_payload(state, hilbert_ids)
 
         # Causal linking
         prev_id = self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
@@ -169,17 +165,11 @@ class LocalLociClient:
             self._ensure_collection(col)
 
             t_norm = self._normalise_time(state.timestamp_ms, ep)
-            hid = hilbert_encode(
-                state.x,
-                state.y,
-                state.z,
-                t_norm,
-                resolution_order=self._spatial_resolution,
-            )
+            hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
             if self._adaptive is not None:
                 self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-            payload = _state_to_payload(state, hid)
+            payload = _state_to_payload(state, hilbert_ids)
 
             if state.scene_id and state.scene_id in scene_chains:
                 payload["prev_state_id"] = scene_chains[state.scene_id]
@@ -236,23 +226,19 @@ class LocalLociClient:
         # Build filter dict for MemoryStore
         payload_filter: dict = {}
 
+        query_resolution = self._hilbert.resolutions[0]
         if spatial_bounds is not None:
-            hids = expand_bounding_box(
-                spatial_bounds.get("x_min", 0.0),
-                spatial_bounds.get("x_max", 1.0),
-                spatial_bounds.get("y_min", 0.0),
-                spatial_bounds.get("y_max", 1.0),
-                spatial_bounds.get("z_min", 0.0),
-                spatial_bounds.get("z_max", 1.0),
-                0.0,
-                1.0,
-                resolution_order=self._spatial_resolution,
+            hids = self._hilbert.query_buckets(
+                spatial_bounds,
+                resolution=query_resolution,
+                overlap_factor=1.2,
             )
             if not hids:
                 stats.elapsed_ms = (time.perf_counter() - t_start) * 1000
                 self._last_query_stats = stats
                 return []
-            payload_filter["hilbert_id"] = {"any": hids}
+            field = self._hilbert.payload_field(query_resolution)
+            payload_filter[field] = {"any": hids}
             stats.hilbert_ids_in_filter = len(hids)
 
         if time_window_ms is not None:
@@ -431,19 +417,20 @@ class LocalLociClient:
 # ------------------------------------------------------------------
 
 
-def _state_to_payload(state: WorldState, hilbert_id: int) -> dict:
-    return {
+def _state_to_payload(state: WorldState, hilbert_ids: dict[str, int]) -> dict:
+    payload = {
         "x": state.x,
         "y": state.y,
         "z": state.z,
         "timestamp_ms": state.timestamp_ms,
-        "hilbert_id": hilbert_id,
         "scene_id": state.scene_id,
         "scale_level": state.scale_level,
         "confidence": state.confidence,
         "prev_state_id": state.prev_state_id,
         "next_state_id": state.next_state_id,
     }
+    payload.update(hilbert_ids)
+    return payload
 
 
 def _payload_to_state(

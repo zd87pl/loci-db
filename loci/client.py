@@ -24,8 +24,7 @@ from qdrant_client.models import (
 from loci.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
 from loci.schema import WorldState
 from loci.spatial.adaptive import AdaptiveResolution
-from loci.spatial.buckets import expand_bounding_box
-from loci.spatial.hilbert import encode as hilbert_encode
+from loci.spatial.hilbert import HilbertIndex
 from loci.temporal.decay import apply_decay
 from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
@@ -67,6 +66,7 @@ class LociClient:
         adaptive: bool = False,
         max_retries: int = 3,
         retry_backoff: float = 0.5,
+        resolutions: list[int] | None = None,
     ) -> None:
         self._qdrant = QdrantClient(url=qdrant_url)
         self._epoch_size_ms = epoch_size_ms
@@ -79,6 +79,7 @@ class LociClient:
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
         self._known_collections: set[str] = set()
+        self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
             AdaptiveResolution(
                 base_order=spatial_resolution,
@@ -128,11 +129,12 @@ class LociClient:
                     distance=self._distance,
                 ),
             )
-            self._qdrant.create_payload_index(
-                collection_name=name,
-                field_name="hilbert_id",
-                field_schema=PayloadSchemaType.INTEGER,
-            )
+            for r in self._hilbert.resolutions:
+                self._qdrant.create_payload_index(
+                    collection_name=name,
+                    field_name=f"hilbert_r{r}",
+                    field_schema=PayloadSchemaType.INTEGER,
+                )
             self._qdrant.create_payload_index(
                 collection_name=name,
                 field_name="timestamp_ms",
@@ -168,18 +170,12 @@ class LociClient:
         self._ensure_collection(col)
 
         t_norm = self._normalise_time(state.timestamp_ms, ep)
-        hid = hilbert_encode(
-            state.x,
-            state.y,
-            state.z,
-            t_norm,
-            resolution_order=self._spatial_resolution,
-        )
+        hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
 
         if self._adaptive is not None:
             self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-        payload = self._state_to_payload(state, hid)
+        payload = self._state_to_payload(state, hilbert_ids)
 
         # Causal linking
         prev_id = self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
@@ -224,17 +220,11 @@ class LociClient:
             self._ensure_collection(col)
 
             t_norm = self._normalise_time(state.timestamp_ms, ep)
-            hid = hilbert_encode(
-                state.x,
-                state.y,
-                state.z,
-                t_norm,
-                resolution_order=self._spatial_resolution,
-            )
+            hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
             if self._adaptive is not None:
                 self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-            payload = self._state_to_payload(state, hid)
+            payload = self._state_to_payload(state, hilbert_ids)
 
             # Causal link within the batch
             if state.scene_id and state.scene_id in scene_chains:
@@ -283,6 +273,7 @@ class LociClient:
         limit: int = 10,
         *,
         _extra_payload_filter: dict | None = None,
+        overlap_factor: float = 1.2,
     ) -> list[WorldState]:
         """Search for nearest neighbours with spatial and temporal filtering.
 
@@ -292,6 +283,8 @@ class LociClient:
                 ``y_min``, ``y_max``, ``z_min``, ``z_max``.
             time_window_ms: Optional ``(start_ms, end_ms)`` window.
             limit: Maximum number of results.
+            overlap_factor: Expand spatial query by this factor to catch
+                boundary points (default 1.2 = 20% expansion).
 
         Returns:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
@@ -305,21 +298,17 @@ class LociClient:
         collections = [collection_name(e) for e in epochs]
 
         must_conditions: list = []
+        query_resolution = self._hilbert.resolutions[0]
 
         if spatial_bounds is not None:
-            hids = expand_bounding_box(
-                spatial_bounds.get("x_min", 0.0),
-                spatial_bounds.get("x_max", 1.0),
-                spatial_bounds.get("y_min", 0.0),
-                spatial_bounds.get("y_max", 1.0),
-                spatial_bounds.get("z_min", 0.0),
-                spatial_bounds.get("z_max", 1.0),
-                0.0,
-                1.0,
-                resolution_order=self._spatial_resolution,
+            hids = self._hilbert.query_buckets(
+                spatial_bounds,
+                resolution=query_resolution,
+                overlap_factor=overlap_factor,
             )
             if hids:
-                must_conditions.append(FieldCondition(key="hilbert_id", match=MatchAny(any=hids)))
+                field = self._hilbert.payload_field(query_resolution)
+                must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
             else:
                 return []
 
@@ -485,19 +474,20 @@ class LociClient:
         return min(1.0, max(0.0, offset / self._epoch_size_ms))
 
     @staticmethod
-    def _state_to_payload(state: WorldState, hilbert_id: int) -> dict:
-        return {
+    def _state_to_payload(state: WorldState, hilbert_ids: dict[str, int]) -> dict:
+        payload = {
             "x": state.x,
             "y": state.y,
             "z": state.z,
             "timestamp_ms": state.timestamp_ms,
-            "hilbert_id": hilbert_id,
             "scene_id": state.scene_id,
             "scale_level": state.scale_level,
             "confidence": state.confidence,
             "prev_state_id": state.prev_state_id,
             "next_state_id": state.next_state_id,
         }
+        payload.update(hilbert_ids)
+        return payload
 
     @staticmethod
     def _payload_to_state(

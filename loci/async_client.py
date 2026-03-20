@@ -24,8 +24,7 @@ from qdrant_client.models import (
 
 from loci.schema import WorldState
 from loci.spatial.adaptive import AdaptiveResolution
-from loci.spatial.buckets import expand_bounding_box
-from loci.spatial.hilbert import encode as hilbert_encode
+from loci.spatial.hilbert import HilbertIndex
 from loci.temporal.decay import apply_decay
 from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
@@ -68,6 +67,7 @@ class AsyncLociClient:
         adaptive: bool = False,
         max_retries: int = 3,
         retry_backoff: float = 0.5,
+        resolutions: list[int] | None = None,
     ) -> None:
         self._qdrant = AsyncQdrantClient(url=qdrant_url)
         self._epoch_size_ms = epoch_size_ms
@@ -81,6 +81,7 @@ class AsyncLociClient:
         self._retry_backoff = retry_backoff
         self._known_collections: set[str] = set()
         self._collection_locks: dict[str, asyncio.Lock] = {}
+        self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
             AdaptiveResolution(
                 base_order=spatial_resolution,
@@ -150,12 +151,15 @@ class AsyncLociClient:
                         distance=self._distance,
                     ),
                 )
-                await asyncio.gather(
+                index_tasks = [
                     self._qdrant.create_payload_index(
                         collection_name=name,
-                        field_name="hilbert_id",
+                        field_name=f"hilbert_r{r}",
                         field_schema=PayloadSchemaType.INTEGER,
-                    ),
+                    )
+                    for r in self._hilbert.resolutions
+                ]
+                index_tasks.extend([
                     self._qdrant.create_payload_index(
                         collection_name=name,
                         field_name="timestamp_ms",
@@ -166,7 +170,8 @@ class AsyncLociClient:
                         field_name="scale_level",
                         field_schema=PayloadSchemaType.KEYWORD,
                     ),
-                )
+                ])
+                await asyncio.gather(*index_tasks)
 
             self._known_collections.add(name)
 
@@ -190,18 +195,12 @@ class AsyncLociClient:
         await self._ensure_collection(col)
 
         t_norm = _normalise_time(state.timestamp_ms, ep, self._epoch_size_ms)
-        hid = hilbert_encode(
-            state.x,
-            state.y,
-            state.z,
-            t_norm,
-            resolution_order=self._spatial_resolution,
-        )
+        hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
 
         if self._adaptive is not None:
             self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-        payload = _state_to_payload(state, hid)
+        payload = _state_to_payload(state, hilbert_ids)
 
         # Causal linking
         prev_id = await self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
@@ -247,17 +246,11 @@ class AsyncLociClient:
             await self._ensure_collection(col)
 
             t_norm = _normalise_time(state.timestamp_ms, ep, self._epoch_size_ms)
-            hid = hilbert_encode(
-                state.x,
-                state.y,
-                state.z,
-                t_norm,
-                resolution_order=self._spatial_resolution,
-            )
+            hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
             if self._adaptive is not None:
                 self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-            payload = _state_to_payload(state, hid)
+            payload = _state_to_payload(state, hilbert_ids)
 
             # Link within the batch
             if state.scene_id and state.scene_id in scene_chains:
@@ -344,21 +337,17 @@ class AsyncLociClient:
 
         # Build filter
         must_conditions: list = []
+        query_resolution = self._hilbert.resolutions[0]
 
         if spatial_bounds is not None:
-            hids = expand_bounding_box(
-                spatial_bounds.get("x_min", 0.0),
-                spatial_bounds.get("x_max", 1.0),
-                spatial_bounds.get("y_min", 0.0),
-                spatial_bounds.get("y_max", 1.0),
-                spatial_bounds.get("z_min", 0.0),
-                spatial_bounds.get("z_max", 1.0),
-                0.0,
-                1.0,
-                resolution_order=self._spatial_resolution,
+            hids = self._hilbert.query_buckets(
+                spatial_bounds,
+                resolution=query_resolution,
+                overlap_factor=1.2,
             )
             if hids:
-                must_conditions.append(FieldCondition(key="hilbert_id", match=MatchAny(any=hids)))
+                field = self._hilbert.payload_field(query_resolution)
+                must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
             else:
                 return []
 
@@ -603,19 +592,20 @@ def _normalise_time(timestamp_ms: int, ep: int, epoch_size_ms: int) -> float:
     return min(1.0, max(0.0, offset / epoch_size_ms))
 
 
-def _state_to_payload(state: WorldState, hilbert_id: int) -> dict:
-    return {
+def _state_to_payload(state: WorldState, hilbert_ids: dict[str, int]) -> dict:
+    payload = {
         "x": state.x,
         "y": state.y,
         "z": state.z,
         "timestamp_ms": state.timestamp_ms,
-        "hilbert_id": hilbert_id,
         "scene_id": state.scene_id,
         "scale_level": state.scale_level,
         "confidence": state.confidence,
         "prev_state_id": state.prev_state_id,
         "next_state_id": state.next_state_id,
     }
+    payload.update(hilbert_ids)
+    return payload
 
 
 def _payload_to_state(

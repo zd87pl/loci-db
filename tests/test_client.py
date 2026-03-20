@@ -157,13 +157,15 @@ class TestInsert:
         upsert_call = mock_qdrant.upsert.call_args
         assert upsert_call.kwargs["collection_name"] == "loci_2"
 
-    def test_payload_includes_hilbert_id(self, client, mock_qdrant):
+    def test_payload_includes_hilbert_ids(self, client, mock_qdrant):
         state = _make_state()
         client.insert(state)
 
         point = mock_qdrant.upsert.call_args.kwargs["points"][0]
-        assert "hilbert_id" in point.payload
-        assert isinstance(point.payload["hilbert_id"], int)
+        assert "hilbert_r4" in point.payload
+        assert isinstance(point.payload["hilbert_r4"], int)
+        assert "hilbert_r8" in point.payload
+        assert "hilbert_r12" in point.payload
 
     def test_payload_stores_all_fields(self, client, mock_qdrant):
         state = _make_state(scene_id="s1", scale_level="frame", confidence=0.9)

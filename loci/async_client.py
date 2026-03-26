@@ -23,8 +23,8 @@ from qdrant_client.models import (
 )
 
 from loci.payload_filters import extra_filter_to_conditions
-from loci.retrieval.predict import PredictRetrieveResult
-from loci.schema import WorldState
+from loci.retrieval.predict import PredictRetrieveResult, rerank_prediction_candidates
+from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
@@ -352,6 +352,29 @@ class AsyncLociClient:
         Returns:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
         """
+        return [
+            candidate.state
+            for candidate in await self.query_scored(
+                vector,
+                spatial_bounds,
+                time_window_ms,
+                limit,
+                _extra_payload_filter=_extra_payload_filter,
+                _epoch_ids=_epoch_ids,
+            )
+        ]
+
+    async def query_scored(
+        self,
+        vector: list[float],
+        spatial_bounds: dict | None = None,
+        time_window_ms: tuple[int, int] | None = None,
+        limit: int = 10,
+        *,
+        _extra_payload_filter: dict | None = None,
+        _epoch_ids: set[int] | None = None,
+    ) -> list[ScoredWorldState]:
+        """Search and return scored results for downstream reranking."""
         await self._discover_collections()
 
         if time_window_ms is not None:
@@ -451,7 +474,14 @@ class AsyncLociClient:
         apply_decay(all_results, now_ms, self._decay_lambda)
         all_results = all_results[:limit]
 
-        return [_payload_to_state(r["payload"], r["id"], r["vector"]) for r in all_results]
+        return [
+            ScoredWorldState(
+                state=_payload_to_state(r["payload"], r["id"], r["vector"]),
+                score=float(r["score"]),
+                decayed_score=float(r.get("decayed_score", r["score"])),
+            )
+            for r in all_results
+        ]
 
     async def predict_and_retrieve(
         self,
@@ -505,7 +535,7 @@ class AsyncLociClient:
                     "z_max": min(1.0, z + spatial_search_radius),
                 }
 
-            raw_results = await self.query(
+            raw_results = await self.query_scored(
                 vector=predicted_vector,
                 spatial_bounds=spatial_bounds,
                 time_window_ms=(now_ms, now_ms + future_horizon_ms),
@@ -514,22 +544,13 @@ class AsyncLociClient:
             retrieval_latency_ms = (time.perf_counter() - t0) * 1000
 
             if raw_results:
-                mid_ms = now_ms + future_horizon_ms // 2
-                scored = []
-                for i, ws in enumerate(raw_results):
-                    vector_sim = max(0.0, 1.0 - i / max(len(raw_results), 1))
-                    if future_horizon_ms > 0:
-                        t_dist = abs(ws.timestamp_ms - mid_ms)
-                        temporal_prox = max(0.0, 1.0 - t_dist / (future_horizon_ms / 2))
-                    else:
-                        temporal_prox = 1.0
-                    combined = alpha * vector_sim + (1.0 - alpha) * temporal_prox
-                    scored.append((combined, ws))
-
-                scored.sort(key=lambda x: x[0], reverse=True)
-                results = [ws for _, ws in scored[:limit]]
-                best_score = scored[0][0] if scored else 0.0
-                prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
+                results, prediction_novelty = rerank_prediction_candidates(
+                    raw_results,
+                    now_ms=now_ms,
+                    future_horizon_ms=future_horizon_ms,
+                    alpha=alpha,
+                    limit=limit,
+                )
             else:
                 results = []
                 prediction_novelty = 1.0

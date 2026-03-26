@@ -44,6 +44,7 @@ from qdrant_client.models import (
 from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
+from loci.temporal.decay import apply_decay
 from loci.temporal.sharding import epoch_id, epochs_in_range
 
 # ── Configuration ──────────────────────────────────────────────────────────
@@ -55,6 +56,7 @@ N_RUNS = 3  # increase to 10 for publication
 LIMIT = 10
 EPOCH_SIZE_MS = 5_000
 SEED = 42
+DECAY_LAMBDA = 1e-4
 
 # Scenario definitions: (spatial_radius, time_window_fraction, name, description)
 SCENARIOS = {
@@ -70,9 +72,7 @@ _hilbert = HilbertIndex(resolutions=[4, 8, 12])
 # ── Data generation ────────────────────────────────────────────────────────
 
 
-def generate_dataset(
-    n: int, dim: int, rng: np.random.Generator
-) -> tuple[list[dict], int, int]:
+def generate_dataset(n: int, dim: int, rng: np.random.Generator) -> tuple[list[dict], int, int]:
     """Generate N random world-state points with (x,y,z,t) and a normalized vector."""
     now_ms = int(time.time() * 1000)
     xs = rng.random(n).astype(np.float64)
@@ -150,8 +150,15 @@ def generate_queries(
 # ── Ground truth ───────────────────────────────────────────────────────────
 
 
-def compute_ground_truth(data: list[dict], q: dict, limit: int) -> list[int]:
-    """Brute-force ground truth: filter by bounding box + time, rank by cosine."""
+def compute_ground_truth(
+    data: list[dict],
+    q: dict,
+    limit: int,
+    *,
+    now_ms: int | None = None,
+    decay_lambda: float = 0.0,
+) -> list[int]:
+    """Brute-force ground truth: filter by bounds/time, rank by shipped semantics."""
     qv = np.array(q["vector"], dtype=np.float32)
     qv_norm = np.linalg.norm(qv)
     if qv_norm == 0:
@@ -170,10 +177,22 @@ def compute_ground_truth(data: list[dict], q: dict, limit: int) -> list[int]:
             if dv_norm == 0:
                 continue
             sim = float(np.dot(qv, dv) / (qv_norm * dv_norm))
-            candidates.append((d["index"], sim))
+            candidates.append(
+                {
+                    "id": d["index"],
+                    "score": sim,
+                    "timestamp_ms": d["timestamp_ms"],
+                }
+            )
 
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    return [c[0] for c in candidates[:limit]]
+    if decay_lambda > 0:
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+        apply_decay(candidates, now_ms, decay_lambda)
+        return [c["id"] for c in candidates[:limit]]
+
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+    return [c["id"] for c in candidates[:limit]]
 
 
 def compute_recall(
@@ -336,9 +355,7 @@ def query_loci(
         ),
     ]
     if hids:
-        must_conditions.append(
-            FieldCondition(key="hilbert_r4", match=MatchAny(any=hids))
-        )
+        must_conditions.append(FieldCondition(key="hilbert_r4", match=MatchAny(any=hids)))
     query_filter = Filter(must=must_conditions)
 
     per_shard_limit = LIMIT * 3
@@ -376,6 +393,8 @@ def query_loci_current(
     known_collections: set[str],
     prefix: str = "loci",
     overlap_factor: float = 1.2,
+    now_ms: int | None = None,
+    decay_lambda: float = DECAY_LAMBDA,
 ) -> list[str]:
     """Run the shipped LOCI query path with epoch-local 4D Hilbert routing."""
     epochs = epochs_in_range(q["t_start"], q["t_end"], EPOCH_SIZE_MS)
@@ -390,7 +409,7 @@ def query_loci_current(
     }
     per_shard_limit = LIMIT * 3
 
-    all_hits: list[tuple[str, float]] = []
+    all_hits: list[dict] = []
     for ep in epochs:
         col = f"{prefix}_{ep}"
         if col not in known_collections:
@@ -450,10 +469,25 @@ def query_loci_current(
                 spatial_bounds=spatial_bounds,
                 time_window_ms=time_window,
             ):
-                all_hits.append((str(hit.id), hit.score))
+                all_hits.append(
+                    {
+                        "id": str(hit.id),
+                        "score": hit.score,
+                        "timestamp_ms": (hit.payload or {}).get("timestamp_ms", 0),
+                    }
+                )
 
-    all_hits.sort(key=lambda x: x[1], reverse=True)
-    return [hit_id for hit_id, _ in all_hits[:LIMIT]]
+    if not all_hits:
+        return []
+
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    if decay_lambda > 0:
+        apply_decay(all_hits, now_ms, decay_lambda)
+    else:
+        all_hits.sort(key=lambda x: x["score"], reverse=True)
+
+    return [hit["id"] for hit in all_hits[:LIMIT]]
 
 
 # ── Benchmark runner ──────────────────────────────────────────────────────
@@ -476,8 +510,10 @@ def run_scenario(
     spatial_radius = scenario["spatial_radius"]
     time_frac = scenario["time_frac"]
 
-    print(f"  Scenario {scenario_id} ({scenario['name']}): "
-          f"radius={spatial_radius}, time_frac={time_frac}")
+    print(
+        f"  Scenario {scenario_id} ({scenario['name']}): "
+        f"radius={spatial_radius}, time_frac={time_frac}"
+    )
 
     # Generate data and queries
     data, start_ms, end_ms = generate_dataset(n_vectors, VECTOR_DIM, rng)
@@ -485,6 +521,7 @@ def run_scenario(
     queries = generate_queries(
         total_queries, VECTOR_DIM, rng, start_ms, end_ms, spatial_radius, time_frac
     )
+    benchmark_now_ms = int(time.time() * 1000)
 
     # Setup: use separate in-memory clients for isolation
     qdrant_url = os.environ.get("QDRANT_URL", "")
@@ -507,6 +544,16 @@ def run_scenario(
 
     # Ground truth
     ground_truths = [compute_ground_truth(data, q, LIMIT) for q in queries]
+    current_ground_truths = [
+        compute_ground_truth(
+            data,
+            q,
+            LIMIT,
+            now_ms=benchmark_now_ms,
+            decay_lambda=DECAY_LAMBDA,
+        )
+        for q in queries
+    ]
 
     results = {}
     methods = [
@@ -530,7 +577,15 @@ def run_scenario(
         ),
         (
             "loci_current",
-            lambda q: query_loci_current(loci_client, q, known_collections, loci_prefix, 1.2),
+            lambda q: query_loci_current(
+                loci_client,
+                q,
+                known_collections,
+                loci_prefix,
+                1.2,
+                benchmark_now_ms,
+                DECAY_LAMBDA,
+            ),
             loci_id_map,
             None,
         ),
@@ -549,7 +604,12 @@ def run_scenario(
 
                 if i >= WARMUP_QUERIES:
                     latencies.append(elapsed_ms)
-                    recalls.append(compute_recall(result_ids, ground_truths[i], id_map))
+                    truth = (
+                        current_ground_truths[i]
+                        if method_name == "loci_current"
+                        else ground_truths[i]
+                    )
+                    recalls.append(compute_recall(result_ids, truth, id_map))
 
             all_latencies.extend(latencies)
             all_recalls.extend(recalls)
@@ -592,8 +652,7 @@ def print_markdown_table(all_results: dict) -> str:
         lines.append(f"### N = {n_vectors:,}")
         lines.append("")
         lines.append(
-            "| Scenario | Method | Avg (ms) | P50 (ms) | "
-            "P95 (ms) | P99 (ms) | Recall@10 | QPS |"
+            "| Scenario | Method | Avg (ms) | P50 (ms) | P95 (ms) | P99 (ms) | Recall@10 | QPS |"
         )
         lines.append("|:--|:--|--:|--:|--:|--:|--:|--:|")
 

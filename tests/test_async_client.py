@@ -9,7 +9,7 @@ import pytest
 
 from loci.async_client import AsyncLociClient
 from loci.retrieval.predict import PredictRetrieveResult
-from loci.schema import WorldState
+from loci.schema import ScoredWorldState, WorldState
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -447,7 +447,9 @@ async def test_predict_and_retrieve_extended_path(
 
     now_ms = int(_time.time() * 1000)
     hit = _make_state(timestamp_ms=now_ms + 500)
-    async_client.query = AsyncMock(return_value=[hit])
+    async_client.query_scored = AsyncMock(
+        return_value=[ScoredWorldState(state=hit, score=0.9, decayed_score=0.9)]
+    )
 
     predicted = [9.0, 8.0, 7.0, 6.0]
     predictor = MagicMock(return_value=predicted)
@@ -469,12 +471,39 @@ async def test_predict_and_retrieve_extended_path(
     assert result.retrieval_latency_ms >= 0.0
     assert result.predictor_call_ms >= 0.0
     predictor.assert_called_once_with([1.0, 2.0, 3.0, 4.0])
-    async_client.query.assert_awaited_once_with(
+    async_client.query_scored.assert_awaited_once_with(
         vector=predicted,
         spatial_bounds=expected_spatial_bounds,
         time_window_ms=(now_ms, now_ms + 2000),
         limit=6,
     )
+
+
+@pytest.mark.asyncio
+async def test_predict_and_retrieve_extended_path_uses_real_scores(async_client):
+    now_ms = 10_000
+    low = _make_state(timestamp_ms=now_ms + 500)
+    low.id = "low"
+    high = _make_state(timestamp_ms=now_ms + 500)
+    high.id = "high"
+    async_client.query_scored = AsyncMock(
+        return_value=[
+            ScoredWorldState(state=low, score=0.1, decayed_score=0.1),
+            ScoredWorldState(state=high, score=0.9, decayed_score=0.9),
+        ]
+    )
+
+    with patch("loci.async_client.time.time", return_value=now_ms / 1000.0):
+        result = await async_client.predict_and_retrieve(
+            context_vector=[1.0, 2.0, 3.0, 4.0],
+            predictor_fn=lambda _: [9.0, 8.0, 7.0, 6.0],
+            future_horizon_ms=2000,
+            limit=2,
+            current_position=(0.5, 0.5, 0.5),
+        )
+
+    assert isinstance(result, PredictRetrieveResult)
+    assert [state.id for state in result.results] == ["high", "low"]
 
 
 @pytest.mark.asyncio

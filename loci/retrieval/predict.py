@@ -12,13 +12,14 @@ but for spatiotemporal world models.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from loci.schema import WorldState
+    from loci.schema import ScoredWorldState, WorldState
 
 
 @dataclass
@@ -39,6 +40,61 @@ class PredictRetrieveResult:
     predicted_vector: list[float] | None = None
     retrieval_latency_ms: float = 0.0
     predictor_call_ms: float = 0.0
+
+
+def rerank_prediction_candidates(
+    candidates: list[ScoredWorldState],
+    *,
+    now_ms: int,
+    future_horizon_ms: int,
+    alpha: float,
+    limit: int,
+) -> tuple[list[WorldState], float]:
+    """Re-rank scored retrieval candidates for predict-and-retrieve."""
+    if not candidates:
+        return [], 1.0
+
+    vector_scores = _normalize_prediction_scores([candidate.score for candidate in candidates])
+    mid_ms = now_ms + future_horizon_ms // 2
+    combined: list[tuple[float, float, WorldState]] = []
+    for candidate, vector_sim in zip(candidates, vector_scores):
+        if future_horizon_ms > 0:
+            t_dist = abs(candidate.state.timestamp_ms - mid_ms)
+            temporal_prox = max(0.0, 1.0 - t_dist / (future_horizon_ms / 2))
+        else:
+            temporal_prox = 1.0
+
+        score = alpha * vector_sim + (1.0 - alpha) * temporal_prox
+        combined.append((score, candidate.decayed_score, candidate.state))
+
+    combined.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    best_score = combined[0][0]
+    results = [state for _, _, state in combined[:limit]]
+    prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
+    return results, prediction_novelty
+
+
+def _normalize_prediction_scores(scores: list[float]) -> list[float]:
+    """Map retrieval scores to [0, 1] without relying on rank alone."""
+    if not scores:
+        return []
+
+    baseline = [_sigmoid(score) for score in scores]
+    lo = min(scores)
+    hi = max(scores)
+    if hi - lo <= 1e-9:
+        return baseline
+
+    spread = hi - lo
+    return [
+        max(0.0, min(1.0, 0.5 * baseline[idx] + 0.5 * ((score - lo) / spread)))
+        for idx, score in enumerate(scores)
+    ]
+
+
+def _sigmoid(score: float) -> float:
+    bounded = max(-60.0, min(60.0, score))
+    return 1.0 / (1.0 + math.exp(-bounded))
 
 
 class PredictThenRetrieve:
@@ -116,42 +172,56 @@ class PredictThenRetrieve:
 
         # Step 3: Retrieve
         t1 = time.perf_counter()
-        raw_results = self._client.query(
-            vector=predicted_vector,
-            spatial_bounds=spatial_bounds,
-            time_window_ms=time_window,
-            limit=limit * 2,  # over-fetch for re-ranking
-        )
+        query_scored = getattr(self._client, "query_scored", None)
+        raw_candidates: list[ScoredWorldState] = []
+        if callable(query_scored):
+            scored_response = query_scored(
+                vector=predicted_vector,
+                spatial_bounds=spatial_bounds,
+                time_window_ms=time_window,
+                limit=limit * 2,  # over-fetch for re-ranking
+            )
+            if isinstance(scored_response, list):
+                raw_candidates = scored_response
         retrieval_latency_ms = (time.perf_counter() - t1) * 1000
 
         # Step 4: Combined scoring
-        if raw_results:
-            mid_ms = now_ms + future_horizon_ms // 2
-            scored = []
-            for i, ws in enumerate(raw_results):
-                # Vector similarity: inverse rank as proxy
-                # (results already ranked by decay-weighted cosine similarity)
-                vector_sim = max(0.0, 1.0 - i / max(len(raw_results), 1))
-
-                # Temporal proximity: how close to the center of the time window
-                if future_horizon_ms > 0:
-                    t_dist = abs(ws.timestamp_ms - mid_ms)
-                    temporal_prox = max(0.0, 1.0 - t_dist / (future_horizon_ms / 2))
-                else:
-                    temporal_prox = 1.0
-
-                combined = alpha * vector_sim + (1.0 - alpha) * temporal_prox
-                scored.append((combined, ws))
-
-            scored.sort(key=lambda x: x[0], reverse=True)
-            results = [ws for _, ws in scored[:limit]]
-
-            # Novelty: 1.0 - best combined score
-            best_score = scored[0][0] if scored else 0.0
-            prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
+        if raw_candidates:
+            results, prediction_novelty = rerank_prediction_candidates(
+                raw_candidates,
+                now_ms=now_ms,
+                future_horizon_ms=future_horizon_ms,
+                alpha=alpha,
+                limit=limit,
+            )
         else:
-            results = []
-            prediction_novelty = 1.0
+            raw_results = self._client.query(
+                vector=predicted_vector,
+                spatial_bounds=spatial_bounds,
+                time_window_ms=time_window,
+                limit=limit * 2,
+            )
+            if raw_results:
+                mid_ms = now_ms + future_horizon_ms // 2
+                scored = []
+                for i, ws in enumerate(raw_results):
+                    vector_sim = max(0.0, 1.0 - i / max(len(raw_results), 1))
+                    if future_horizon_ms > 0:
+                        t_dist = abs(ws.timestamp_ms - mid_ms)
+                        temporal_prox = max(0.0, 1.0 - t_dist / (future_horizon_ms / 2))
+                    else:
+                        temporal_prox = 1.0
+
+                    combined = alpha * vector_sim + (1.0 - alpha) * temporal_prox
+                    scored.append((combined, ws))
+
+                scored.sort(key=lambda x: x[0], reverse=True)
+                results = [ws for _, ws in scored[:limit]]
+                best_score = scored[0][0] if scored else 0.0
+                prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
+            else:
+                results = []
+                prediction_novelty = 1.0
 
         return PredictRetrieveResult(
             results=results,

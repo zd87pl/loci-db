@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from loci.backends.memory import MemoryStore
 from loci.payload_filters import extra_filter_to_memory
 from loci.retrieval.predict import PredictRetrieveResult
-from loci.schema import WorldState
+from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
@@ -225,6 +225,29 @@ class LocalLociClient:
 
         After each call, inspect :attr:`last_query_stats` for diagnostics.
         """
+        return [
+            candidate.state
+            for candidate in self.query_scored(
+                vector,
+                spatial_bounds,
+                time_window_ms,
+                limit,
+                _extra_payload_filter=_extra_payload_filter,
+                _epoch_ids=_epoch_ids,
+            )
+        ]
+
+    def query_scored(
+        self,
+        vector: list[float],
+        spatial_bounds: dict | None = None,
+        time_window_ms: tuple[int, int] | None = None,
+        limit: int = 10,
+        *,
+        _extra_payload_filter: dict | None = None,
+        _epoch_ids: set[int] | None = None,
+    ) -> list[ScoredWorldState]:
+        """Search and return scored results for downstream reranking."""
         t_start = time.perf_counter()
         stats = QueryStats()
 
@@ -310,7 +333,14 @@ class LocalLociClient:
         stats.elapsed_ms = (time.perf_counter() - t_start) * 1000
         self._last_query_stats = stats
 
-        return [_payload_to_state(r["payload"], r["id"], r["vector"]) for r in all_results]
+        return [
+            ScoredWorldState(
+                state=_payload_to_state(r["payload"], r["id"], r["vector"]),
+                score=float(r["score"]),
+                decayed_score=float(r.get("decayed_score", r["score"])),
+            )
+            for r in all_results
+        ]
 
     def predict_and_retrieve(
         self,

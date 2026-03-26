@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from loci.local_client import LocalLociClient
-from loci.schema import WorldState
+from loci.schema import ScoredWorldState, WorldState
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -325,6 +326,29 @@ class TestPredictAndRetrieve:
             limit=5,
         )
         assert len(results) >= 1
+
+    def test_predict_and_retrieve_uses_real_scores(self, client):
+        low = _make_state(ts=10_500)
+        low.id = "low"
+        high = _make_state(ts=10_500)
+        high.id = "high"
+        client.query_scored = MagicMock(
+            return_value=[
+                ScoredWorldState(state=low, score=0.1, decayed_score=0.1),
+                ScoredWorldState(state=high, score=0.9, decayed_score=0.9),
+            ]
+        )
+
+        with patch("loci.retrieval.predict.time.time", return_value=10.0):
+            result = client.predict_and_retrieve(
+                context_vector=[1.0, 2.0, 3.0, 4.0],
+                predictor_fn=lambda _: [9.0, 8.0, 7.0, 6.0],
+                future_horizon_ms=2000,
+                limit=2,
+                current_position=(0.5, 0.5, 0.5),
+            )
+
+        assert [state.id for state in result.results] == ["high", "low"]
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ LOCI benchmarks compare four query methods against a brute-force ground truth to
 1. **Naive Qdrant** — Single collection, 3 independent float-range payload filters (x, y, z) + timestamp range + HNSW vector search.
 2. **LOCI r4** — Historical fixed-`r4` Hilbert baseline with temporal sharding + single `MatchAny` integer pre-filter + exact payload post-filter + HNSW.
 3. **LOCI r4 + overlap** — Same as above with `overlap_factor=1.2` (20% expanded spatial search region to catch boundary points) before exact post-filtering.
-4. **LOCI current** — Mirrors the shipped query path: epoch-local 4D bounds, per-shard overfetch, exact payload post-filtering, temporal shard routing, and overlap-based Hilbert bucket expansion.
+4. **LOCI current** — Mirrors the shipped query path: epoch-local 4D bounds, per-shard overfetch, exact payload post-filtering, temporal shard routing, overlap-based Hilbert bucket expansion, and decay-weighted re-ranking before top-k truncation.
 
 ## Dataset Generation
 
@@ -31,6 +31,8 @@ Ground truth for recall@k is computed via brute-force exact search:
 2. Apply exact float-range spatial and temporal filters.
 3. Return top-k results sorted by similarity.
 4. Recall@k = |retrieved ∩ ground_truth| / k.
+
+For the `LOCI current` row, the checked-in benchmark applies the same decay-weighted re-ranking as the shipped client before truncating to top-k, so its recall is measured against a decay-aware brute-force ranking.
 
 ## Benchmark Scenarios
 

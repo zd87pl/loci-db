@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from loci.client import LociClient
-from loci.schema import WorldState
+from loci.retrieval.predict import PredictRetrieveResult
+from loci.schema import ScoredWorldState, WorldState
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -407,6 +408,36 @@ class TestQuery:
         keys = {condition.key for condition in filt.must}
         assert "hilbert_r8" in keys
 
+    def test_query_scored_returns_scores(self, client, mock_qdrant):
+        client.insert(_make_state())
+
+        hit = MagicMock()
+        hit.score = 0.42
+        hit.id = "abc123"
+        hit.vector = [1.0, 2.0, 3.0, 4.0]
+        hit.payload = {
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 10_000,
+            "scene_id": "s1",
+            "scale_level": "patch",
+            "confidence": 1.0,
+        }
+        qr = MagicMock()
+        qr.points = [hit]
+        mock_qdrant.query_points.return_value = qr
+
+        results = client.query_scored(
+            vector=[1.0, 2.0, 3.0, 4.0],
+            time_window_ms=(10_000, 15_000),
+        )
+
+        assert len(results) == 1
+        assert results[0].score == pytest.approx(0.42)
+        assert results[0].decayed_score == pytest.approx(0.42)
+        assert results[0].state.id == "abc123"
+
 
 # ---------------------------------------------------------------------------
 # predict_and_retrieve
@@ -434,6 +465,31 @@ class TestPredictAndRetrieve:
         assert mock_qdrant.query_points.called
         search_kwargs = mock_qdrant.query_points.call_args.kwargs
         assert search_kwargs["query"] == predicted
+
+    def test_extended_path_uses_real_scores_instead_of_rank_proxy(self, client):
+        low = _make_state(timestamp_ms=10_500)
+        low.id = "low"
+        high = _make_state(timestamp_ms=10_500)
+        high.id = "high"
+
+        client.query_scored = MagicMock(
+            return_value=[
+                ScoredWorldState(state=low, score=0.1, decayed_score=0.1),
+                ScoredWorldState(state=high, score=0.9, decayed_score=0.9),
+            ]
+        )
+
+        with patch("loci.retrieval.predict.time.time", return_value=10.0):
+            result = client.predict_and_retrieve(
+                context_vector=[1.0, 2.0, 3.0, 4.0],
+                predictor_fn=lambda _: [9.0, 8.0, 7.0, 6.0],
+                future_horizon_ms=2000,
+                limit=2,
+                current_position=(0.5, 0.5, 0.5),
+            )
+
+        assert isinstance(result, PredictRetrieveResult)
+        assert [state.id for state in result.results] == ["high", "low"]
 
 
 # ---------------------------------------------------------------------------

@@ -62,3 +62,12 @@ class WorldState:
             raise ValueError(
                 f"scale_level must be 'patch', 'frame', or 'sequence', got {self.scale_level!r}"
             )
+
+
+@dataclass
+class ScoredWorldState:
+    """A WorldState paired with raw and decay-weighted retrieval scores."""
+
+    state: WorldState
+    score: float
+    decayed_score: float

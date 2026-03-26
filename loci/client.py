@@ -24,7 +24,7 @@ from qdrant_client.models import (
 from loci.payload_filters import extra_filter_to_conditions
 from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
 from loci.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
-from loci.schema import WorldState
+from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
@@ -319,6 +319,31 @@ class LociClient:
         Returns:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
         """
+        return [
+            candidate.state
+            for candidate in self.query_scored(
+                vector,
+                spatial_bounds,
+                time_window_ms,
+                limit,
+                _extra_payload_filter=_extra_payload_filter,
+                _epoch_ids=_epoch_ids,
+                overlap_factor=overlap_factor,
+            )
+        ]
+
+    def query_scored(
+        self,
+        vector: list[float],
+        spatial_bounds: dict | None = None,
+        time_window_ms: tuple[int, int] | None = None,
+        limit: int = 10,
+        *,
+        _extra_payload_filter: dict | None = None,
+        _epoch_ids: set[int] | None = None,
+        overlap_factor: float = 1.2,
+    ) -> list[ScoredWorldState]:
+        """Search for nearest neighbours and return scores alongside states."""
         self._discover_collections()
 
         if time_window_ms is not None:
@@ -406,7 +431,14 @@ class LociClient:
         apply_decay(all_results, now_ms, self._decay_lambda)
         all_results = all_results[:limit]
 
-        return [self._payload_to_state(r["payload"], r["id"], r["vector"]) for r in all_results]
+        return [
+            ScoredWorldState(
+                state=self._payload_to_state(r["payload"], r["id"], r["vector"]),
+                score=float(r["score"]),
+                decayed_score=float(r.get("decayed_score", r["score"])),
+            )
+            for r in all_results
+        ]
 
     # ------------------------------------------------------------------
     # Read — novel primitive

@@ -64,12 +64,45 @@ print(f"Novelty: {result.prediction_novelty:.2f}")
 
 ## Quick Start
 
+### No Docker? No problem — in-memory mode
+
+Try LOCI instantly with zero infrastructure using `LocalLociClient`:
+
 ```bash
 pip install loci-db          # or: pip install -e ".[dev]"
-docker run -p 6333:6333 qdrant/qdrant
 ```
 
-### Sync API
+```python
+from loci import LocalLociClient, WorldState
+
+client = LocalLociClient(vector_size=512)
+
+# Insert a world state
+state = WorldState(
+    x=0.5, y=0.3, z=0.8,
+    timestamp_ms=1000,
+    vector=[0.1] * 512,
+    scene_id="my_scene",
+)
+state_id = client.insert(state)
+
+# Query by vector similarity + spatial bounds + time window
+results = client.query(
+    vector=[0.1] * 512,
+    spatial_bounds={"x_min": 0.0, "x_max": 1.0,
+                    "y_min": 0.0, "y_max": 1.0,
+                    "z_min": 0.0, "z_max": 1.0},
+    time_window_ms=(0, 5000),
+    limit=10,
+)
+```
+
+### With Qdrant (production)
+
+```bash
+pip install loci-db
+docker run -p 6333:6333 qdrant/qdrant
+```
 
 ```python
 from loci import LociClient, WorldState
@@ -156,13 +189,19 @@ ws = adapter.from_numpy(embedding, position, ts, scene_id)
 
 ## Performance
 
-| Method | Avg latency (ms) | P95 latency (ms) | Recall@10 |
-|:--|--:|--:|--:|
-| Naive Qdrant (3 float-range filters) | — | — | — |
-| LOCI r4 (Hilbert bucketing + sharding) | — | — | — |
-| LOCI r4 + overlap (20% expansion) | — | — | — |
+Run the publication benchmark to generate numbers for your hardware:
 
-Run benchmarks to fill in: `python benchmarks/vs_naive_qdrant.py`
+```bash
+# In-memory (no Qdrant server needed):
+python benchmarks/vs_naive_qdrant.py
+
+# Against a live Qdrant server:
+QDRANT_URL=http://localhost:6333 python benchmarks/vs_naive_qdrant.py
+```
+
+Results are written to `benchmarks/results/latest.json` and printed as a markdown table.
+
+For the local in-memory backend, run `python benchmarks/local_benchmark.py` for insert/query throughput.
 
 ## Why not SpatCode?
 
@@ -192,7 +231,7 @@ hot/warm/cold storage tiering, or predict-then-retrieve.
 ```
 ┌───────────────────────────────────────────────┐
 │              Application Layer                │
-│  LociClient / AsyncLociClient                 │
+│  LociClient / AsyncLociClient / LocalLociClient│
 │  insert · query · predict_and_retrieve        │
 ├───────────────────────────────────────────────┤
 │              Retrieval Layer                  │
@@ -208,6 +247,7 @@ hot/warm/cold storage tiering, or predict-then-retrieve.
 ├───────────────────────────────────────────────┤
 │              Storage Layer                    │
 │  Qdrant (one collection per temporal epoch)   │
+│  MemoryStore (in-process, no infra needed)    │
 └───────────────────────────────────────────────┘
 ```
 
@@ -227,6 +267,11 @@ git clone https://github.com/zd87pl/loci-db.git
 cd loci-db
 pip install -e ".[dev]"
 pytest tests/ -v
+
+# Linting & formatting (must pass in CI)
+ruff check loci/ tests/
+ruff format --check loci/ tests/
+mypy loci/
 ```
 
 ## Roadmap

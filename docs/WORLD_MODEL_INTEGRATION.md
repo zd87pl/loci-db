@@ -41,8 +41,8 @@ client.insert_batch(states)
 
 The adapter maps patch grid positions to normalized [0, 1] coordinates:
 - `x = w_idx / (W - 1)`
-- `y = h_idx / scene_height`
-- `z = t_idx / scene_depth`
+- `y = h_idx / (H - 1)`
+- `z = t_idx / (T - 1)`
 
 This maps the 2D+time patch grid into the 3D spatial coordinate system. For actual robot applications, you would typically use the robot's SLAM position for (x, y, z) and treat the embedding as the visual representation at that location.
 

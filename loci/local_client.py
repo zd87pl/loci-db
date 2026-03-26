@@ -271,9 +271,8 @@ class LocalLociClient:
 
         # Decay and re-rank
         now_ms = int(time.time() * 1000)
-        if self._decay_lambda > 0 and all_results:
-            apply_decay(all_results, now_ms, self._decay_lambda)
-            stats.decay_applied = True
+        apply_decay(all_results, now_ms, self._decay_lambda)
+        stats.decay_applied = self._decay_lambda > 0
         all_results = all_results[:limit]
 
         stats.elapsed_ms = (time.perf_counter() - t_start) * 1000
@@ -451,11 +450,12 @@ class LocalLociClient:
                 "scene_id": scene_id,
                 "timestamp_ms": {"lt": before_ms},
             },
-            limit=1,
+            limit=100,
             order_by="timestamp_ms",
         )
         if results:
-            return str(results[0]["id"])
+            # Scroll returns ascending order; last item is the latest predecessor
+            return str(results[-1]["id"])
         return None
 
     def _list_active_epochs(self) -> list[int]:
@@ -466,7 +466,7 @@ class LocalLociClient:
                     epochs.append(int(col.split("_", 1)[1]))
                 except ValueError:
                     pass
-        return sorted(epochs) if epochs else [0]
+        return sorted(epochs) if epochs else []
 
 
 # ------------------------------------------------------------------

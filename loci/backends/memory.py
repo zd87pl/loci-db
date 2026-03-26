@@ -144,7 +144,7 @@ class MemoryStore:
             candidates = [p for p in candidates if _matches(p.payload, payload_filter)]
 
         if order_by:
-            candidates.sort(key=lambda p: p.payload.get(order_by, 0), reverse=True)
+            candidates.sort(key=lambda p: p.payload.get(order_by, 0))
 
         return [{"id": p.id, "vector": p.vector, "payload": p.payload} for p in candidates[:limit]]
 

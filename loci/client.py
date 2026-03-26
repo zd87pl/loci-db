@@ -107,6 +107,18 @@ class LociClient:
     # Collection management
     # ------------------------------------------------------------------
 
+    def _discover_collections(self) -> None:
+        """Populate _known_collections from Qdrant (for read-only clients)."""
+        if self._known_collections:
+            return
+        try:
+            response = self._qdrant.get_collections()
+            for col in response.collections:
+                if col.name.startswith("loci_"):
+                    self._known_collections.add(col.name)
+        except Exception:
+            logger.debug("Failed to discover collections", exc_info=True)
+
     def _ensure_collection(self, name: str) -> None:
         """Create a Qdrant collection if it does not already exist (idempotent)."""
         if name in self._known_collections:
@@ -290,6 +302,8 @@ class LociClient:
         Returns:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
         """
+        self._discover_collections()
+
         if time_window_ms is not None:
             start_ms, end_ms = time_window_ms
             epochs = epochs_in_range(start_ms, end_ms, self._epoch_size_ms)
@@ -463,6 +477,7 @@ class LociClient:
         Returns:
             Ordered list of states from oldest to newest.
         """
+        self._discover_collections()
         anchor = self._get_state_by_id(state_id)
         if anchor is None:
             return []
@@ -531,6 +546,7 @@ class LociClient:
         Returns:
             List of :class:`WorldState` sorted by timestamp.
         """
+        self._discover_collections()
         anchor = self._get_state_by_id(state_id)
         if anchor is None or not anchor.scene_id:
             return []
@@ -652,12 +668,13 @@ class LociClient:
                         FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
                     ]
                 ),
-                limit=1,
+                limit=100,
                 order_by="timestamp_ms",
             )
             points = hits[0] if isinstance(hits, tuple) else hits
             if points:
-                return str(points[0].id)
+                # Scroll returns ascending order; last item is the latest predecessor
+                return str(points[-1].id)
         except Exception:
             logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
         return None
@@ -685,4 +702,4 @@ class LociClient:
                     epochs.append(int(col.split("_", 1)[1]))
                 except ValueError:
                     pass
-        return sorted(epochs) if epochs else [0]
+        return sorted(epochs) if epochs else []

@@ -40,18 +40,19 @@ class VJEPA2Adapter:
         self,
         tubelet_embedding: np.ndarray,
         patch_position: tuple[int, int, int],
-        scene_bounds: tuple[float, float, float],
+        grid_shape: tuple[int, int, int],
         timestamp_ms: int,
         scene_id: str,
     ) -> WorldState:
         """Convert a single V-JEPA 2 tubelet to a WorldState.
 
-        Maps patch grid position to normalized (x, y, z) using scene_bounds.
+        Maps patch grid position to normalized (x, y, z) using the grid
+        dimensions so that grid indices are uniformly distributed over [0, 1].
 
         Args:
             tubelet_embedding: Tubelet embedding vector, shape (1408,).
             patch_position: (time_idx, h_idx, w_idx) in the patch grid.
-            scene_bounds: (width, height, depth) of the scene in meters.
+            grid_shape: (T, H, W) dimensions of the patch grid.
                 Used to normalize patch positions to [0, 1].
             timestamp_ms: Timestamp in milliseconds.
             scene_id: Scene identifier for causal linking.
@@ -60,18 +61,15 @@ class VJEPA2Adapter:
             A WorldState with normalized spatial coordinates.
         """
         if tubelet_embedding.ndim != 1:
-            raise ValueError(
-                f"Expected 1D embedding, got shape {tubelet_embedding.shape}"
-            )
+            raise ValueError(f"Expected 1D embedding, got shape {tubelet_embedding.shape}")
 
         t_idx, h_idx, w_idx = patch_position
-        w_bound, h_bound, d_bound = scene_bounds
+        T, H, W = grid_shape
 
         # Normalize grid positions to [0, 1]
-        # Assume the grid covers the scene bounds
-        x = min(1.0, max(0.0, w_idx / max(w_bound, 1.0)))
-        y = min(1.0, max(0.0, h_idx / max(h_bound, 1.0)))
-        z = min(1.0, max(0.0, t_idx / max(d_bound, 1.0)))
+        x = min(1.0, max(0.0, w_idx / max(W - 1, 1)))
+        y = min(1.0, max(0.0, h_idx / max(H - 1, 1)))
+        z = min(1.0, max(0.0, t_idx / max(T - 1, 1)))
 
         return WorldState(
             x=x,
@@ -88,7 +86,6 @@ class VJEPA2Adapter:
     def batch_clip_to_states(
         self,
         clip_embeddings: np.ndarray,
-        scene_bounds: tuple[float, float, float],
         start_timestamp_ms: int,
         scene_id: str,
         frame_interval_ms: int = 33,
@@ -99,7 +96,6 @@ class VJEPA2Adapter:
             clip_embeddings: Full clip output, shape (T, H, W, D) where
                 T=temporal patches, H=height patches, W=width patches,
                 D=embedding dimension (typically 1408).
-            scene_bounds: (width, height, depth) in meters.
             start_timestamp_ms: Timestamp of the first frame.
             scene_id: Scene identifier.
             frame_interval_ms: Time between frames in ms (default 33 ~ 30fps).
@@ -108,11 +104,10 @@ class VJEPA2Adapter:
             List of WorldState objects, one per tubelet.
         """
         if clip_embeddings.ndim != 4:
-            raise ValueError(
-                f"Expected 4D array (T, H, W, D), got shape {clip_embeddings.shape}"
-            )
+            raise ValueError(f"Expected 4D array (T, H, W, D), got shape {clip_embeddings.shape}")
 
         T, H, W, D = clip_embeddings.shape
+        grid_shape = (T, H, W)
         states: list[WorldState] = []
 
         for t in range(T):
@@ -123,7 +118,7 @@ class VJEPA2Adapter:
                         self.tubelet_to_world_state(
                             tubelet_embedding=clip_embeddings[t, h, w],
                             patch_position=(t, h, w),
-                            scene_bounds=scene_bounds,
+                            grid_shape=grid_shape,
                             timestamp_ms=ts,
                             scene_id=scene_id,
                         )

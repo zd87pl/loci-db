@@ -143,7 +143,7 @@ from loci.adapters.generic import GenericAdapter
 
 # V-JEPA 2
 adapter = VJEPA2Adapter()
-states = adapter.batch_clip_to_states(clip_output, scene_bounds, ts, scene_id)
+states = adapter.batch_clip_to_states(clip_output, ts, scene_id)
 
 # DreamerV3
 adapter = DreamerV3Adapter()

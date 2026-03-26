@@ -341,8 +341,9 @@ class TestScroll:
             ],
         )
         results = store.scroll("test", order_by="ts", limit=2)
-        assert results[0]["id"] == "b"
-        assert results[1]["id"] == "c"
+        # Ascending order (matching Qdrant's default scroll behavior)
+        assert results[0]["id"] == "a"  # ts=100
+        assert results[1]["id"] == "c"  # ts=200
 
     def test_scroll_missing_collection(self, store):
         assert store.scroll("nonexistent") == []

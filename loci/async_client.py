@@ -22,14 +22,20 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
+from loci.payload_filters import extra_filter_to_conditions
+from loci.retrieval.predict import PredictRetrieveResult
 from loci.schema import WorldState
 from loci.spatial.adaptive import AdaptiveResolution
+from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
+from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.decay import apply_decay
 from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
+
+_EXACT_FILTER_OVERFETCH = 3
+_SCROLL_PAGE_SIZE = 256
 
 # Map public distance names to Qdrant enum values
 _DISTANCE_MAP: dict[str, Distance] = {
@@ -85,8 +91,8 @@ class AsyncLociClient:
         self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
             AdaptiveResolution(
-                base_order=spatial_resolution,
-                max_order=spatial_resolution + 2,
+                base_order=self._hilbert.resolutions[0],
+                max_order=max(self._hilbert.resolutions),
                 density_threshold=50,
             )
             if adaptive
@@ -184,6 +190,11 @@ class AsyncLociClient:
                             field_name="scale_level",
                             field_schema=PayloadSchemaType.KEYWORD,
                         ),
+                        self._qdrant.create_payload_index(
+                            collection_name=name,
+                            field_name="scene_id",
+                            field_schema=PayloadSchemaType.KEYWORD,
+                        ),
                     ]
                 )
                 await asyncio.gather(*index_tasks)
@@ -218,10 +229,11 @@ class AsyncLociClient:
         payload = _state_to_payload(state, hilbert_ids)
 
         # Causal linking
-        prev_id = await self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
-        if prev_id is not None:
+        predecessor = await self._find_latest_predecessor(state.scene_id, state.timestamp_ms)
+        if predecessor is not None:
+            prev_id, prev_col = predecessor
             payload["prev_state_id"] = prev_id
-            await self._patch_next_link(prev_id, point_id)
+            await self._patch_next_link(prev_id, point_id, collection_hint=prev_col)
 
         await self._retry(
             self._qdrant.upsert,
@@ -246,7 +258,8 @@ class AsyncLociClient:
         ids: list[str] = []
 
         # Track per-scene causal chains within the batch
-        scene_chains: dict[str, str] = {}  # scene_id → latest point_id
+        scene_chains: dict[str, tuple[str, str]] = {}  # scene_id → (latest point_id, collection)
+        prev_collection_by_point: dict[str, str] = {}
 
         # Sort indices by (scene_id, timestamp_ms) for correct linking
         indexed = sorted(enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms))
@@ -269,9 +282,11 @@ class AsyncLociClient:
 
             # Link within the batch
             if state.scene_id and state.scene_id in scene_chains:
-                payload["prev_state_id"] = scene_chains[state.scene_id]
+                prev_id, prev_col = scene_chains[state.scene_id]
+                payload["prev_state_id"] = prev_id
+                prev_collection_by_point[point_id] = prev_col
             if state.scene_id:
-                scene_chains[state.scene_id] = point_id
+                scene_chains[state.scene_id] = (point_id, col)
 
             groups.setdefault(col, []).append(
                 PointStruct(id=point_id, vector=state.vector, payload=payload)
@@ -287,27 +302,24 @@ class AsyncLociClient:
 
         # Patch next_state_id links within the batch
         for col, points in groups.items():
-            for i, point in enumerate(points):
-                prev_id = (point.payload or {}).get("prev_state_id")
-                if prev_id:
-                    # Find the predecessor in this batch and update it
-                    for p in points:
-                        if p.id == prev_id:
-                            try:
-                                await self._retry(
-                                    self._qdrant.set_payload,
-                                    collection_name=col,
-                                    payload={"next_state_id": point.id},
-                                    points=[prev_id],
-                                )
-                            except Exception:
-                                logger.debug(
-                                    "Failed to patch next link %s→%s",
-                                    prev_id,
-                                    point.id,
-                                    exc_info=True,
-                                )
-                            break
+            for point in points:
+                prev_link_id = (point.payload or {}).get("prev_state_id")
+                if prev_link_id:
+                    prev_id_str = str(prev_link_id)
+                    try:
+                        await self._retry(
+                            self._qdrant.set_payload,
+                            collection_name=prev_collection_by_point.get(str(point.id), col),
+                            payload={"next_state_id": point.id},
+                            points=[prev_id_str],
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to patch next link %s→%s",
+                            prev_link_id,
+                            point.id,
+                            exc_info=True,
+                        )
 
         # Return IDs in original order
         ids = [id_by_index[i] for i in range(len(states))]
@@ -325,6 +337,7 @@ class AsyncLociClient:
         limit: int = 10,
         *,
         _extra_payload_filter: dict | None = None,
+        _epoch_ids: set[int] | None = None,
     ) -> list[WorldState]:
         """Search for nearest neighbours with parallel shard fan-out.
 
@@ -346,52 +359,58 @@ class AsyncLociClient:
             epochs = epochs_in_range(start_ms, end_ms, self._epoch_size_ms)
         else:
             epochs = self._list_active_epochs()
+        if _epoch_ids is not None:
+            epochs = [ep for ep in epochs if ep in _epoch_ids]
 
-        collections = [
-            collection_name(e) for e in epochs if collection_name(e) in self._known_collections
+        epoch_collections = [
+            (e, collection_name(e)) for e in epochs if collection_name(e) in self._known_collections
         ]
-        if not collections:
+        if not epoch_collections:
             return []
 
-        # Build filter
-        must_conditions: list = []
-        query_resolution = self._hilbert.resolutions[0]
-
-        if spatial_bounds is not None:
-            hids = self._hilbert.query_buckets(
-                spatial_bounds,
-                resolution=query_resolution,
-                overlap_factor=1.2,
-            )
-            if hids:
-                field = self._hilbert.payload_field(query_resolution)
-                must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
-            else:
-                return []
-
-        if time_window_ms is not None:
-            must_conditions.append(
-                FieldCondition(
-                    key="timestamp_ms",
-                    range=Range(gte=start_ms, lte=end_ms),
-                )
-            )
-
-        if _extra_payload_filter:
-            for key, value in _extra_payload_filter.items():
-                must_conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
-
-        query_filter = Filter(must=must_conditions) if must_conditions else None
+        shard_limit = limit * _EXACT_FILTER_OVERFETCH if spatial_bounds is not None else limit
 
         # Parallel fan-out across shards
-        async def _search_shard(col: str) -> list[dict]:
+        async def _search_shard(ep: int, col: str) -> list[dict]:
+            must_conditions: list = []
+            if spatial_bounds is not None:
+                query_resolution = choose_query_resolution(
+                    self._hilbert,
+                    self._adaptive,
+                    spatial_bounds,
+                    time_window_ms,
+                    ep,
+                    self._epoch_size_ms,
+                    1.2,
+                )
+                hids = self._hilbert.query_buckets(
+                    bounds_for_epoch(spatial_bounds, time_window_ms, ep, self._epoch_size_ms),
+                    resolution=query_resolution,
+                    overlap_factor=1.2,
+                )
+                if not hids:
+                    return []
+                field = self._hilbert.payload_field(query_resolution)
+                must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
+
+            if time_window_ms is not None:
+                must_conditions.append(
+                    FieldCondition(
+                        key="timestamp_ms",
+                        range=Range(gte=start_ms, lte=end_ms),
+                    )
+                )
+
+            must_conditions.extend(extra_filter_to_conditions(_extra_payload_filter))
+
+            query_filter = Filter(must=must_conditions) if must_conditions else None
             try:
                 resp = await self._retry(
                     self._qdrant.query_points,
                     collection_name=col,
                     query=vector,
                     query_filter=query_filter,
-                    limit=limit,
+                    limit=shard_limit,
                     with_vectors=True,
                 )
                 hits = resp.points
@@ -409,10 +428,23 @@ class AsyncLociClient:
                 logger.debug("Search failed on %s", col, exc_info=True)
                 return []
 
-        shard_results = await asyncio.gather(*(_search_shard(col) for col in collections))
+        shard_results = await asyncio.gather(
+            *(_search_shard(ep, col) for ep, col in epoch_collections)
+        )
         all_results: list[dict] = []
         for batch in shard_results:
             all_results.extend(batch)
+
+        if spatial_bounds is not None or time_window_ms is not None:
+            all_results = [
+                r
+                for r in all_results
+                if exact_payload_match(
+                    r["payload"],
+                    spatial_bounds=spatial_bounds,
+                    time_window_ms=time_window_ms,
+                )
+            ]
 
         # Apply temporal decay and re-rank
         now_ms = int(time.time() * 1000)
@@ -434,9 +466,10 @@ class AsyncLociClient:
     ) -> list[WorldState] | PredictRetrieveResult:
         """Predict a future state then retrieve nearest neighbours.
 
-        When ``current_position`` is provided, returns a full
-        :class:`PredictRetrieveResult` with novelty scoring and timing.
-        Otherwise falls back to the legacy API returning a plain list.
+        When ``current_position`` is provided or ``return_prediction`` is
+        enabled, returns a full :class:`PredictRetrieveResult` with novelty
+        scoring and timing. Otherwise falls back to the legacy API returning
+        a plain list.
 
         Args:
             context_vector: Current-state embedding.
@@ -449,25 +482,66 @@ class AsyncLociClient:
             return_prediction: Include predicted vector in result.
 
         Returns:
-            :class:`PredictRetrieveResult` when current_position is set,
-            otherwise a plain list of :class:`WorldState`.
+            :class:`PredictRetrieveResult` when ``current_position`` is set
+            or ``return_prediction`` is ``True``, otherwise a plain list of
+            :class:`WorldState`.
         """
-        if current_position is not None or return_prediction:
-            # PredictThenRetrieve calls self.query() synchronously;
-            # run it in a thread to avoid blocking the event loop
-            ptr = PredictThenRetrieve(self)
-            return ptr.retrieve(
-                context_vector=context_vector,
-                predictor_fn=predictor_fn,
-                future_horizon_ms=future_horizon_ms,
-                current_position=current_position,
-                spatial_search_radius=spatial_search_radius,
-                limit=limit,
-                alpha=alpha,
-                return_prediction=return_prediction,
-            )
+        t_predictor = time.perf_counter()
         predicted_vector = predictor_fn(context_vector)
+        predictor_call_ms = (time.perf_counter() - t_predictor) * 1000
         now_ms = int(time.time() * 1000)
+
+        if current_position is not None or return_prediction:
+            t0 = time.perf_counter()
+            spatial_bounds = None
+            if current_position is not None:
+                x, y, z = current_position
+                spatial_bounds = {
+                    "x_min": max(0.0, x - spatial_search_radius),
+                    "x_max": min(1.0, x + spatial_search_radius),
+                    "y_min": max(0.0, y - spatial_search_radius),
+                    "y_max": min(1.0, y + spatial_search_radius),
+                    "z_min": max(0.0, z - spatial_search_radius),
+                    "z_max": min(1.0, z + spatial_search_radius),
+                }
+
+            raw_results = await self.query(
+                vector=predicted_vector,
+                spatial_bounds=spatial_bounds,
+                time_window_ms=(now_ms, now_ms + future_horizon_ms),
+                limit=limit * 2,
+            )
+            retrieval_latency_ms = (time.perf_counter() - t0) * 1000
+
+            if raw_results:
+                mid_ms = now_ms + future_horizon_ms // 2
+                scored = []
+                for i, ws in enumerate(raw_results):
+                    vector_sim = max(0.0, 1.0 - i / max(len(raw_results), 1))
+                    if future_horizon_ms > 0:
+                        t_dist = abs(ws.timestamp_ms - mid_ms)
+                        temporal_prox = max(0.0, 1.0 - t_dist / (future_horizon_ms / 2))
+                    else:
+                        temporal_prox = 1.0
+                    combined = alpha * vector_sim + (1.0 - alpha) * temporal_prox
+                    scored.append((combined, ws))
+
+                scored.sort(key=lambda x: x[0], reverse=True)
+                results = [ws for _, ws in scored[:limit]]
+                best_score = scored[0][0] if scored else 0.0
+                prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
+            else:
+                results = []
+                prediction_novelty = 1.0
+
+            return PredictRetrieveResult(
+                results=results,
+                prediction_novelty=prediction_novelty,
+                predicted_vector=predicted_vector if return_prediction else None,
+                retrieval_latency_ms=retrieval_latency_ms,
+                predictor_call_ms=predictor_call_ms,
+            )
+
         return await self.query(
             vector=predicted_vector,
             time_window_ms=(now_ms, now_ms + future_horizon_ms),
@@ -495,19 +569,9 @@ class AsyncLociClient:
         Returns:
             List of :class:`WorldState` at the finest available scale.
         """
-        _SCALE_ORDER = ("sequence", "frame", "patch")
-        best: list[WorldState] = []
-        for scale in _SCALE_ORDER:
-            results = await self.query(
-                vector=vector,
-                spatial_bounds=spatial_bounds,
-                time_window_ms=time_window_ms,
-                limit=limit * 3,
-                _extra_payload_filter={"scale_level": scale},
-            )
-            if results:
-                best = results
-        return best[:limit]
+        from loci.retrieval.funnel import async_funnel_search
+
+        return await async_funnel_search(self, vector, spatial_bounds, time_window_ms, limit)
 
     async def get_trajectory(
         self,
@@ -523,13 +587,10 @@ class AsyncLociClient:
         if not anchor.scene_id:
             return [anchor]
 
-        total_needed = steps_back + 1 + steps_forward
-
         async def _scroll_shard(col: str) -> list[WorldState]:
             try:
-                hits = await self._retry(
-                    self._qdrant.scroll,
-                    collection_name=col,
+                points = await self._scroll_all(
+                    collection=col,
                     scroll_filter=Filter(
                         must=[
                             FieldCondition(
@@ -538,11 +599,9 @@ class AsyncLociClient:
                             ),
                         ]
                     ),
-                    limit=total_needed * 2,
                     order_by="timestamp_ms",
                     with_vectors=True,
                 )
-                points = hits[0] if isinstance(hits, tuple) else hits
                 results = []
                 for pt in points:
                     vec = pt.vector
@@ -590,9 +649,8 @@ class AsyncLociClient:
 
         async def _scroll_shard(col: str) -> list[WorldState]:
             try:
-                hits = await self._retry(
-                    self._qdrant.scroll,
-                    collection_name=col,
+                points = await self._scroll_all(
+                    collection=col,
                     scroll_filter=Filter(
                         must=[
                             FieldCondition(
@@ -605,11 +663,9 @@ class AsyncLociClient:
                             ),
                         ]
                     ),
-                    limit=100,
                     order_by="timestamp_ms",
                     with_vectors=True,
                 )
-                points = hits[0] if isinstance(hits, tuple) else hits
                 results = []
                 for pt in points:
                     vec = pt.vector
@@ -654,33 +710,37 @@ class AsyncLociClient:
         return None
 
     async def _find_latest_predecessor(
-        self, collection: str, scene_id: str, before_ms: int
-    ) -> str | None:
+        self, scene_id: str, before_ms: int
+    ) -> tuple[str, str] | None:
         if not scene_id:
             return None
-        try:
-            hits = await self._retry(
-                self._qdrant.scroll,
-                collection_name=collection,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(key="scene_id", match=MatchValue(value=scene_id)),
-                        FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
-                    ]
-                ),
-                limit=100,
-                order_by="timestamp_ms",
-            )
-            points = hits[0] if isinstance(hits, tuple) else hits
-            if points:
-                # Scroll returns ascending order; last item is the latest predecessor
-                return str(points[-1].id)
-        except Exception:
-            logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
+        await self._discover_collections()
+        for collection in self._predecessor_search_collections(before_ms):
+            try:
+                points = await self._scroll_all(
+                    collection=collection,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(key="scene_id", match=MatchValue(value=scene_id)),
+                            FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
+                        ]
+                    ),
+                    order_by="timestamp_ms",
+                )
+                if points:
+                    # Scroll returns ascending order; last item is the latest predecessor
+                    return str(points[-1].id), collection
+            except Exception:
+                logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
         return None
 
-    async def _patch_next_link(self, prev_id: str, next_id: str) -> None:
-        for col in list(self._known_collections):
+    async def _patch_next_link(
+        self, prev_id: str, next_id: str, collection_hint: str | None = None
+    ) -> None:
+        collections = list(self._known_collections)
+        if collection_hint is not None:
+            collections = [collection_hint] + [col for col in collections if col != collection_hint]
+        for col in collections:
             try:
                 await self._retry(
                     self._qdrant.set_payload,
@@ -691,6 +751,39 @@ class AsyncLociClient:
                 return
             except Exception:
                 continue
+
+    async def _scroll_all(
+        self,
+        *,
+        collection: str,
+        scroll_filter: Filter | None = None,
+        order_by: str | None = None,
+        with_vectors: bool = False,
+    ) -> list:
+        """Return the full ordered scroll result for a collection."""
+        offset: object | None = None
+        all_points: list = []
+        while True:
+            hits = await self._retry(
+                self._qdrant.scroll,
+                collection_name=collection,
+                scroll_filter=scroll_filter,
+                limit=_SCROLL_PAGE_SIZE,
+                order_by=order_by,
+                with_vectors=with_vectors,
+                offset=offset,
+            )
+            points, next_offset = hits if isinstance(hits, tuple) else (hits, None)
+            all_points.extend(points)
+            if not points or next_offset is None:
+                break
+            offset = next_offset
+        return all_points
+
+    def _predecessor_search_collections(self, before_ms: int) -> list[str]:
+        target_epoch = epoch_id(before_ms, self._epoch_size_ms)
+        epochs = [ep for ep in self._list_active_epochs() if ep <= target_epoch]
+        return [collection_name(ep) for ep in sorted(epochs, reverse=True)]
 
     def _list_active_epochs(self) -> list[int]:
         epochs: list[int] = []

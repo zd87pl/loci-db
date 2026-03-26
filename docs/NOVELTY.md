@@ -26,9 +26,9 @@
 
 **What exists:** SpatCode (WWW 2026) uses RoPE-style soft encoding that embeds coordinates directly into the embedding space for fuzzy/semantic spatial matching. Hard-filtering approaches (including naive Hilbert bucketing) suffer from boundary recall degradation.
 
-**What LOCI adds:** Points are encoded at three Hilbert resolutions (p=4, 8, 12). Queries use the coarsest resolution with an overlap_factor (default 1.2 = 20% expansion) to catch boundary points, followed by exact coordinate post-filtering.
+**What LOCI adds:** Points are encoded at three Hilbert resolutions (p=4, 8, 12). Queries use an integer Hilbert pre-filter with overlap_factor (default 1.2 = 20% expansion), then apply exact coordinate post-filtering. The default query path starts at the coarsest resolution, while `adaptive=True` can promote denser regions to finer stored resolutions.
 
-**Why it matters:** Preserves recall@k parity with brute-force search while maintaining the speed advantage of integer-set filtering. SpatCode sacrifices exact geometric range queries for soft retrieval; LOCI preserves deterministic spatial boundaries while fixing the recall degradation.
+**Why it matters:** Preserves recall@k parity with brute-force search while maintaining the speed advantage of integer-set filtering. SpatCode sacrifices exact geometric range queries for soft retrieval; LOCI preserves deterministic spatial boundaries while fixing boundary-recall degradation through overlap plus authoritative exact filtering.
 
 ### 3. Temporal Hot/Cold Sharding
 

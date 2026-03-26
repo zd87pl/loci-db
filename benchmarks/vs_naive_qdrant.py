@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Publication-quality benchmark: LOCI vs naive Qdrant.
 
-Compares three query methods against brute-force ground truth:
+Compares four query methods against brute-force ground truth:
 1. Naive Qdrant — single collection, 3 float-range filters (x, y, z) + timestamp
-2. LOCI r4 — Hilbert bucketing at p=4 + temporal sharding (no overlap)
+2. LOCI r4 — historical fixed-r4 baseline without query-time 4D routing
 3. LOCI r4 + overlap — same with overlap_factor=1.2 (20% expanded search)
+4. LOCI current — mirrors the shipped query path: epoch-local 4D bounds,
+   per-shard overfetch, exact post-filtering, and overlap-based Hilbert routing
 
 Four benchmark scenarios:
 A. Tight spatial query  (radius 0.05)
 B. Wide spatial query   (radius 0.5)
 C. Combined spatial + temporal  (radius 0.05, tight time window)
-D. Predict-then-retrieve        (radius 0.3, 1000ms horizon)
+D. Retrieval stress test        (radius 0.3, short time window)
 
 Dataset sizes: N = [1_000, 10_000, 100_000]  (configurable)
 
@@ -21,7 +23,6 @@ Outputs a markdown table and writes results to benchmarks/results/latest.json.
 from __future__ import annotations
 
 import json
-import math
 import os
 import statistics
 import time
@@ -40,8 +41,10 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from loci.spatial.hilbert import HilbertIndex, encode as hilbert_encode
-from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.spatial.filtering import exact_payload_match
+from loci.spatial.hilbert import HilbertIndex
+from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
+from loci.temporal.sharding import epoch_id, epochs_in_range
 
 # ── Configuration ──────────────────────────────────────────────────────────
 VECTOR_DIM = 512
@@ -290,11 +293,13 @@ def setup_loci(
             collection_name=col,
             vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
         )
-        qdrant.create_payload_index(col, "hilbert_r4", PayloadSchemaType.INTEGER)
+        for resolution in _hilbert.resolutions:
+            qdrant.create_payload_index(
+                col,
+                f"hilbert_r{resolution}",
+                PayloadSchemaType.INTEGER,
+            )
         qdrant.create_payload_index(col, "timestamp_ms", PayloadSchemaType.INTEGER)
-        qdrant.create_payload_index(col, "x", PayloadSchemaType.FLOAT)
-        qdrant.create_payload_index(col, "y", PayloadSchemaType.FLOAT)
-        qdrant.create_payload_index(col, "z", PayloadSchemaType.FLOAT)
         batch_size = 500
         for i in range(0, len(points), batch_size):
             qdrant.upsert(collection_name=col, points=points[i : i + batch_size])
@@ -310,7 +315,7 @@ def query_loci(
     overlap_factor: float = 1.0,
     prefix: str = "loci",
 ) -> list[str]:
-    """Run a LOCI query: Hilbert MatchAny + temporal shard routing."""
+    """Run a LOCI query: Hilbert MatchAny + exact post-filter + shard routing."""
     epochs = epochs_in_range(q["t_start"], q["t_end"], EPOCH_SIZE_MS)
     collections = [f"{prefix}_{e}" for e in epochs]
 
@@ -329,9 +334,6 @@ def query_loci(
             key="timestamp_ms",
             range=Range(gte=q["t_start"], lte=q["t_end"]),
         ),
-        FieldCondition(key="x", range=Range(gte=q["x_min"], lte=q["x_max"])),
-        FieldCondition(key="y", range=Range(gte=q["y_min"], lte=q["y_max"])),
-        FieldCondition(key="z", range=Range(gte=q["z_min"], lte=q["z_max"])),
     ]
     if hids:
         must_conditions.append(
@@ -352,14 +354,106 @@ def query_loci(
                 query_filter=query_filter,
                 limit=per_shard_limit,
                 with_vectors=False,
+                with_payload=True,
             )
             for h in resp.points:
-                all_hits.append((str(h.id), h.score))
+                if exact_payload_match(
+                    h.payload or {},
+                    spatial_bounds=bounds,
+                    time_window_ms=(q["t_start"], q["t_end"]),
+                ):
+                    all_hits.append((str(h.id), h.score))
         except Exception:
             continue
 
     all_hits.sort(key=lambda x: x[1], reverse=True)
     return [h[0] for h in all_hits[:LIMIT]]
+
+
+def query_loci_current(
+    qdrant: QdrantClient,
+    q: dict,
+    known_collections: set[str],
+    prefix: str = "loci",
+    overlap_factor: float = 1.2,
+) -> list[str]:
+    """Run the shipped LOCI query path with epoch-local 4D Hilbert routing."""
+    epochs = epochs_in_range(q["t_start"], q["t_end"], EPOCH_SIZE_MS)
+    time_window = (q["t_start"], q["t_end"])
+    spatial_bounds = {
+        "x_min": q["x_min"],
+        "x_max": q["x_max"],
+        "y_min": q["y_min"],
+        "y_max": q["y_max"],
+        "z_min": q["z_min"],
+        "z_max": q["z_max"],
+    }
+    per_shard_limit = LIMIT * 3
+
+    all_hits: list[tuple[str, float]] = []
+    for ep in epochs:
+        col = f"{prefix}_{ep}"
+        if col not in known_collections:
+            continue
+
+        query_resolution = choose_query_resolution(
+            _hilbert,
+            adaptive=None,
+            spatial_bounds=spatial_bounds,
+            time_window_ms=time_window,
+            ep=ep,
+            epoch_size_ms=EPOCH_SIZE_MS,
+            overlap_factor=overlap_factor,
+        )
+        epoch_bounds = bounds_for_epoch(
+            spatial_bounds,
+            time_window,
+            ep,
+            EPOCH_SIZE_MS,
+        )
+        hids = _hilbert.query_buckets(
+            epoch_bounds,
+            resolution=query_resolution,
+            overlap_factor=overlap_factor,
+        )
+        if not hids:
+            continue
+
+        query_filter = Filter(
+            must=[
+                FieldCondition(
+                    key=_hilbert.payload_field(query_resolution),
+                    match=MatchAny(any=hids),
+                ),
+                FieldCondition(
+                    key="timestamp_ms",
+                    range=Range(gte=q["t_start"], lte=q["t_end"]),
+                ),
+            ]
+        )
+
+        try:
+            resp = qdrant.query_points(
+                collection_name=col,
+                query=q["vector"],
+                query_filter=query_filter,
+                limit=per_shard_limit,
+                with_vectors=False,
+                with_payload=True,
+            )
+        except Exception:
+            continue
+
+        for hit in resp.points:
+            if exact_payload_match(
+                hit.payload or {},
+                spatial_bounds=spatial_bounds,
+                time_window_ms=time_window,
+            ):
+                all_hits.append((str(hit.id), hit.score))
+
+    all_hits.sort(key=lambda x: x[1], reverse=True)
+    return [hit_id for hit_id, _ in all_hits[:LIMIT]]
 
 
 # ── Benchmark runner ──────────────────────────────────────────────────────
@@ -415,11 +509,33 @@ def run_scenario(
     ground_truths = [compute_ground_truth(data, q, LIMIT) for q in queries]
 
     results = {}
-    for method_name, query_fn, id_map, overlap in [
-        ("naive_qdrant", lambda q: query_naive(naive_client, q, f"naive_{scenario_id}_{n_vectors}"), naive_id_map, None),
-        ("loci_r4", lambda q: query_loci(loci_client, q, known_collections, 1.0, loci_prefix), loci_id_map, None),
-        ("loci_r4_overlap", lambda q: query_loci(loci_client, q, known_collections, 1.2, loci_prefix), loci_id_map, None),
-    ]:
+    methods = [
+        (
+            "naive_qdrant",
+            lambda q: query_naive(naive_client, q, f"naive_{scenario_id}_{n_vectors}"),
+            naive_id_map,
+            None,
+        ),
+        (
+            "loci_r4",
+            lambda q: query_loci(loci_client, q, known_collections, 1.0, loci_prefix),
+            loci_id_map,
+            None,
+        ),
+        (
+            "loci_r4_overlap",
+            lambda q: query_loci(loci_client, q, known_collections, 1.2, loci_prefix),
+            loci_id_map,
+            None,
+        ),
+        (
+            "loci_current",
+            lambda q: query_loci_current(loci_client, q, known_collections, loci_prefix, 1.2),
+            loci_id_map,
+            None,
+        ),
+    ]
+    for method_name, query_fn, id_map, overlap in methods:
         all_latencies = []
         all_recalls = []
 
@@ -466,15 +582,19 @@ def print_markdown_table(all_results: dict) -> str:
     lines.append("")
     lines.append("## LOCI Benchmark Results")
     lines.append("")
-    lines.append(f"Configuration: dim={VECTOR_DIM}, queries={NUM_QUERIES}, "
-                 f"runs={N_RUNS}, warmup={WARMUP_QUERIES}, limit={LIMIT}")
+    lines.append(
+        f"Configuration: dim={VECTOR_DIM}, queries={NUM_QUERIES}, "
+        f"runs={N_RUNS}, warmup={WARMUP_QUERIES}, limit={LIMIT}"
+    )
     lines.append("")
 
     for n_vectors in DATASET_SIZES:
-        nk = f"{n_vectors // 1000}k" if n_vectors >= 1000 else str(n_vectors)
         lines.append(f"### N = {n_vectors:,}")
         lines.append("")
-        lines.append("| Scenario | Method | Avg (ms) | P50 (ms) | P95 (ms) | P99 (ms) | Recall@10 | QPS |")
+        lines.append(
+            "| Scenario | Method | Avg (ms) | P50 (ms) | "
+            "P95 (ms) | P99 (ms) | Recall@10 | QPS |"
+        )
         lines.append("|:--|:--|--:|--:|--:|--:|--:|--:|")
 
         for sid in ["A", "B", "C", "D"]:
@@ -483,7 +603,7 @@ def print_markdown_table(all_results: dict) -> str:
                 continue
             r = all_results[key]
             scenario_name = SCENARIOS[sid]["name"]
-            for method in ["naive_qdrant", "loci_r4", "loci_r4_overlap"]:
+            for method in ["naive_qdrant", "loci_r4", "loci_r4_overlap", "loci_current"]:
                 if method not in r:
                     continue
                 m = r[method]
@@ -491,6 +611,7 @@ def print_markdown_table(all_results: dict) -> str:
                     "naive_qdrant": "Naive Qdrant",
                     "loci_r4": "LOCI r4",
                     "loci_r4_overlap": "LOCI r4+overlap",
+                    "loci_current": "LOCI current",
                 }[method]
                 lines.append(
                     f"| {scenario_name} | {method_label} "

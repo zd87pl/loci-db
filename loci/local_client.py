@@ -20,14 +20,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from loci.backends.memory import MemoryStore
+from loci.payload_filters import extra_filter_to_memory
 from loci.retrieval.predict import PredictRetrieveResult
 from loci.schema import WorldState
 from loci.spatial.adaptive import AdaptiveResolution
+from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
+from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.decay import apply_decay
 from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
+
+_EXACT_FILTER_OVERFETCH = 3
 
 
 @dataclass
@@ -83,8 +88,8 @@ class LocalLociClient:
         self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
             AdaptiveResolution(
-                base_order=spatial_resolution,
-                max_order=spatial_resolution + 2,
+                base_order=self._hilbert.resolutions[0],
+                max_order=max(self._hilbert.resolutions),
                 density_threshold=50,
             )
             if adaptive
@@ -118,6 +123,7 @@ class LocalLociClient:
             self._store.create_payload_index(name, f"hilbert_r{r}")
         self._store.create_payload_index(name, "timestamp_ms")
         self._store.create_payload_index(name, "scale_level")
+        self._store.create_payload_index(name, "scene_id")
         self._known_collections.add(name)
 
     # ------------------------------------------------------------------
@@ -141,10 +147,11 @@ class LocalLociClient:
         payload = _state_to_payload(state, hilbert_ids)
 
         # Causal linking
-        prev_id = self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
-        if prev_id is not None:
+        predecessor = self._find_latest_predecessor(state.scene_id, state.timestamp_ms)
+        if predecessor is not None:
+            prev_id, prev_col = predecessor
             payload["prev_state_id"] = prev_id
-            self._store.set_payload(col, prev_id, {"next_state_id": point_id})
+            self._store.set_payload(prev_col, prev_id, {"next_state_id": point_id})
 
         self._store.upsert(col, [{"id": point_id, "vector": state.vector, "payload": payload}])
         return point_id
@@ -152,7 +159,8 @@ class LocalLociClient:
     def insert_batch(self, states: list[WorldState]) -> list[str]:
         """Insert a batch with intra-batch causal linking. Input is not mutated."""
         id_by_index: dict[int, str] = {}
-        scene_chains: dict[str, str] = {}
+        scene_chains: dict[str, tuple[str, str]] = {}
+        prev_collection_by_point: dict[str, str] = {}
         groups: dict[str, list[dict]] = {}
 
         indexed = sorted(enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms))
@@ -173,9 +181,11 @@ class LocalLociClient:
             payload = _state_to_payload(state, hilbert_ids)
 
             if state.scene_id and state.scene_id in scene_chains:
-                payload["prev_state_id"] = scene_chains[state.scene_id]
+                prev_id, prev_col = scene_chains[state.scene_id]
+                payload["prev_state_id"] = prev_id
+                prev_collection_by_point[point_id] = prev_col
             if state.scene_id:
-                scene_chains[state.scene_id] = point_id
+                scene_chains[state.scene_id] = (point_id, col)
 
             groups.setdefault(col, []).append(
                 {"id": point_id, "vector": state.vector, "payload": payload}
@@ -189,7 +199,11 @@ class LocalLociClient:
             for point in points:
                 prev_id = point["payload"].get("prev_state_id")
                 if prev_id:
-                    self._store.set_payload(col, prev_id, {"next_state_id": point["id"]})
+                    self._store.set_payload(
+                        prev_collection_by_point.get(point["id"], col),
+                        prev_id,
+                        {"next_state_id": point["id"]},
+                    )
 
         return [id_by_index[i] for i in range(len(states))]
 
@@ -205,6 +219,7 @@ class LocalLociClient:
         limit: int = 10,
         *,
         _extra_payload_filter: dict | None = None,
+        _epoch_ids: set[int] | None = None,
     ) -> list[WorldState]:
         """Search with Hilbert pre-filtering, temporal sharding, and decay.
 
@@ -218,43 +233,49 @@ class LocalLociClient:
             epochs = epochs_in_range(start_ms, end_ms, self._epoch_size_ms)
         else:
             epochs = self._list_active_epochs()
+        if _epoch_ids is not None:
+            epochs = [ep for ep in epochs if ep in _epoch_ids]
 
-        collections = [
-            collection_name(e) for e in epochs if collection_name(e) in self._known_collections
+        epoch_collections = [
+            (e, collection_name(e)) for e in epochs if collection_name(e) in self._known_collections
         ]
-        stats.shards_searched = len(collections)
-
-        # Build filter dict for MemoryStore
-        payload_filter: dict = {}
-
-        query_resolution = self._hilbert.resolutions[0]
-        if spatial_bounds is not None:
-            hids = self._hilbert.query_buckets(
-                spatial_bounds,
-                resolution=query_resolution,
-                overlap_factor=1.2,
-            )
-            if not hids:
-                stats.elapsed_ms = (time.perf_counter() - t_start) * 1000
-                self._last_query_stats = stats
-                return []
-            field = self._hilbert.payload_field(query_resolution)
-            payload_filter[field] = {"any": hids}
-            stats.hilbert_ids_in_filter = len(hids)
-
-        if time_window_ms is not None:
-            payload_filter["timestamp_ms"] = {"gte": start_ms, "lte": end_ms}
-
-        if _extra_payload_filter:
-            payload_filter.update(_extra_payload_filter)
+        stats.shards_searched = len(epoch_collections)
 
         # Search across shards
+        shard_limit = limit * _EXACT_FILTER_OVERFETCH if spatial_bounds is not None else limit
         all_results: list[dict] = []
-        for col in collections:
+        for ep, col in epoch_collections:
+            payload_filter: dict = {}
+            if spatial_bounds is not None:
+                query_resolution = choose_query_resolution(
+                    self._hilbert,
+                    self._adaptive,
+                    spatial_bounds,
+                    time_window_ms,
+                    ep,
+                    self._epoch_size_ms,
+                    1.2,
+                )
+                hids = self._hilbert.query_buckets(
+                    bounds_for_epoch(spatial_bounds, time_window_ms, ep, self._epoch_size_ms),
+                    resolution=query_resolution,
+                    overlap_factor=1.2,
+                )
+                if not hids:
+                    continue
+                field = self._hilbert.payload_field(query_resolution)
+                payload_filter[field] = {"any": hids}
+                stats.hilbert_ids_in_filter += len(hids)
+
+            if time_window_ms is not None:
+                payload_filter["timestamp_ms"] = {"gte": start_ms, "lte": end_ms}
+
+            payload_filter.update(extra_filter_to_memory(_extra_payload_filter))
+
             hits = self._store.search(
                 collection=col,
                 query_vector=vector,
-                limit=limit,
+                limit=shard_limit,
                 payload_filter=payload_filter if payload_filter else None,
             )
             stats.total_candidates += len(hits)
@@ -268,6 +289,17 @@ class LocalLociClient:
                         "id": hit["id"],
                     }
                 )
+
+        if spatial_bounds is not None or time_window_ms is not None:
+            all_results = [
+                r
+                for r in all_results
+                if exact_payload_match(
+                    r["payload"],
+                    spatial_bounds=spatial_bounds,
+                    time_window_ms=time_window_ms,
+                )
+            ]
 
         # Decay and re-rank
         now_ms = int(time.time() * 1000)
@@ -339,19 +371,9 @@ class LocalLociClient:
         Returns:
             List of :class:`WorldState` at the finest available scale.
         """
-        _SCALE_ORDER = ("sequence", "frame", "patch")
-        best: list[WorldState] = []
-        for scale in _SCALE_ORDER:
-            results = self.query(
-                vector=vector,
-                spatial_bounds=spatial_bounds,
-                time_window_ms=time_window_ms,
-                limit=limit * 3,
-                _extra_payload_filter={"scale_level": scale},
-            )
-            if results:
-                best = results
-        return best[:limit]
+        from loci.retrieval.funnel import funnel_search
+
+        return funnel_search(self, vector, spatial_bounds, time_window_ms, limit)
 
     def get_trajectory(
         self,
@@ -366,13 +388,11 @@ class LocalLociClient:
         if not anchor.scene_id:
             return [anchor]
 
-        total_needed = steps_back + 1 + steps_forward
         all_states: list[WorldState] = []
         for col in list(self._known_collections):
-            hits = self._store.scroll(
+            hits = self._scroll_all(
                 collection=col,
                 payload_filter={"scene_id": anchor.scene_id},
-                limit=total_needed * 2,
                 order_by="timestamp_ms",
             )
             for hit in hits:
@@ -407,13 +427,12 @@ class LocalLociClient:
 
         context: list[WorldState] = []
         for col in list(self._known_collections):
-            hits = self._store.scroll(
+            hits = self._scroll_all(
                 collection=col,
                 payload_filter={
                     "scene_id": anchor.scene_id,
                     "timestamp_ms": {"gte": t_min, "lte": t_max},
                 },
-                limit=100,
                 order_by="timestamp_ms",
             )
             for hit in hits:
@@ -439,24 +458,40 @@ class LocalLociClient:
                 return _payload_to_state(r["payload"], r["id"], r["vector"])
         return None
 
-    def _find_latest_predecessor(
-        self, collection: str, scene_id: str, before_ms: int
-    ) -> str | None:
+    def _find_latest_predecessor(self, scene_id: str, before_ms: int) -> tuple[str, str] | None:
         if not scene_id:
             return None
-        results = self._store.scroll(
-            collection=collection,
-            payload_filter={
-                "scene_id": scene_id,
-                "timestamp_ms": {"lt": before_ms},
-            },
-            limit=100,
-            order_by="timestamp_ms",
-        )
-        if results:
-            # Scroll returns ascending order; last item is the latest predecessor
-            return str(results[-1]["id"])
+        for collection in self._predecessor_search_collections(before_ms):
+            results = self._scroll_all(
+                collection=collection,
+                payload_filter={
+                    "scene_id": scene_id,
+                    "timestamp_ms": {"lt": before_ms},
+                },
+                order_by="timestamp_ms",
+            )
+            if results:
+                # Scroll returns ascending order; last item is the latest predecessor
+                return str(results[-1]["id"]), collection
         return None
+
+    def _scroll_all(
+        self,
+        *,
+        collection: str,
+        payload_filter: dict | None = None,
+        order_by: str | None = None,
+    ) -> list[dict]:
+        """Return the full ordered scroll result for a collection."""
+        limit = self._store.collection_count(collection)
+        if limit <= 0:
+            return []
+        return self._store.scroll(
+            collection=collection,
+            payload_filter=payload_filter,
+            limit=limit,
+            order_by=order_by,
+        )
 
     def _list_active_epochs(self) -> list[int]:
         epochs: list[int] = []
@@ -467,6 +502,11 @@ class LocalLociClient:
                 except ValueError:
                     pass
         return sorted(epochs) if epochs else []
+
+    def _predecessor_search_collections(self, before_ms: int) -> list[str]:
+        target_epoch = epoch_id(before_ms, self._epoch_size_ms)
+        epochs = [ep for ep in self._list_active_epochs() if ep <= target_epoch]
+        return [collection_name(ep) for ep in sorted(epochs, reverse=True)]
 
 
 # ------------------------------------------------------------------

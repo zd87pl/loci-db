@@ -115,37 +115,8 @@ class HilbertIndex:
         Returns:
             Sorted list of unique Hilbert IDs.
         """
-        if isinstance(bounds, dict):
-            bounds = SpatialBounds.from_dict(bounds)
-
-        res = resolution if resolution is not None else self.resolutions[0]
-        if res not in self._curves:
-            self._curves[res] = _make_curve(res)
-        curve = self._curves[res]
-        side = (1 << res) - 1
-
-        # Expand bounds by overlap_factor
-        # For zero-width spans (point queries), use minimum padding of one grid cell
-        min_pad = 1.0 / max(side, 1)
-
-        def _expand(lo: float, hi: float) -> tuple[float, float]:
-            span = hi - lo
-            pad = max(span * (overlap_factor - 1.0) / 2.0, min_pad)
-            return max(0.0, lo - pad), min(1.0, hi + pad)
-
-        x_lo, x_hi = _expand(bounds.x_min, bounds.x_max)
-        y_lo, y_hi = _expand(bounds.y_min, bounds.y_max)
-        z_lo, z_hi = _expand(bounds.z_min, bounds.z_max)
-        t_lo, t_hi = _expand(bounds.t_min, bounds.t_max)
-
-        ix_lo = _clamp(math.floor(x_lo * side), 0, side)
-        ix_hi = _clamp(math.ceil(x_hi * side), 0, side)
-        iy_lo = _clamp(math.floor(y_lo * side), 0, side)
-        iy_hi = _clamp(math.ceil(y_hi * side), 0, side)
-        iz_lo = _clamp(math.floor(z_lo * side), 0, side)
-        iz_hi = _clamp(math.ceil(z_hi * side), 0, side)
-        it_lo = _clamp(math.floor(t_lo * side), 0, side)
-        it_hi = _clamp(math.ceil(t_hi * side), 0, side)
+        _, curve, ranges = self._expanded_index_ranges(bounds, resolution, overlap_factor)
+        (ix_lo, ix_hi), (iy_lo, iy_hi), (iz_lo, iz_hi), (it_lo, it_hi) = ranges
 
         ids: set[int] = set()
         for ix, iy, iz, it in itertools.product(
@@ -158,10 +129,58 @@ class HilbertIndex:
 
         return sorted(ids)
 
+    def estimated_bucket_count(
+        self,
+        bounds: SpatialBounds | dict,
+        resolution: int | None = None,
+        overlap_factor: float = 1.2,
+    ) -> int:
+        """Estimate how many Hilbert buckets query_buckets() would enumerate."""
+        _, _, ranges = self._expanded_index_ranges(bounds, resolution, overlap_factor)
+        total = 1
+        for lo, hi in ranges:
+            total *= hi - lo + 1
+        return total
+
     def payload_field(self, resolution: int | None = None) -> str:
         """Return the payload field name for the given resolution."""
         res = resolution if resolution is not None else self.resolutions[0]
         return f"hilbert_r{res}"
+
+    def _expanded_index_ranges(
+        self,
+        bounds: SpatialBounds | dict,
+        resolution: int | None = None,
+        overlap_factor: float = 1.2,
+    ) -> tuple[int, HilbertCurve, tuple[tuple[int, int], ...]]:
+        if isinstance(bounds, dict):
+            bounds = SpatialBounds.from_dict(bounds)
+
+        res = resolution if resolution is not None else self.resolutions[0]
+        if res not in self._curves:
+            self._curves[res] = _make_curve(res)
+        curve = self._curves[res]
+        side = (1 << res) - 1
+
+        min_pad = 1.0 / max(side, 1)
+
+        def _expand(lo: float, hi: float) -> tuple[float, float]:
+            span = hi - lo
+            pad = max(span * (overlap_factor - 1.0) / 2.0, min_pad)
+            return max(0.0, lo - pad), min(1.0, hi + pad)
+
+        x_lo, x_hi = _expand(bounds.x_min, bounds.x_max)
+        y_lo, y_hi = _expand(bounds.y_min, bounds.y_max)
+        z_lo, z_hi = _expand(bounds.z_min, bounds.z_max)
+        t_lo, t_hi = _expand(bounds.t_min, bounds.t_max)
+
+        ranges = (
+            (_clamp(math.floor(x_lo * side), 0, side), _clamp(math.ceil(x_hi * side), 0, side)),
+            (_clamp(math.floor(y_lo * side), 0, side), _clamp(math.ceil(y_hi * side), 0, side)),
+            (_clamp(math.floor(z_lo * side), 0, side), _clamp(math.ceil(z_hi * side), 0, side)),
+            (_clamp(math.floor(t_lo * side), 0, side), _clamp(math.ceil(t_hi * side), 0, side)),
+        )
+        return res, curve, ranges
 
 
 # ---------------------------------------------------------------------------

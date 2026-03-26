@@ -105,6 +105,14 @@ def test_batch_patches_next_links(client, mock_qdrant):
     assert "next_state_id" in call_kwargs["payload"]
 
 
+def test_batch_patches_cross_epoch_next_link_in_predecessor_collection(client, mock_qdrant):
+    states = [_make(4_900), _make(5_100)]
+    client.insert_batch(states)
+
+    call_kwargs = mock_qdrant.set_payload.call_args.kwargs
+    assert call_kwargs["collection_name"] == "loci_0"
+
+
 def test_batch_preserves_original_order(client, mock_qdrant):
     """IDs should be returned in the same order as input states."""
     states = [_make(10_100), _make(10_000), _make(10_050)]

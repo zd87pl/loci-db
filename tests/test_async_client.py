@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from loci.async_client import AsyncLociClient
+from loci.retrieval.predict import PredictRetrieveResult
 from loci.schema import WorldState
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,35 @@ async def test_insert_routes_to_correct_collection(async_client, mock_async_qdra
     assert upsert_call.kwargs["collection_name"] == "loci_2"
 
 
+@pytest.mark.asyncio
+async def test_find_latest_predecessor_paginates_scroll_results(
+    async_client, mock_async_qdrant
+):
+    async_client._known_collections = {"loci_0"}
+
+    page_1 = []
+    for i in range(256):
+        point = MagicMock()
+        point.id = f"p{i}"
+        page_1.append(point)
+
+    page_2 = []
+    for i in range(256, 300):
+        point = MagicMock()
+        point.id = f"p{i}"
+        page_2.append(point)
+
+    mock_async_qdrant.scroll.side_effect = [
+        (page_1, "page-2"),
+        (page_2, None),
+    ]
+
+    predecessor = await async_client._find_latest_predecessor("scene_a", 20_000)
+
+    assert predecessor == ("p299", "loci_0")
+    assert mock_async_qdrant.scroll.call_args_list[1].kwargs["offset"] == "page-2"
+
+
 # ---------------------------------------------------------------------------
 # Insert batch with causal linking
 # ---------------------------------------------------------------------------
@@ -254,6 +284,100 @@ async def test_query_parallel_fanout(async_client, mock_async_qdrant):
     assert mock_async_qdrant.query_points.call_count == 2
 
 
+@pytest.mark.asyncio
+async def test_query_applies_exact_post_filter(async_client, mock_async_qdrant):
+    await async_client.insert(_make_state())
+
+    inside = MagicMock()
+    inside.score = 0.8
+    inside.id = "inside"
+    inside.vector = [1.0, 0.0, 0.0, 0.0]
+    inside.payload = {
+        "x": 0.02,
+        "y": 0.02,
+        "z": 0.02,
+        "timestamp_ms": 10_000,
+        "scene_id": "s1",
+        "scale_level": "patch",
+        "confidence": 1.0,
+    }
+
+    outside = MagicMock()
+    outside.score = 0.99
+    outside.id = "outside"
+    outside.vector = [1.0, 0.0, 0.0, 0.0]
+    outside.payload = {
+        "x": 0.08,
+        "y": 0.08,
+        "z": 0.08,
+        "timestamp_ms": 10_000,
+        "scene_id": "s1",
+        "scale_level": "patch",
+        "confidence": 1.0,
+    }
+
+    qr = MagicMock()
+    qr.points = [outside, inside]
+    mock_async_qdrant.query_points = AsyncMock(return_value=qr)
+
+    results = await async_client.query(
+        vector=[1.0, 0.0, 0.0, 0.0],
+        spatial_bounds={
+            "x_min": 0.0,
+            "x_max": 0.03,
+            "y_min": 0.0,
+            "y_max": 0.03,
+            "z_min": 0.0,
+            "z_max": 0.03,
+        },
+        time_window_ms=(9_000, 11_000),
+        limit=5,
+    )
+
+    assert [result.id for result in results] == ["inside"]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_query_uses_finer_hilbert_field(mock_async_qdrant):
+    from loci.spatial.adaptive import AdaptiveResolution
+
+    async_client = AsyncLociClient(
+        qdrant_url="http://fake:6333",
+        epoch_size_ms=5000,
+        spatial_resolution=4,
+        vector_size=4,
+        decay_lambda=0.0,
+        adaptive=True,
+    )
+    async_client._adaptive = AdaptiveResolution(base_order=4, max_order=12, density_threshold=3)
+
+    for i in range(10):
+        await async_client.insert(_make_state(timestamp_ms=1000 + i * 10))
+
+    mock_async_qdrant.query_points.reset_mock()
+    _empty_qr = MagicMock()
+    _empty_qr.points = []
+    mock_async_qdrant.query_points = AsyncMock(return_value=_empty_qr)
+
+    await async_client.query(
+        vector=[1.0, 2.0, 3.0, 4.0],
+        spatial_bounds={
+            "x_min": 0.49,
+            "x_max": 0.51,
+            "y_min": 0.49,
+            "y_max": 0.51,
+            "z_min": 0.49,
+            "z_max": 0.51,
+        },
+        time_window_ms=(1000, 1100),
+        limit=5,
+    )
+
+    filt = mock_async_qdrant.query_points.call_args.kwargs["query_filter"]
+    keys = {condition.key for condition in filt.must}
+    assert "hilbert_r8" in keys
+
+
 # ---------------------------------------------------------------------------
 # Distance metric
 # ---------------------------------------------------------------------------
@@ -292,6 +416,80 @@ async def test_predict_and_retrieve(async_client, mock_async_qdrant):
     )
 
     predictor.assert_called_once_with([1.0, 2.0, 3.0, 4.0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "current_position, return_prediction, expected_predicted_vector, expected_spatial_bounds",
+    [
+        (
+            (0.5, 0.5, 0.5),
+            False,
+            None,
+            {
+                "x_min": 0.3,
+                "x_max": 0.7,
+                "y_min": 0.3,
+                "y_max": 0.7,
+                "z_min": 0.3,
+                "z_max": 0.7,
+            },
+        ),
+        (None, True, [9.0, 8.0, 7.0, 6.0], None),
+    ],
+)
+async def test_predict_and_retrieve_extended_path(
+    async_client,
+    current_position,
+    return_prediction,
+    expected_predicted_vector,
+    expected_spatial_bounds,
+):
+    import time as _time
+
+    now_ms = int(_time.time() * 1000)
+    hit = _make_state(timestamp_ms=now_ms + 500)
+    async_client.query = AsyncMock(return_value=[hit])
+
+    predicted = [9.0, 8.0, 7.0, 6.0]
+    predictor = MagicMock(return_value=predicted)
+
+    with patch("loci.async_client.time.time", return_value=now_ms / 1000.0):
+        result = await async_client.predict_and_retrieve(
+            context_vector=[1.0, 2.0, 3.0, 4.0],
+            predictor_fn=predictor,
+            future_horizon_ms=2000,
+            limit=3,
+            current_position=current_position,
+            spatial_search_radius=0.2,
+            return_prediction=return_prediction,
+        )
+
+    assert isinstance(result, PredictRetrieveResult)
+    assert result.results == [hit]
+    assert result.predicted_vector == expected_predicted_vector
+    assert result.retrieval_latency_ms >= 0.0
+    assert result.predictor_call_ms >= 0.0
+    predictor.assert_called_once_with([1.0, 2.0, 3.0, 4.0])
+    async_client.query.assert_awaited_once_with(
+        vector=predicted,
+        spatial_bounds=expected_spatial_bounds,
+        time_window_ms=(now_ms, now_ms + 2000),
+        limit=6,
+    )
+
+
+@pytest.mark.asyncio
+async def test_insert_batch_patches_cross_epoch_next_link(async_client, mock_async_qdrant):
+    states = [
+        _make_state(timestamp_ms=4_900, scene_id="scene_a"),
+        _make_state(timestamp_ms=5_100, scene_id="scene_a"),
+    ]
+
+    await async_client.insert_batch(states)
+
+    call_kwargs = mock_async_qdrant.set_payload.call_args.kwargs
+    assert call_kwargs["collection_name"] == "loci_0"
 
 
 # ---------------------------------------------------------------------------

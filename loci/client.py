@@ -21,15 +21,21 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+from loci.payload_filters import extra_filter_to_conditions
 from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
 from loci.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
 from loci.schema import WorldState
 from loci.spatial.adaptive import AdaptiveResolution
+from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
+from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.decay import apply_decay
 from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
+
+_EXACT_FILTER_OVERFETCH = 3
+_SCROLL_PAGE_SIZE = 256
 
 # Map public distance names to Qdrant enum values
 _DISTANCE_MAP: dict[str, Distance] = {
@@ -83,8 +89,8 @@ class LociClient:
         self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
             AdaptiveResolution(
-                base_order=spatial_resolution,
-                max_order=spatial_resolution + 2,
+                base_order=self._hilbert.resolutions[0],
+                max_order=max(self._hilbert.resolutions),
                 density_threshold=50,
             )
             if adaptive
@@ -158,6 +164,11 @@ class LociClient:
                 field_name="scale_level",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
+            self._qdrant.create_payload_index(
+                collection_name=name,
+                field_name="scene_id",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
 
         self._known_collections.add(name)
 
@@ -191,10 +202,11 @@ class LociClient:
         payload = self._state_to_payload(state, hilbert_ids)
 
         # Causal linking
-        prev_id = self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
-        if prev_id is not None:
+        predecessor = self._find_latest_predecessor(state.scene_id, state.timestamp_ms)
+        if predecessor is not None:
+            prev_id, prev_col = predecessor
             payload["prev_state_id"] = prev_id
-            self._patch_next_link(prev_id, point_id)
+            self._patch_next_link(prev_id, point_id, collection_hint=prev_col)
 
         self._retry(
             self._qdrant.upsert,
@@ -219,7 +231,8 @@ class LociClient:
         """
         groups: dict[str, list[PointStruct]] = {}
         id_by_index: dict[int, str] = {}
-        scene_chains: dict[str, str] = {}  # scene_id → latest point_id
+        scene_chains: dict[str, tuple[str, str]] = {}  # scene_id → (latest point_id, collection)
+        prev_collection_by_point: dict[str, str] = {}
 
         # Sort by (scene_id, timestamp) to build correct causal chains
         indexed = sorted(enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms))
@@ -241,9 +254,11 @@ class LociClient:
 
             # Causal link within the batch
             if state.scene_id and state.scene_id in scene_chains:
-                payload["prev_state_id"] = scene_chains[state.scene_id]
+                prev_id, prev_col = scene_chains[state.scene_id]
+                payload["prev_state_id"] = prev_id
+                prev_collection_by_point[point_id] = prev_col
             if state.scene_id:
-                scene_chains[state.scene_id] = point_id
+                scene_chains[state.scene_id] = (point_id, col)
 
             groups.setdefault(col, []).append(
                 PointStruct(id=point_id, vector=state.vector, payload=payload)
@@ -255,19 +270,20 @@ class LociClient:
         # Patch next_state_id for intra-batch links
         for col, points in groups.items():
             for point in points:
-                prev_id = (point.payload or {}).get("prev_state_id")
-                if prev_id:
+                prev_link_id = (point.payload or {}).get("prev_state_id")
+                if prev_link_id:
+                    prev_id_str = str(prev_link_id)
                     try:
                         self._retry(
                             self._qdrant.set_payload,
-                            collection_name=col,
+                            collection_name=prev_collection_by_point.get(str(point.id), col),
                             payload={"next_state_id": point.id},
-                            points=[prev_id],
+                            points=[prev_id_str],
                         )
                     except Exception:
                         logger.debug(
                             "Failed to patch next link %s→%s",
-                            prev_id,
+                            prev_link_id,
                             point.id,
                             exc_info=True,
                         )
@@ -286,6 +302,7 @@ class LociClient:
         limit: int = 10,
         *,
         _extra_payload_filter: dict | None = None,
+        _epoch_ids: set[int] | None = None,
         overlap_factor: float = 1.2,
     ) -> list[WorldState]:
         """Search for nearest neighbours with spatial and temporal filtering.
@@ -309,49 +326,55 @@ class LociClient:
             epochs = epochs_in_range(start_ms, end_ms, self._epoch_size_ms)
         else:
             epochs = self._list_active_epochs()
+        if _epoch_ids is not None:
+            epochs = [ep for ep in epochs if ep in _epoch_ids]
 
-        collections = [collection_name(e) for e in epochs]
-
-        must_conditions: list = []
-        query_resolution = self._hilbert.resolutions[0]
-
-        if spatial_bounds is not None:
-            hids = self._hilbert.query_buckets(
-                spatial_bounds,
-                resolution=query_resolution,
-                overlap_factor=overlap_factor,
-            )
-            if hids:
-                field = self._hilbert.payload_field(query_resolution)
-                must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
-            else:
-                return []
-
-        if time_window_ms is not None:
-            must_conditions.append(
-                FieldCondition(
-                    key="timestamp_ms",
-                    range=Range(gte=start_ms, lte=end_ms),
-                )
-            )
-
-        if _extra_payload_filter:
-            for key, value in _extra_payload_filter.items():
-                must_conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
-
-        query_filter = Filter(must=must_conditions) if must_conditions else None
-
+        shard_limit = limit * _EXACT_FILTER_OVERFETCH if spatial_bounds is not None else limit
         all_results: list[dict] = []
-        for col in collections:
+        for ep in epochs:
+            col = collection_name(ep)
             if col not in self._known_collections:
                 continue
+
+            must_conditions: list = []
+            if spatial_bounds is not None:
+                query_resolution = choose_query_resolution(
+                    self._hilbert,
+                    self._adaptive,
+                    spatial_bounds,
+                    time_window_ms,
+                    ep,
+                    self._epoch_size_ms,
+                    overlap_factor,
+                )
+                hids = self._hilbert.query_buckets(
+                    bounds_for_epoch(spatial_bounds, time_window_ms, ep, self._epoch_size_ms),
+                    resolution=query_resolution,
+                    overlap_factor=overlap_factor,
+                )
+                if not hids:
+                    continue
+                field = self._hilbert.payload_field(query_resolution)
+                must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
+
+            if time_window_ms is not None:
+                must_conditions.append(
+                    FieldCondition(
+                        key="timestamp_ms",
+                        range=Range(gte=start_ms, lte=end_ms),
+                    )
+                )
+
+            must_conditions.extend(extra_filter_to_conditions(_extra_payload_filter))
+
+            query_filter = Filter(must=must_conditions) if must_conditions else None
             try:
                 resp = self._retry(
                     self._qdrant.query_points,
                     collection_name=col,
                     query=vector,
                     query_filter=query_filter,
-                    limit=limit,
+                    limit=shard_limit,
                     with_vectors=True,
                 )
                 hits = resp.points
@@ -367,6 +390,17 @@ class LociClient:
                         "id": hit.id,
                     }
                 )
+
+        if spatial_bounds is not None or time_window_ms is not None:
+            all_results = [
+                r
+                for r in all_results
+                if exact_payload_match(
+                    r["payload"],
+                    spatial_bounds=spatial_bounds,
+                    time_window_ms=time_window_ms,
+                )
+            ]
 
         now_ms = int(time.time() * 1000)
         apply_decay(all_results, now_ms, self._decay_lambda)
@@ -484,14 +518,11 @@ class LociClient:
         if not anchor.scene_id:
             return [anchor]
 
-        # Scroll for all states in the same scene across known collections
-        total_needed = steps_back + 1 + steps_forward
         all_states: list[WorldState] = []
         for col in list(self._known_collections):
             try:
-                hits = self._retry(
-                    self._qdrant.scroll,
-                    collection_name=col,
+                points = self._scroll_all(
+                    collection=col,
                     scroll_filter=Filter(
                         must=[
                             FieldCondition(
@@ -500,11 +531,9 @@ class LociClient:
                             ),
                         ]
                     ),
-                    limit=total_needed * 2,
                     order_by="timestamp_ms",
                     with_vectors=True,
                 )
-                points = hits[0] if isinstance(hits, tuple) else hits
                 for pt in points:
                     vec = pt.vector
                     if isinstance(vec, dict):
@@ -557,9 +586,8 @@ class LociClient:
         context: list[WorldState] = []
         for col in list(self._known_collections):
             try:
-                hits = self._retry(
-                    self._qdrant.scroll,
-                    collection_name=col,
+                points = self._scroll_all(
+                    collection=col,
                     scroll_filter=Filter(
                         must=[
                             FieldCondition(
@@ -572,11 +600,9 @@ class LociClient:
                             ),
                         ]
                     ),
-                    limit=100,
                     order_by="timestamp_ms",
                     with_vectors=True,
                 )
-                points = hits[0] if isinstance(hits, tuple) else hits
                 for pt in points:
                     vec = pt.vector
                     if isinstance(vec, dict):
@@ -652,36 +678,38 @@ class LociClient:
                 continue
         return None
 
-    def _find_latest_predecessor(
-        self, collection: str, scene_id: str, before_ms: int
-    ) -> str | None:
+    def _find_latest_predecessor(self, scene_id: str, before_ms: int) -> tuple[str, str] | None:
         """Find the most recent state in the same scene before a timestamp."""
         if not scene_id:
             return None
-        try:
-            hits = self._retry(
-                self._qdrant.scroll,
-                collection_name=collection,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(key="scene_id", match=MatchValue(value=scene_id)),
-                        FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
-                    ]
-                ),
-                limit=100,
-                order_by="timestamp_ms",
-            )
-            points = hits[0] if isinstance(hits, tuple) else hits
-            if points:
-                # Scroll returns ascending order; last item is the latest predecessor
-                return str(points[-1].id)
-        except Exception:
-            logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
+        self._discover_collections()
+        for collection in self._predecessor_search_collections(before_ms):
+            try:
+                points = self._scroll_all(
+                    collection=collection,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(key="scene_id", match=MatchValue(value=scene_id)),
+                            FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
+                        ]
+                    ),
+                    order_by="timestamp_ms",
+                )
+                if points:
+                    # Scroll returns ascending order; last item is the latest predecessor
+                    return str(points[-1].id), collection
+            except Exception:
+                logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
         return None
 
-    def _patch_next_link(self, prev_id: str, next_id: str) -> None:
+    def _patch_next_link(
+        self, prev_id: str, next_id: str, collection_hint: str | None = None
+    ) -> None:
         """Update the predecessor's next_state_id payload field."""
-        for col in list(self._known_collections):
+        collections = list(self._known_collections)
+        if collection_hint is not None:
+            collections = [collection_hint] + [col for col in collections if col != collection_hint]
+        for col in collections:
             try:
                 self._retry(
                     self._qdrant.set_payload,
@@ -692,6 +720,39 @@ class LociClient:
                 return
             except Exception:
                 continue
+
+    def _scroll_all(
+        self,
+        *,
+        collection: str,
+        scroll_filter: Filter | None = None,
+        order_by: str | None = None,
+        with_vectors: bool = False,
+    ) -> list:
+        """Return the full ordered scroll result for a collection."""
+        offset: object | None = None
+        all_points: list = []
+        while True:
+            hits = self._retry(
+                self._qdrant.scroll,
+                collection_name=collection,
+                scroll_filter=scroll_filter,
+                limit=_SCROLL_PAGE_SIZE,
+                order_by=order_by,
+                with_vectors=with_vectors,
+                offset=offset,
+            )
+            points, next_offset = hits if isinstance(hits, tuple) else (hits, None)
+            all_points.extend(points)
+            if not points or next_offset is None:
+                break
+            offset = next_offset
+        return all_points
+
+    def _predecessor_search_collections(self, before_ms: int) -> list[str]:
+        target_epoch = epoch_id(before_ms, self._epoch_size_ms)
+        epochs = [ep for ep in self._list_active_epochs() if ep <= target_epoch]
+        return [collection_name(ep) for ep in sorted(epochs, reverse=True)]
 
     def _list_active_epochs(self) -> list[int]:
         """Return epoch IDs for all known collections."""

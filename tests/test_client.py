@@ -129,6 +129,7 @@ class TestEnsureCollection:
         index_calls = mock_qdrant.create_payload_index.call_args_list
         field_names = [c.kwargs["field_name"] for c in index_calls]
         assert "scale_level" in field_names
+        assert "scene_id" in field_names
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +179,31 @@ class TestInsert:
         assert payload["x"] == 0.5
         assert payload["y"] == 0.5
         assert payload["z"] == 0.5
+
+    def test_find_latest_predecessor_paginates_scroll_results(self, client, mock_qdrant):
+        client._known_collections = {"loci_0"}
+
+        page_1 = []
+        for i in range(256):
+            point = MagicMock()
+            point.id = f"p{i}"
+            page_1.append(point)
+
+        page_2 = []
+        for i in range(256, 300):
+            point = MagicMock()
+            point.id = f"p{i}"
+            page_2.append(point)
+
+        mock_qdrant.scroll.side_effect = [
+            (page_1, "page-2"),
+            (page_2, None),
+        ]
+
+        predecessor = client._find_latest_predecessor("scene_a", 20_000)
+
+        assert predecessor == ("p299", "loci_0")
+        assert mock_qdrant.scroll.call_args_list[1].kwargs["offset"] == "page-2"
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +320,92 @@ class TestQuery:
         assert filt is not None
         # Should have at least a hilbert_id MatchAny and a timestamp Range
         assert len(filt.must) >= 2
+
+    def test_spatial_query_applies_exact_post_filter(self, client, mock_qdrant):
+        client.insert(_make_state())
+
+        inside = MagicMock()
+        inside.score = 0.8
+        inside.id = "inside"
+        inside.vector = [1.0, 0.0, 0.0, 0.0]
+        inside.payload = {
+            "x": 0.02,
+            "y": 0.02,
+            "z": 0.02,
+            "timestamp_ms": 10_000,
+            "scene_id": "s1",
+            "scale_level": "patch",
+            "confidence": 1.0,
+        }
+
+        outside = MagicMock()
+        outside.score = 0.99
+        outside.id = "outside"
+        outside.vector = [1.0, 0.0, 0.0, 0.0]
+        outside.payload = {
+            "x": 0.08,
+            "y": 0.08,
+            "z": 0.08,
+            "timestamp_ms": 10_000,
+            "scene_id": "s1",
+            "scale_level": "patch",
+            "confidence": 1.0,
+        }
+
+        qr = MagicMock()
+        qr.points = [outside, inside]
+        mock_qdrant.query_points.return_value = qr
+
+        results = client.query(
+            vector=[1.0, 0.0, 0.0, 0.0],
+            spatial_bounds={
+                "x_min": 0.0,
+                "x_max": 0.03,
+                "y_min": 0.0,
+                "y_max": 0.03,
+                "z_min": 0.0,
+                "z_max": 0.03,
+            },
+            time_window_ms=(9_000, 11_000),
+            limit=5,
+        )
+
+        assert [result.id for result in results] == ["inside"]
+
+    def test_adaptive_query_uses_finer_hilbert_field(self, mock_qdrant):
+        from loci.spatial.adaptive import AdaptiveResolution
+
+        client = LociClient(
+            qdrant_url="http://fake:6333",
+            epoch_size_ms=5000,
+            spatial_resolution=4,
+            vector_size=4,
+            decay_lambda=0.0,
+            adaptive=True,
+        )
+        client._adaptive = AdaptiveResolution(base_order=4, max_order=12, density_threshold=3)
+
+        for i in range(10):
+            client.insert(_make_state(timestamp_ms=1000 + i * 10))
+
+        mock_qdrant.query_points.reset_mock()
+        client.query(
+            vector=[1.0, 2.0, 3.0, 4.0],
+            spatial_bounds={
+                "x_min": 0.49,
+                "x_max": 0.51,
+                "y_min": 0.49,
+                "y_max": 0.51,
+                "z_min": 0.49,
+                "z_max": 0.51,
+            },
+            time_window_ms=(1000, 1100),
+            limit=5,
+        )
+
+        filt = mock_qdrant.query_points.call_args.kwargs["query_filter"]
+        keys = {condition.key for condition in filt.must}
+        assert "hilbert_r8" in keys
 
 
 # ---------------------------------------------------------------------------

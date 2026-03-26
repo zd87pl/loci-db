@@ -105,3 +105,21 @@ def test_causal_context_missing_state_returns_empty() -> None:
     client = _make_client()
     context = client.get_causal_context("nonexistent_id", window_ms=5000)
     assert context == []
+
+
+def test_causal_context_returns_full_window_beyond_previous_page_limit() -> None:
+    """Large context windows should not truncate at the old hard-coded limit."""
+    random.seed(42)
+    client = _make_client()
+    now = int(time.time() * 1000)
+
+    states = [
+        WorldState(x=0.5, y=0.5, z=0.5, timestamp_ms=now + i * 10, vector=_vec(), scene_id="s1")
+        for i in range(150)
+    ]
+    ids = client.insert_batch(states)
+
+    context = client.get_causal_context(ids[75], window_ms=2000)
+
+    assert len(context) == 150
+    assert [ws.timestamp_ms for ws in context] == [state.timestamp_ms for state in states]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from loci.local_client import LocalLociClient
@@ -104,3 +106,34 @@ class TestAdaptiveEnabled:
             c.insert(_make_state(ts=i * 100))
         stats = c.density_stats
         assert stats.hot_cells >= 1
+
+    def test_query_uses_finer_hilbert_field_in_hot_region(self):
+        from loci.spatial.adaptive import AdaptiveResolution
+
+        c = LocalLociClient(
+            vector_size=VEC_SIZE,
+            decay_lambda=0,
+            adaptive=True,
+        )
+        c._adaptive = AdaptiveResolution(base_order=4, max_order=12, density_threshold=3)
+
+        for i in range(10):
+            c.insert(_make_state(x=0.5, y=0.5, z=0.5, ts=1000 + i * 10))
+
+        with patch.object(c.store, "search", wraps=c.store.search) as search_mock:
+            c.query(
+                vector=[1, 0, 0, 0],
+                spatial_bounds={
+                    "x_min": 0.49,
+                    "x_max": 0.51,
+                    "y_min": 0.49,
+                    "y_max": 0.51,
+                    "z_min": 0.49,
+                    "z_max": 0.51,
+                },
+                time_window_ms=(1000, 1100),
+                limit=5,
+            )
+
+        payload_filter = search_mock.call_args.kwargs["payload_filter"]
+        assert "hilbert_r8" in payload_filter

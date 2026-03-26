@@ -143,9 +143,7 @@ async def test_insert_routes_to_correct_collection(async_client, mock_async_qdra
 
 
 @pytest.mark.asyncio
-async def test_find_latest_predecessor_paginates_scroll_results(
-    async_client, mock_async_qdrant
-):
+async def test_find_latest_predecessor_paginates_scroll_results(async_client, mock_async_qdrant):
     async_client._known_collections = {"loci_0"}
 
     page_1 = []

@@ -238,7 +238,7 @@ See [ROADMAP.md](ROADMAP.md) for the v0.1 → v1.0 plan.
 ```bibtex
 @misc{loci2026,
   title={LOCI: A 4D Spatiotemporal Vector Database for AI World Models},
-  author={Dyras, Zbigniew},
+  author={Dyras, Zygmunt},
   year={2026},
   url={https://github.com/zd87pl/loci-db}
 }

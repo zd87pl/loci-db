@@ -556,4 +556,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import sys
+
+    if "--quick" in sys.argv:
+        DATASET_SIZES = [1_000]
+        NUM_QUERIES = 10
+        WARMUP_QUERIES = 2
+        N_RUNS = 1
+        print("  (quick mode: N=1000, 10 queries, 1 run)\n")
     main()

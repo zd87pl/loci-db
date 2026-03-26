@@ -119,7 +119,7 @@ def test_predict_then_retrieve_timestamp_zero_handled() -> None:
     mock_client.query.return_value = []
 
     ptr = PredictThenRetrieve(mock_client)
-    result = ptr.retrieve(
+    ptr.retrieve(
         context_vector=[1.0],
         predictor_fn=lambda v: v,
         future_horizon_ms=1000,

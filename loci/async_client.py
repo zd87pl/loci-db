@@ -23,7 +23,6 @@ from qdrant_client.models import (
 )
 
 from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
-from loci.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
 from loci.schema import WorldState
 from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.hilbert import HilbertIndex

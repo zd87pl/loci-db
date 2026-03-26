@@ -7,13 +7,13 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from engram.client import EngramClient
-from engram.schema import WorldState
+from loci.client import LociClient
+from loci.schema import WorldState
 
 
 @pytest.fixture()
 def mock_qdrant():
-    with patch("engram.client.QdrantClient") as MockCls:
+    with patch("loci.client.QdrantClient") as MockCls:
         instance = MagicMock()
         MockCls.return_value = instance
 
@@ -31,7 +31,7 @@ def mock_qdrant():
 
 @pytest.fixture()
 def client(mock_qdrant):
-    return EngramClient(
+    return LociClient(
         qdrant_url="http://fake:6333",
         epoch_size_ms=5000,
         spatial_resolution=4,

@@ -14,15 +14,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from engram.client import EngramClient
-    from engram.schema import WorldState
+    from loci.client import LociClient
+    from loci.schema import WorldState
 
 
 _SCALE_ORDER = ("sequence", "frame", "patch")
 
 
 def funnel_search(
-    client: EngramClient,
+    client: LociClient,
     vector: list[float],
     spatial_bounds: dict | None = None,
     time_window_ms: tuple[int, int] | None = None,
@@ -34,7 +34,7 @@ def funnel_search(
     Returns results at the finest scale that produced any hits.
 
     Args:
-        client: Initialised :class:`EngramClient`.
+        client: Initialised :class:`LociClient`.
         vector: Query embedding.
         spatial_bounds: Optional spatial bounding box dict.
         time_window_ms: Optional ``(start_ms, end_ms)`` time window.

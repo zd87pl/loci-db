@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Predict-then-retrieve demo — anticipatory retrieval with a linear predictor.
+"""Predict-then-retrieve demo — anticipatory retrieval with novelty scoring.
 
 Simulates a robot on a patrol loop (200 states), defines a simple linear
 predictor, and demonstrates predict_and_retrieve: finding stored states
 that are similar to where the robot is *predicted* to be in the future.
 
+Uses the production PredictRetrieveResult API with novelty scoring.
+
 Requires a local Qdrant instance running on http://localhost:6333, OR
-falls back to the zero-dependency LocalEngramClient automatically.
+falls back to the zero-dependency LocalLociClient automatically.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import math
 import random
 import time
 
-from engram.schema import WorldState
+from loci.schema import WorldState
 
 VECTOR_DIM = 128
 NUM_STATES = 200
@@ -79,9 +81,9 @@ def linear_predictor(context_vector: list[float]) -> list[float]:
 def main() -> None:
     # Try Qdrant, fall back to local
     try:
-        from engram import EngramClient
+        from loci import LociClient
 
-        client = EngramClient(
+        client = LociClient(
             qdrant_url="http://localhost:6333",
             epoch_size_ms=5000,
             spatial_resolution=4,
@@ -90,14 +92,14 @@ def main() -> None:
         client._qdrant.get_collections()
         print("Connected to Qdrant at localhost:6333")
     except Exception:
-        from engram import LocalEngramClient
+        from loci import LocalLociClient
 
-        client = LocalEngramClient(
+        client = LocalLociClient(
             epoch_size_ms=5000,
             spatial_resolution=4,
             vector_size=VECTOR_DIM,
         )
-        print("Qdrant not available — using LocalEngramClient (in-memory)")
+        print("Qdrant not available — using LocalLociClient (in-memory)")
 
     now_ms = int(time.time() * 1000)
     states = make_patrol_states(now_ms)
@@ -107,8 +109,8 @@ def main() -> None:
     ids = client.insert_batch(states)
     print(f"  Inserted {len(ids)} states across the patrol loop.")
 
-    # --- Pick a point halfway through the patrol as "current" ---
-    current_idx = NUM_STATES // 4  # 25% through the loop
+    # --- Pick a point at 25% through the patrol as "current" ---
+    current_idx = NUM_STATES // 4
     current_state = states[current_idx]
     context_vector = current_state.vector
 
@@ -123,33 +125,63 @@ def main() -> None:
         f"\nPredictor says the robot will be near: ({predicted[0]:.3f}, {predicted[1]:.3f}, {predicted[2]:.3f})"
     )
 
-    # --- Run predict-then-retrieve ---
-    print("\nRunning predict_and_retrieve (future_horizon=2000ms)...")
-    results = client.predict_and_retrieve(
+    # --- Run predict-then-retrieve with novelty scoring ---
+    print("\nRunning predict_and_retrieve (future_horizon=2000ms, with novelty)...")
+    result = client.predict_and_retrieve(
+        context_vector=context_vector,
+        predictor_fn=linear_predictor,
+        future_horizon_ms=2000,
+        current_position=(current_state.x, current_state.y, current_state.z),
+        spatial_search_radius=0.4,
+        limit=5,
+        alpha=0.7,
+        return_prediction=True,
+    )
+
+    # --- Display results with novelty scoring ---
+    print(f"\n--- Predict-Then-Retrieve Results ---")
+    print(f"  Prediction novelty:   {result.prediction_novelty:.3f}")
+    print(f"  Predictor call time:  {result.predictor_call_ms:.2f} ms")
+    print(f"  Retrieval time:       {result.retrieval_latency_ms:.2f} ms")
+    print(f"  Results found:        {len(result.results)}")
+
+    if result.prediction_novelty < 0.3:
+        print("  Interpretation: LOW novelty — robot has seen this situation before")
+    elif result.prediction_novelty < 0.7:
+        print("  Interpretation: MODERATE novelty — partially familiar territory")
+    else:
+        print("  Interpretation: HIGH novelty — new territory, proceed cautiously")
+
+    if result.results:
+        print(f"\n  {'#':<4} {'Position':>24}  {'Time offset':>12}  {'Desc'}")
+        print(f"  {'-' * 4} {'-' * 24}  {'-' * 12}  {'-' * 30}")
+        for i, r in enumerate(result.results, 1):
+            offset_s = (r.timestamp_ms - now_ms) / 1000
+            frac = (r.timestamp_ms - now_ms) / (LOOP_DURATION_S * 1000)
+            angle_deg = frac * 360
+            print(
+                f"  {i:<4} ({r.x:.3f}, {r.y:.3f}, {r.z:.3f})  {offset_s:>10.2f}s  patrol angle ~{angle_deg:.0f}°"
+            )
+
+    if result.predicted_vector:
+        print(f"\n  Predicted vector (first 5 dims): "
+              f"[{', '.join(f'{v:.3f}' for v in result.predicted_vector[:5])}]")
+
+    # --- Also demonstrate legacy API (backward compat) ---
+    print("\n--- Legacy API (backward compat, no novelty) ---")
+    legacy_results = client.predict_and_retrieve(
         context_vector=context_vector,
         predictor_fn=linear_predictor,
         future_horizon_ms=2000,
         limit=5,
     )
-
-    print(f"\nRobot predicted it will see: {len(results)} similar past states")
-    print()
-    print(f"  {'#':<4} {'Position':>24}  {'Time offset':>12}  {'Desc'}")
-    print(f"  {'-' * 4} {'-' * 24}  {'-' * 12}  {'-' * 30}")
-    for i, r in enumerate(results, 1):
-        offset_s = (r.timestamp_ms - now_ms) / 1000
-        # Calculate patrol fraction
-        frac = (r.timestamp_ms - now_ms) / (LOOP_DURATION_S * 1000)
-        angle_deg = frac * 360
-        print(
-            f"  {i:<4} ({r.x:.3f}, {r.y:.3f}, {r.z:.3f})  {offset_s:>10.2f}s  patrol angle ~{angle_deg:.0f}°"
-        )
+    print(f"  Found {len(legacy_results)} results (returns plain list[WorldState])")
 
     print("\n--- Anticipatory Retrieval Concept ---")
-    print("The robot is at step {}/{} of its patrol loop.".format(current_idx, NUM_STATES))
+    print(f"The robot is at step {current_idx}/{NUM_STATES} of its patrol loop.")
     print("The predictor extrapolated its trajectory forward by 2 seconds.")
-    print("Engram found stored states that match where the robot is PREDICTED to be,")
-    print("enabling the agent to pre-load context about upcoming locations.")
+    print("LOCI found stored states matching where the robot is PREDICTED to be,")
+    print("and computed a novelty score indicating how familiar this situation is.")
 
 
 if __name__ == "__main__":

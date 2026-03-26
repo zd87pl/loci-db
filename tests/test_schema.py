@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from engram.schema import WorldState
+from loci.schema import WorldState
 
 
 def _make(**overrides) -> WorldState:

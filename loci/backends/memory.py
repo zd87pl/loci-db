@@ -3,7 +3,7 @@
 Implements the same operations as Qdrant (insert, search, filter, retrieve)
 using brute-force cosine/dot/euclidean similarity.  Designed for:
 - Unit and integration tests without Docker
-- Benchmarks that measure Engram's indexing overhead in isolation
+- Benchmarks that measure Loci's indexing overhead in isolation
 - Rapid prototyping and demos
 """
 

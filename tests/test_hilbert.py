@@ -5,7 +5,7 @@ from __future__ import annotations
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from engram.spatial.hilbert import decode, encode
+from loci.spatial.hilbert import decode, encode
 
 # ------------------------------------------------------------------
 # Roundtrip property test

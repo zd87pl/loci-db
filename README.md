@@ -1,8 +1,8 @@
-# Engram
+# LOCI
 
-**A 4D spatiotemporal vector database middleware for AI world models.**
+**A 4D spatiotemporal vector database for AI world models.**
 
-[![CI](https://github.com/zd87pl/engram-db/actions/workflows/ci.yml/badge.svg)](https://github.com/zd87pl/engram-db/actions)
+[![CI](https://github.com/zd87pl/loci-db/actions/workflows/ci.yml/badge.svg)](https://github.com/zd87pl/loci-db/actions)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
@@ -19,68 +19,66 @@ concept of "predict the future then find what's nearby."
 
 ## The Solution
 
-Engram is a middleware layer on top of [Qdrant](https://qdrant.tech) that makes
+LOCI is a middleware layer on top of [Qdrant](https://qdrant.tech) that makes
 spatiotemporal structure **first-class** through three novel primitives:
 
-### 1. Hilbert Curve Spatial Bucketing
+### 1. Multi-Resolution Hilbert Bucketing
 
-Encode `(x, y, z, t)` as a single `int64` via a 4D Hilbert space-filling curve.
-Spatial bounding-box queries decompose into a `MatchAny` filter on Hilbert bucket
-IDs — replacing 3 independent float-range filters with a single integer set lookup.
+Encode `(x, y, z, t)` at multiple Hilbert resolutions (p=4, 8, 12).
+Spatial bounding-box queries use the coarsest resolution with an overlap factor
+to catch boundary points — replacing 3 independent float-range filters with a
+single integer set lookup.
 
 ```
-         Naive Qdrant               Engram
+         Naive Qdrant               LOCI
     ┌──────────────────┐     ┌──────────────────┐
     │ x_min ≤ x ≤ x_max│     │                  │
-    │ y_min ≤ y ≤ y_max│ →   │ hilbert_id ∈ {…} │
-    │ z_min ≤ z ≤ z_max│     │   (single filter) │
+    │ y_min ≤ y ≤ y_max│ →   │ hilbert_r4 ∈ {…} │
+    │ z_min ≤ z ≤ z_max│     │  (single filter)  │
     └──────────────────┘     └──────────────────┘
 ```
 
 ### 2. Temporal Sharding
 
 Automatic routing of vectors to **time-partitioned Qdrant collections**
-(`engram_{epoch_id}`). Configurable epoch size. Queries fan out only to
+(`loci_{epoch_id}`). Configurable epoch size. Queries fan out only to
 epochs that overlap the requested time window — with the async client,
 all shards are searched **concurrently** via `asyncio.gather`.
 
-### 3. Predict-then-Retrieve
+### 3. Predict-then-Retrieve with Novelty Detection
 
 An **atomic API call** that composes a user-supplied world model with
-vector search:
+vector search, returning both results and a **novelty score**:
 
 ```python
-results = client.predict_and_retrieve(
+result = client.predict_and_retrieve(
     context_vector=current_embedding,
-    predictor_fn=my_world_model,       # you supply this
+    predictor_fn=my_world_model,
     future_horizon_ms=2000,
+    current_position=(0.5, 0.3, 0.8),
 )
+print(f"Novelty: {result.prediction_novelty:.2f}")
+# 0.0 = "I've seen this before"
+# 1.0 = "This is new territory"
 ```
-
-1. Call `predictor_fn(context_vector)` → predicted future embedding
-2. Query the store for nearest neighbours to that prediction, filtered
-   to `[now, now + future_horizon_ms]`
-
-This enables **anticipatory retrieval** — finding stored states that
-are similar to what the world model *predicts will happen next*.
 
 ## Quick Start
 
 ```bash
-pip install engram-db          # or: pip install -e ".[dev]"
+pip install loci-db          # or: pip install -e ".[dev]"
 docker run -p 6333:6333 qdrant/qdrant
 ```
 
 ### Sync API
 
 ```python
-from engram import EngramClient, WorldState
+from loci import LociClient, WorldState
 
-client = EngramClient(
+client = LociClient(
     "http://localhost:6333",
     vector_size=512,
     epoch_size_ms=5000,
-    distance="cosine",           # or "dot", "euclidean"
+    distance="cosine",
 )
 
 # Insert world states
@@ -96,7 +94,7 @@ state_id = client.insert(state)
 # Batch insert (truly batched — one Qdrant call per epoch)
 ids = client.insert_batch(states)
 
-# Spatiotemporal query
+# Spatiotemporal query with overlap factor
 results = client.query(
     vector=query_embedding,
     spatial_bounds={"x_min": 0.2, "x_max": 0.8,
@@ -104,74 +102,109 @@ results = client.query(
                     "z_min": 0.0, "z_max": 1.0},
     time_window_ms=(start_ms, end_ms),
     limit=10,
+    overlap_factor=1.2,  # 20% expanded search for boundary recall
 )
 
-# Predict-then-retrieve
-results = client.predict_and_retrieve(
+# Predict-then-retrieve with novelty scoring
+result = client.predict_and_retrieve(
     context_vector=current_embedding,
     predictor_fn=my_world_model,
     future_horizon_ms=2000,
+    current_position=(0.5, 0.3, 0.8),
 )
 
-# Trajectory reconstruction via causal links
+# Trajectory reconstruction via scroll API
 trajectory = client.get_trajectory(state_id, steps_back=20, steps_forward=20)
+
+# Episodic context window
+context = client.get_causal_context(state_id, window_ms=5000)
 ```
 
 ### Async API (parallel shard fan-out)
 
 ```python
-from engram import AsyncEngramClient
+from loci import AsyncLociClient
 
-async with AsyncEngramClient(
+async with AsyncLociClient(
     "http://localhost:6333",
     vector_size=512,
     distance="cosine",
 ) as client:
     await client.insert(state)
     results = await client.query(vector=query_embedding, limit=10)
-    predicted = await client.predict_and_retrieve(
-        context_vector=emb,
-        predictor_fn=model,
-        future_horizon_ms=1000,
-    )
 ```
 
-## Core Data Model
+### World Model Adapters
 
 ```python
-@dataclass
-class WorldState:
-    x: float                    # normalised [0, 1]
-    y: float                    # normalised [0, 1]
-    z: float                    # normalised [0, 1]
-    timestamp_ms: int           # unix milliseconds
+from loci.adapters.vjepa2 import VJEPA2Adapter
+from loci.adapters.dreamer import DreamerV3Adapter
+from loci.adapters.generic import GenericAdapter
 
-    vector: list[float]         # arbitrary dimension (512, 1024, 1408, …)
+# V-JEPA 2
+adapter = VJEPA2Adapter()
+states = adapter.batch_clip_to_states(clip_output, scene_bounds, ts, scene_id)
 
-    scene_id: str = ""
-    scale_level: str = "patch"  # "patch" | "frame" | "sequence"
-    confidence: float = 1.0
+# DreamerV3
+adapter = DreamerV3Adapter()
+ws = adapter.rssm_to_world_state(h_t, z_t, position, ts, scene_id)
 
-    # Causal links (auto-populated on insert)
-    prev_state_id: str | None = None
-    next_state_id: str | None = None
+# Generic numpy/torch
+adapter = GenericAdapter(expected_dim=512)
+ws = adapter.from_numpy(embedding, position, ts, scene_id)
 ```
+
+## Performance
+
+| Method | Avg latency (ms) | P95 latency (ms) | Recall@10 |
+|:--|--:|--:|--:|
+| Naive Qdrant (3 float-range filters) | — | — | — |
+| LOCI r4 (Hilbert bucketing + sharding) | — | — | — |
+| LOCI r4 + overlap (20% expansion) | — | — | — |
+
+Run benchmarks to fill in: `python benchmarks/vs_naive_qdrant.py`
+
+## Why not SpatCode?
+
+SpatCode (WWW 2026, arXiv 2601.09530) encodes coordinates into the embedding
+space for soft/fuzzy retrieval via RoPE-style positional encoding. LOCI uses
+Hilbert bucketing for **exact geometric range queries** with deterministic behavior.
+
+**Use SpatCode** when semantic proximity matters (e.g., "find images taken
+near this location").
+
+**Use LOCI** when physical boundaries matter (e.g., "find all observations
+within this 3D bounding box in the last 5 seconds").
+
+## Why not TANNS?
+
+TANNS (ICDE 2025) builds a single graph managing all timestamps internally
+with a Timestamp Graph structure. LOCI uses collection-level sharding with
+storage tiering.
+
+**Use TANNS** for single-session temporal ANN where all data fits in one graph.
+
+**Use LOCI** when you need cross-session persistence, multi-agent memory sharing,
+hot/warm/cold storage tiering, or predict-then-retrieve.
 
 ## Architecture
 
 ```
 ┌───────────────────────────────────────────────┐
 │              Application Layer                │
-│  EngramClient / AsyncEngramClient             │
+│  LociClient / AsyncLociClient                 │
 │  insert · query · predict_and_retrieve        │
 ├───────────────────────────────────────────────┤
 │              Retrieval Layer                  │
-│  predict.py — predict-then-retrieve           │
+│  predict.py — predict-then-retrieve + novelty │
 │  funnel.py  — multi-scale coarse→fine search  │
 ├───────────────────────────────────────────────┤
 │           Indexing & Routing Layer            │
-│  spatial/  — 4D Hilbert encoding + bucketing  │
+│  spatial/  — multi-res Hilbert + overlap      │
 │  temporal/ — epoch sharding + decay scoring   │
+├───────────────────────────────────────────────┤
+│              Adapters Layer                   │
+│  V-JEPA 2 · DreamerV3 · Generic numpy/torch  │
 ├───────────────────────────────────────────────┤
 │              Storage Layer                    │
 │  Qdrant (one collection per temporal epoch)   │
@@ -180,39 +213,36 @@ class WorldState:
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design document.
 
+## Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — System design
+- [docs/NOVELTY.md](docs/NOVELTY.md) — Novelty claims vs prior art
+- [docs/BENCHMARK_METHODOLOGY.md](docs/BENCHMARK_METHODOLOGY.md) — Benchmark replication guide
+- [docs/WORLD_MODEL_INTEGRATION.md](docs/WORLD_MODEL_INTEGRATION.md) — Integration guides
+
 ## Development
 
 ```bash
-git clone https://github.com/zd87pl/engram-db.git
-cd engram-db
+git clone https://github.com/zd87pl/loci-db.git
+cd loci-db
 pip install -e ".[dev]"
 pytest tests/ -v
-```
-
-## Performance
-
-**10,000 points · 512-dim vectors · 100 random spatiotemporal queries · 21 temporal shards**
-
-| Method | Avg latency (ms) | P95 latency (ms) | Recall@10 |
-|:--|--:|--:|--:|
-| Naive Qdrant (3 float-range filters) | 166.36 | 197.23 | 1.000 |
-| Engram (Hilbert bucketing + temporal sharding) | 120.04 | 216.85 | 1.000 |
-| **Speedup** | **1.39×** | — | — |
-
-Engram's temporal sharding reduces the search space per query by routing
-only to epochs that overlap the time window.  On a production Qdrant server
-with payload indexes, the Hilbert `MatchAny` integer-set pre-filter provides
-additional speedup over float-range evaluation — the numbers above use
-qdrant-client's in-memory mode where payload indexes are not active.
-
-Reproduce with:
-```bash
-python benchmarks/vs_naive_qdrant.py
 ```
 
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the v0.1 → v1.0 plan.
+
+## Citation
+
+```bibtex
+@misc{loci2026,
+  title={LOCI: A 4D Spatiotemporal Vector Database for AI World Models},
+  author={Dyras, Zbigniew},
+  year={2026},
+  url={https://github.com/zd87pl/loci-db}
+}
+```
 
 ## License
 

@@ -1,6 +1,6 @@
 """Shard key computation and epoch management for temporal partitioning.
 
-Vectors are routed to per-epoch Qdrant collections named ``engram_{epoch_id}``.
+Vectors are routed to per-epoch Qdrant collections named ``loci_{epoch_id}``.
 An epoch is a fixed-width time window (default 5 000 ms).
 """
 
@@ -27,9 +27,9 @@ def collection_name(ep_id: int) -> str:
         ep_id: Epoch index from :func:`epoch_id`.
 
     Returns:
-        Collection name string, e.g. ``"engram_42"``.
+        Collection name string, e.g. ``"loci_42"``.
     """
-    return f"engram_{ep_id}"
+    return f"loci_{ep_id}"
 
 
 def epochs_in_range(

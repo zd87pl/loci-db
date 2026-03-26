@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Engram local usage — zero dependencies, no Docker required.
+"""Loci local usage — zero dependencies, no Docker required.
 
-Demonstrates the full Engram API using LocalEngramClient backed by
+Demonstrates the full Loci API using LocalLociClient backed by
 the pure-Python in-memory store.
 """
 
@@ -10,14 +10,14 @@ from __future__ import annotations
 import random
 import time
 
-from engram import LocalEngramClient, WorldState
+from loci import LocalLociClient, WorldState
 
 VECTOR_DIM = 128
 NUM_STATES = 100
 
 
 def main() -> None:
-    client = LocalEngramClient(
+    client = LocalLociClient(
         epoch_size_ms=5000,
         spatial_resolution=4,
         vector_size=VECTOR_DIM,

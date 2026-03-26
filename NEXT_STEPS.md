@@ -1,4 +1,4 @@
-# Engram — Next Steps Plan
+# Loci — Next Steps Plan
 
 Status: v0.2 core is complete. This document prioritizes work to finish v0.2,
 then move through v0.3 and v0.4 based on impact and existing code assets.
@@ -23,35 +23,35 @@ waste resources.
 
 - Add `ShardPolicy` config: `warm_retention_ms`, `cold_action` (archive/delete)
 - Implement `client.compact()` method that migrates or removes cold epochs
-- For "archive" mode, merge cold epoch points into a single `engram_archive`
+- For "archive" mode, merge cold epoch points into a single `loci_archive`
   collection (lower-resolution Hilbert IDs acceptable)
 - For "delete" mode, drop the collection entirely
-- Add background task variant for `AsyncEngramClient`
+- Add background task variant for `AsyncLociClient`
 
 ---
 
 ## Priority 2: Integrate existing v0.3 code (high leverage — code already exists)
 
 ### 2a. Wire adaptive Hilbert resolution into clients
-**Code exists:** `engram/spatial/adaptive.py` — `AdaptiveResolution` class is
+**Code exists:** `loci/spatial/adaptive.py` — `AdaptiveResolution` class is
 complete with density tracking, escalation logic, and stats. Just not connected.
 
 - Replace fixed `HilbertEncoder(order=4)` with `AdaptiveResolution` in both
-  `EngramClient` and `AsyncEngramClient`
+  `LociClient` and `AsyncLociClient`
 - On `insert()`, call `adaptive.track(point)` to update density stats
 - On `query()`, use `adaptive.effective_order(region)` for bucket expansion
 - Add `adaptive=True/False` flag to client constructors (default `True`)
 - Persist density stats across client restarts (serialize to Qdrant metadata
   collection or local file)
-- Update `LocalEngramClient` similarly
+- Update `LocalLociClient` similarly
 
 ### 2b. Expose funnel search in client API
-**Code exists:** `engram/retrieval/funnel.py` — `funnel_search()` is complete.
+**Code exists:** `loci/retrieval/funnel.py` — `funnel_search()` is complete.
 Cascades sequence -> frame -> patch. Not exposed via clients.
 
-- Add `funnel_query()` method to `EngramClient` and `AsyncEngramClient`
+- Add `funnel_query()` method to `LociClient` and `AsyncLociClient`
 - Wire through to `funnel_search()` with proper shard fan-out
-- Add to `LocalEngramClient` using memory backend
+- Add to `LocalLociClient` using memory backend
 - Add integration tests and an example in `examples/`
 
 ---
@@ -105,8 +105,8 @@ Cascades sequence -> frame -> patch. Not exposed via clients.
 ### 5b. Error handling audit
 - Audit all `except` blocks — several silently swallow errors (especially in
   causal linking predecessor lookup)
-- Surface errors as warnings or raise custom `EngramError` hierarchy
-- Add `EngramConnectionError`, `EngramValidationError`, `EngramQueryError`
+- Surface errors as warnings or raise custom `LociError` hierarchy
+- Add `LociConnectionError`, `LociValidationError`, `LociQueryError`
 
 ### 5c. CI hardening
 - Make mypy non-optional (remove `|| true` from CI)

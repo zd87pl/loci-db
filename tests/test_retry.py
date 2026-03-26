@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from engram.retry import _is_transient, with_retry
+from loci.retry import _is_transient, with_retry
 
 
 class TestIsTransient:

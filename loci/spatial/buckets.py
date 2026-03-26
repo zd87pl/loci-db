@@ -9,7 +9,7 @@ from __future__ import annotations
 import itertools
 import math
 
-from engram.spatial.hilbert import _DEFAULT_ORDER, _clamp, _make_curve
+from loci.spatial.hilbert import _DEFAULT_ORDER, _clamp, _make_curve
 
 
 def compute_bucket_id(
@@ -20,11 +20,8 @@ def compute_bucket_id(
     *,
     resolution_order: int | None = None,
 ) -> int:
-    """Return the Hilbert bucket ID for a single point.
-
-    This is a convenience wrapper that mirrors :func:`engram.spatial.hilbert.encode`.
-    """
-    from engram.spatial.hilbert import encode
+    """Return the Hilbert bucket ID for a single point."""
+    from loci.spatial.hilbert import encode
 
     return encode(x, y, z, t_norm, resolution_order=resolution_order)
 
@@ -40,6 +37,7 @@ def expand_bounding_box(
     t_max: float,
     *,
     resolution_order: int | None = None,
+    overlap_factor: float = 1.0,
 ) -> list[int]:
     """Return the sorted list of Hilbert IDs that cover a bounding box.
 
@@ -53,6 +51,8 @@ def expand_bounding_box(
         z_min, z_max: Normalised z bounds.
         t_min, t_max: Normalised temporal bounds.
         resolution_order: Bits per dimension (must match encoding).
+        overlap_factor: Expand each dimension by this factor (>=1.0).
+            1.2 means 20% larger search region to catch boundary points.
 
     Returns:
         Sorted list of unique Hilbert indices.
@@ -61,10 +61,18 @@ def expand_bounding_box(
     curve = _make_curve(order)
     side = (1 << order) - 1
 
-    # Use floor for lower bounds and ceil for upper bounds so that
-    # every grid cell that could contain a point quantised with round()
-    # is included.  This fixes a mismatch where encode() uses round()
-    # but the old code used int() (truncation), causing boundary misses.
+    def _expand(lo: float, hi: float) -> tuple[float, float]:
+        if overlap_factor <= 1.0:
+            return lo, hi
+        span = hi - lo
+        pad = span * (overlap_factor - 1.0) / 2.0
+        return max(0.0, lo - pad), min(1.0, hi + pad)
+
+    x_min, x_max = _expand(x_min, x_max)
+    y_min, y_max = _expand(y_min, y_max)
+    z_min, z_max = _expand(z_min, z_max)
+    t_min, t_max = _expand(t_min, t_max)
+
     ix_lo = _clamp(math.floor(x_min * side), 0, side)
     ix_hi = _clamp(math.ceil(x_max * side), 0, side)
     iy_lo = _clamp(math.floor(y_min * side), 0, side)

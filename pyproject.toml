@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "engram-db"
+name = "loci-db"
 version = "0.3.0"
 description = "4D spatiotemporal vector database middleware for AI world models"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [
-    { name = "Engram Contributors" },
+    { name = "Loci Contributors" },
 ]
 keywords = ["vector-database", "spatiotemporal", "world-models", "qdrant", "hilbert-curve"]
 classifiers = [
@@ -37,7 +37,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["engram"]
+packages = ["loci"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

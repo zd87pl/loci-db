@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Benchmark Engram's indexing overhead — no Docker required.
+"""Benchmark Loci's indexing overhead — no Docker required.
 
-Uses LocalEngramClient (in-memory backend) to measure:
+Uses LocalLociClient (in-memory backend) to measure:
 1. Batch insert throughput
 2. Query latency (brute-force with Hilbert pre-filtering)
 3. Spatial query selectivity
@@ -17,9 +17,9 @@ import random
 import statistics
 import time
 
-from engram.local_client import LocalEngramClient
-from engram.schema import WorldState
-from engram.spatial.adaptive import AdaptiveResolution
+from loci.local_client import LocalLociClient
+from loci.schema import WorldState
+from loci.spatial.adaptive import AdaptiveResolution
 
 VECTOR_DIM = 128
 SEED = 42
@@ -42,7 +42,7 @@ def _random_states(n: int, base_ms: int, dim: int = VECTOR_DIM) -> list[WorldSta
 
 def bench_insert(n: int = 5000) -> None:
     random.seed(SEED)
-    client = LocalEngramClient(vector_size=VECTOR_DIM, decay_lambda=0)
+    client = LocalLociClient(vector_size=VECTOR_DIM, decay_lambda=0)
     states = _random_states(n, int(time.time() * 1000))
 
     t0 = time.perf_counter()
@@ -56,7 +56,7 @@ def bench_insert(n: int = 5000) -> None:
 def bench_query(n_data: int = 5000, n_queries: int = 200) -> None:
     random.seed(SEED)
     now_ms = int(time.time() * 1000)
-    client = LocalEngramClient(vector_size=VECTOR_DIM, decay_lambda=0)
+    client = LocalLociClient(vector_size=VECTOR_DIM, decay_lambda=0)
     client.insert_batch(_random_states(n_data, now_ms))
 
     latencies: list[float] = []
@@ -77,7 +77,7 @@ def bench_query(n_data: int = 5000, n_queries: int = 200) -> None:
 def bench_spatial_query(n_data: int = 5000, n_queries: int = 200) -> None:
     random.seed(SEED)
     now_ms = int(time.time() * 1000)
-    client = LocalEngramClient(vector_size=VECTOR_DIM, decay_lambda=0)
+    client = LocalLociClient(vector_size=VECTOR_DIM, decay_lambda=0)
     client.insert_batch(_random_states(n_data, now_ms))
 
     latencies: list[float] = []
@@ -112,7 +112,7 @@ def bench_spatial_query(n_data: int = 5000, n_queries: int = 200) -> None:
 def bench_temporal_query(n_data: int = 5000, n_queries: int = 200) -> None:
     random.seed(SEED)
     now_ms = int(time.time() * 1000)
-    client = LocalEngramClient(
+    client = LocalLociClient(
         vector_size=VECTOR_DIM,
         epoch_size_ms=1000,
         decay_lambda=0,
@@ -171,7 +171,7 @@ def bench_adaptive_resolution(n: int = 10000) -> None:
 def bench_trajectory(n_data: int = 1000) -> None:
     random.seed(SEED)
     now_ms = int(time.time() * 1000)
-    client = LocalEngramClient(vector_size=VECTOR_DIM, decay_lambda=0)
+    client = LocalLociClient(vector_size=VECTOR_DIM, decay_lambda=0)
 
     states = [
         WorldState(
@@ -197,7 +197,7 @@ def bench_trajectory(n_data: int = 1000) -> None:
 
 def main() -> None:
     print("=" * 70)
-    print("Engram Local Benchmark (in-memory backend)")
+    print("Loci Local Benchmark (in-memory backend)")
     print("=" * 70)
     print()
 

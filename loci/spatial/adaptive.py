@@ -5,7 +5,7 @@ This wastes precision in dense regions and filter cardinality in sparse ones.
 
 AdaptiveResolution tracks insertion density per Hilbert cell and recommends
 higher resolution for cells that exceed a density threshold.  This lets
-Engram self-tune its spatial indexing as data arrives — no manual knob-turning.
+Loci self-tune its spatial indexing as data arrives — no manual knob-turning.
 
 Design principles:
 - Zero-copy: operates on counters, never touches stored vectors
@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 
-from engram.spatial.hilbert import encode as hilbert_encode
+from loci.spatial.hilbert import encode as hilbert_encode
 
 
 @dataclass

@@ -1,4 +1,4 @@
-"""Main EngramClient class — primary API surface for the Engram database."""
+"""Main LociClient class — primary API surface for the Loci database."""
 
 from __future__ import annotations
 
@@ -21,13 +21,13 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from engram.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
-from engram.schema import WorldState
-from engram.spatial.adaptive import AdaptiveResolution
-from engram.spatial.buckets import expand_bounding_box
-from engram.spatial.hilbert import encode as hilbert_encode
-from engram.temporal.decay import apply_decay
-from engram.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
+from loci.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
+from loci.schema import WorldState
+from loci.spatial.adaptive import AdaptiveResolution
+from loci.spatial.hilbert import HilbertIndex
+from loci.temporal.decay import apply_decay
+from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ _DISTANCE_MAP: dict[str, Distance] = {
 }
 
 
-class EngramClient:
+class LociClient:
     """High-level client for inserting, querying, and navigating WorldStates.
 
     Wraps a Qdrant instance and adds Hilbert-curve spatial bucketing,
@@ -67,6 +67,7 @@ class EngramClient:
         adaptive: bool = False,
         max_retries: int = 3,
         retry_backoff: float = 0.5,
+        resolutions: list[int] | None = None,
     ) -> None:
         self._qdrant = QdrantClient(url=qdrant_url)
         self._epoch_size_ms = epoch_size_ms
@@ -79,6 +80,7 @@ class EngramClient:
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
         self._known_collections: set[str] = set()
+        self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
             AdaptiveResolution(
                 base_order=spatial_resolution,
@@ -91,7 +93,7 @@ class EngramClient:
 
     def _retry(self, fn, *args, **kwargs):
         """Execute fn with retry logic."""
-        from engram.retry import with_retry
+        from loci.retry import with_retry
 
         wrapped = with_retry(self._max_retries, self._retry_backoff)(fn)
         return wrapped(*args, **kwargs)
@@ -128,11 +130,12 @@ class EngramClient:
                     distance=self._distance,
                 ),
             )
-            self._qdrant.create_payload_index(
-                collection_name=name,
-                field_name="hilbert_id",
-                field_schema=PayloadSchemaType.INTEGER,
-            )
+            for r in self._hilbert.resolutions:
+                self._qdrant.create_payload_index(
+                    collection_name=name,
+                    field_name=f"hilbert_r{r}",
+                    field_schema=PayloadSchemaType.INTEGER,
+                )
             self._qdrant.create_payload_index(
                 collection_name=name,
                 field_name="timestamp_ms",
@@ -168,18 +171,12 @@ class EngramClient:
         self._ensure_collection(col)
 
         t_norm = self._normalise_time(state.timestamp_ms, ep)
-        hid = hilbert_encode(
-            state.x,
-            state.y,
-            state.z,
-            t_norm,
-            resolution_order=self._spatial_resolution,
-        )
+        hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
 
         if self._adaptive is not None:
             self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-        payload = self._state_to_payload(state, hid)
+        payload = self._state_to_payload(state, hilbert_ids)
 
         # Causal linking
         prev_id = self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
@@ -224,17 +221,11 @@ class EngramClient:
             self._ensure_collection(col)
 
             t_norm = self._normalise_time(state.timestamp_ms, ep)
-            hid = hilbert_encode(
-                state.x,
-                state.y,
-                state.z,
-                t_norm,
-                resolution_order=self._spatial_resolution,
-            )
+            hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
             if self._adaptive is not None:
                 self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-            payload = self._state_to_payload(state, hid)
+            payload = self._state_to_payload(state, hilbert_ids)
 
             # Causal link within the batch
             if state.scene_id and state.scene_id in scene_chains:
@@ -283,6 +274,7 @@ class EngramClient:
         limit: int = 10,
         *,
         _extra_payload_filter: dict | None = None,
+        overlap_factor: float = 1.2,
     ) -> list[WorldState]:
         """Search for nearest neighbours with spatial and temporal filtering.
 
@@ -292,6 +284,8 @@ class EngramClient:
                 ``y_min``, ``y_max``, ``z_min``, ``z_max``.
             time_window_ms: Optional ``(start_ms, end_ms)`` window.
             limit: Maximum number of results.
+            overlap_factor: Expand spatial query by this factor to catch
+                boundary points (default 1.2 = 20% expansion).
 
         Returns:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
@@ -305,21 +299,17 @@ class EngramClient:
         collections = [collection_name(e) for e in epochs]
 
         must_conditions: list = []
+        query_resolution = self._hilbert.resolutions[0]
 
         if spatial_bounds is not None:
-            hids = expand_bounding_box(
-                spatial_bounds.get("x_min", 0.0),
-                spatial_bounds.get("x_max", 1.0),
-                spatial_bounds.get("y_min", 0.0),
-                spatial_bounds.get("y_max", 1.0),
-                spatial_bounds.get("z_min", 0.0),
-                spatial_bounds.get("z_max", 1.0),
-                0.0,
-                1.0,
-                resolution_order=self._spatial_resolution,
+            hids = self._hilbert.query_buckets(
+                spatial_bounds,
+                resolution=query_resolution,
+                overlap_factor=overlap_factor,
             )
             if hids:
-                must_conditions.append(FieldCondition(key="hilbert_id", match=MatchAny(any=hids)))
+                field = self._hilbert.payload_field(query_resolution)
+                must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
             else:
                 return []
 
@@ -380,18 +370,43 @@ class EngramClient:
         predictor_fn: Callable[[list[float]], list[float]],
         future_horizon_ms: int = 1000,
         limit: int = 5,
-    ) -> list[WorldState]:
+        current_position: tuple[float, float, float] | None = None,
+        spatial_search_radius: float = 0.3,
+        alpha: float = 0.7,
+        return_prediction: bool = False,
+    ) -> list[WorldState] | PredictRetrieveResult:
         """Predict a future state then retrieve nearest neighbours to it.
+
+        When ``current_position`` is provided, returns a full
+        :class:`PredictRetrieveResult` with novelty scoring and timing.
+        Otherwise falls back to the legacy API returning a plain list.
 
         Args:
             context_vector: Current-state embedding.
             predictor_fn: User-supplied world model.
             future_horizon_ms: How far ahead to search (milliseconds).
             limit: Maximum number of results.
+            current_position: Optional (x, y, z) for spatial + novelty scoring.
+            spatial_search_radius: Search radius around current_position.
+            alpha: Weight for vector_sim vs temporal_proximity (default 0.7).
+            return_prediction: Include predicted vector in result.
 
         Returns:
-            List of :class:`WorldState` neighbours of the predicted vector.
+            :class:`PredictRetrieveResult` when current_position is set,
+            otherwise a plain list of :class:`WorldState`.
         """
+        if current_position is not None or return_prediction:
+            ptr = PredictThenRetrieve(self)
+            return ptr.retrieve(
+                context_vector=context_vector,
+                predictor_fn=predictor_fn,
+                future_horizon_ms=future_horizon_ms,
+                current_position=current_position,
+                spatial_search_radius=spatial_search_radius,
+                limit=limit,
+                alpha=alpha,
+                return_prediction=return_prediction,
+            )
         return _predict_and_retrieve(
             self,
             context_vector,
@@ -421,7 +436,7 @@ class EngramClient:
         Returns:
             List of :class:`WorldState` at the finest available scale.
         """
-        from engram.retrieval.funnel import funnel_search
+        from loci.retrieval.funnel import funnel_search
 
         return funnel_search(self, vector, spatial_bounds, time_window_ms, limit)
 
@@ -435,12 +450,15 @@ class EngramClient:
         steps_back: int = 10,
         steps_forward: int = 10,
     ) -> list[WorldState]:
-        """Follow causal links to reconstruct a trajectory.
+        """Reconstruct a trajectory using scroll API with scene_id filter.
+
+        Uses a single Qdrant scroll call per shard (filtered by scene_id
+        and ordered by timestamp) instead of N individual point lookups.
 
         Args:
             state_id: ID of the anchor state.
-            steps_back: Number of predecessors to follow.
-            steps_forward: Number of successors to follow.
+            steps_back: Number of predecessors to include.
+            steps_forward: Number of successors to include.
 
         Returns:
             Ordered list of states from oldest to newest.
@@ -448,31 +466,111 @@ class EngramClient:
         anchor = self._get_state_by_id(state_id)
         if anchor is None:
             return []
+        if not anchor.scene_id:
+            return [anchor]
 
-        backward: list[WorldState] = []
-        current = anchor
-        for _ in range(steps_back):
-            if current.prev_state_id is None:
-                break
-            prev = self._get_state_by_id(current.prev_state_id)
-            if prev is None:
-                break
-            backward.append(prev)
-            current = prev
-        backward.reverse()
+        # Scroll for all states in the same scene across known collections
+        total_needed = steps_back + 1 + steps_forward
+        all_states: list[WorldState] = []
+        for col in list(self._known_collections):
+            try:
+                hits = self._retry(
+                    self._qdrant.scroll,
+                    collection_name=col,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="scene_id",
+                                match=MatchValue(value=anchor.scene_id),
+                            ),
+                        ]
+                    ),
+                    limit=total_needed * 2,
+                    order_by="timestamp_ms",
+                    with_vectors=True,
+                )
+                points = hits[0] if isinstance(hits, tuple) else hits
+                for pt in points:
+                    vec = pt.vector
+                    if isinstance(vec, dict):
+                        vec = list(vec.values())[0] if vec else []
+                    all_states.append(self._payload_to_state(pt.payload, pt.id, vec))
+            except Exception:
+                continue
 
-        forward: list[WorldState] = []
-        current = anchor
-        for _ in range(steps_forward):
-            if current.next_state_id is None:
+        # Sort by timestamp and find anchor position
+        all_states.sort(key=lambda s: s.timestamp_ms)
+        anchor_idx = None
+        for i, s in enumerate(all_states):
+            if s.id == state_id:
+                anchor_idx = i
                 break
-            nxt = self._get_state_by_id(current.next_state_id)
-            if nxt is None:
-                break
-            forward.append(nxt)
-            current = nxt
 
-        return backward + [anchor] + forward
+        if anchor_idx is None:
+            return [anchor]
+
+        start = max(0, anchor_idx - steps_back)
+        end = min(len(all_states), anchor_idx + steps_forward + 1)
+        return all_states[start:end]
+
+    def get_causal_context(
+        self,
+        state_id: str,
+        window_ms: int = 5000,
+    ) -> list[WorldState]:
+        """Return all states within ±window_ms of the given state's timestamp
+        in the same scene_id — the 'episodic context window'.
+
+        Uses a single Qdrant scroll query per shard with scene_id +
+        timestamp range filter.
+
+        Args:
+            state_id: ID of the anchor state.
+            window_ms: Time window radius in milliseconds.
+
+        Returns:
+            List of :class:`WorldState` sorted by timestamp.
+        """
+        anchor = self._get_state_by_id(state_id)
+        if anchor is None or not anchor.scene_id:
+            return []
+
+        t_min = anchor.timestamp_ms - window_ms
+        t_max = anchor.timestamp_ms + window_ms
+
+        context: list[WorldState] = []
+        for col in list(self._known_collections):
+            try:
+                hits = self._retry(
+                    self._qdrant.scroll,
+                    collection_name=col,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="scene_id",
+                                match=MatchValue(value=anchor.scene_id),
+                            ),
+                            FieldCondition(
+                                key="timestamp_ms",
+                                range=Range(gte=t_min, lte=t_max),
+                            ),
+                        ]
+                    ),
+                    limit=100,
+                    order_by="timestamp_ms",
+                    with_vectors=True,
+                )
+                points = hits[0] if isinstance(hits, tuple) else hits
+                for pt in points:
+                    vec = pt.vector
+                    if isinstance(vec, dict):
+                        vec = list(vec.values())[0] if vec else []
+                    context.append(self._payload_to_state(pt.payload, pt.id, vec))
+            except Exception:
+                continue
+
+        context.sort(key=lambda s: s.timestamp_ms)
+        return context
 
     # ------------------------------------------------------------------
     # Helpers
@@ -485,19 +583,20 @@ class EngramClient:
         return min(1.0, max(0.0, offset / self._epoch_size_ms))
 
     @staticmethod
-    def _state_to_payload(state: WorldState, hilbert_id: int) -> dict:
-        return {
+    def _state_to_payload(state: WorldState, hilbert_ids: dict[str, int]) -> dict:
+        payload = {
             "x": state.x,
             "y": state.y,
             "z": state.z,
             "timestamp_ms": state.timestamp_ms,
-            "hilbert_id": hilbert_id,
             "scene_id": state.scene_id,
             "scale_level": state.scale_level,
             "confidence": state.confidence,
             "prev_state_id": state.prev_state_id,
             "next_state_id": state.next_state_id,
         }
+        payload.update(hilbert_ids)
+        return payload
 
     @staticmethod
     def _payload_to_state(
@@ -581,7 +680,7 @@ class EngramClient:
         """Return epoch IDs for all known collections."""
         epochs: list[int] = []
         for col in self._known_collections:
-            if col.startswith("engram_"):
+            if col.startswith("loci_"):
                 try:
                     epochs.append(int(col.split("_", 1)[1]))
                 except ValueError:

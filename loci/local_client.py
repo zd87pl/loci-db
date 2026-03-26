@@ -1,12 +1,12 @@
-"""LocalEngramClient — full Engram with zero external dependencies.
+"""LocalLociClient — full Loci with zero external dependencies.
 
 Uses the in-memory backend instead of Qdrant.  Identical API surface
-to :class:`EngramClient`, so code that works with LocalEngramClient
+to :class:`LociClient`, so code that works with LocalLociClient
 works with the real client by swapping the constructor.
 
 Use cases:
 - Tests without Docker
-- Benchmarks that isolate Engram's indexing overhead
+- Benchmarks that isolate Loci's indexing overhead
 - Demos and prototyping
 - CI environments
 """
@@ -19,13 +19,13 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from engram.backends.memory import MemoryStore
-from engram.schema import WorldState
-from engram.spatial.adaptive import AdaptiveResolution
-from engram.spatial.buckets import expand_bounding_box
-from engram.spatial.hilbert import encode as hilbert_encode
-from engram.temporal.decay import apply_decay
-from engram.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.backends.memory import MemoryStore
+from loci.retrieval.predict import PredictRetrieveResult
+from loci.schema import WorldState
+from loci.spatial.adaptive import AdaptiveResolution
+from loci.spatial.hilbert import HilbertIndex
+from loci.temporal.decay import apply_decay
+from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +49,10 @@ class QueryStats:
     elapsed_ms: float = 0.0
 
 
-class LocalEngramClient:
-    """Full Engram client backed by an in-memory store.
+class LocalLociClient:
+    """Full Loci client backed by an in-memory store.
 
-    API-compatible with :class:`EngramClient`.  No Qdrant required.
+    API-compatible with :class:`LociClient`.  No Qdrant required.
 
     Args:
         epoch_size_ms: Width of each temporal shard in milliseconds.
@@ -70,6 +70,7 @@ class LocalEngramClient:
         decay_lambda: float = 1e-4,
         distance: str = "cosine",
         adaptive: bool = False,
+        resolutions: list[int] | None = None,
     ) -> None:
         self._store = MemoryStore()
         self._epoch_size_ms = epoch_size_ms
@@ -79,6 +80,7 @@ class LocalEngramClient:
         self._distance = distance
         self._known_collections: set[str] = set()
         self._last_query_stats: QueryStats | None = None
+        self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
             AdaptiveResolution(
                 base_order=spatial_resolution,
@@ -112,7 +114,8 @@ class LocalEngramClient:
         if name in self._known_collections:
             return
         self._store.create_collection(name, self._vector_size, self._distance)
-        self._store.create_payload_index(name, "hilbert_id")
+        for r in self._hilbert.resolutions:
+            self._store.create_payload_index(name, f"hilbert_r{r}")
         self._store.create_payload_index(name, "timestamp_ms")
         self._store.create_payload_index(name, "scale_level")
         self._known_collections.add(name)
@@ -130,18 +133,12 @@ class LocalEngramClient:
         self._ensure_collection(col)
 
         t_norm = self._normalise_time(state.timestamp_ms, ep)
-        hid = hilbert_encode(
-            state.x,
-            state.y,
-            state.z,
-            t_norm,
-            resolution_order=self._spatial_resolution,
-        )
+        hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
 
         if self._adaptive is not None:
             self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-        payload = _state_to_payload(state, hid)
+        payload = _state_to_payload(state, hilbert_ids)
 
         # Causal linking
         prev_id = self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
@@ -169,17 +166,11 @@ class LocalEngramClient:
             self._ensure_collection(col)
 
             t_norm = self._normalise_time(state.timestamp_ms, ep)
-            hid = hilbert_encode(
-                state.x,
-                state.y,
-                state.z,
-                t_norm,
-                resolution_order=self._spatial_resolution,
-            )
+            hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
             if self._adaptive is not None:
                 self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-            payload = _state_to_payload(state, hid)
+            payload = _state_to_payload(state, hilbert_ids)
 
             if state.scene_id and state.scene_id in scene_chains:
                 payload["prev_state_id"] = scene_chains[state.scene_id]
@@ -236,23 +227,19 @@ class LocalEngramClient:
         # Build filter dict for MemoryStore
         payload_filter: dict = {}
 
+        query_resolution = self._hilbert.resolutions[0]
         if spatial_bounds is not None:
-            hids = expand_bounding_box(
-                spatial_bounds.get("x_min", 0.0),
-                spatial_bounds.get("x_max", 1.0),
-                spatial_bounds.get("y_min", 0.0),
-                spatial_bounds.get("y_max", 1.0),
-                spatial_bounds.get("z_min", 0.0),
-                spatial_bounds.get("z_max", 1.0),
-                0.0,
-                1.0,
-                resolution_order=self._spatial_resolution,
+            hids = self._hilbert.query_buckets(
+                spatial_bounds,
+                resolution=query_resolution,
+                overlap_factor=1.2,
             )
             if not hids:
                 stats.elapsed_ms = (time.perf_counter() - t_start) * 1000
                 self._last_query_stats = stats
                 return []
-            payload_filter["hilbert_id"] = {"any": hids}
+            field = self._hilbert.payload_field(query_resolution)
+            payload_filter[field] = {"any": hids}
             stats.hilbert_ids_in_filter = len(hids)
 
         if time_window_ms is not None:
@@ -300,8 +287,30 @@ class LocalEngramClient:
         predictor_fn: Callable[[list[float]], list[float]],
         future_horizon_ms: int = 1000,
         limit: int = 5,
-    ) -> list[WorldState]:
-        """Predict-then-retrieve using the local backend."""
+        current_position: tuple[float, float, float] | None = None,
+        spatial_search_radius: float = 0.3,
+        alpha: float = 0.7,
+        return_prediction: bool = False,
+    ) -> list[WorldState] | PredictRetrieveResult:
+        """Predict-then-retrieve using the local backend.
+
+        When ``current_position`` is provided, returns a full
+        :class:`PredictRetrieveResult` with novelty scoring.
+        """
+        if current_position is not None or return_prediction:
+            from loci.retrieval.predict import PredictThenRetrieve
+
+            ptr = PredictThenRetrieve(self)
+            return ptr.retrieve(
+                context_vector=context_vector,
+                predictor_fn=predictor_fn,
+                future_horizon_ms=future_horizon_ms,
+                current_position=current_position,
+                spatial_search_radius=spatial_search_radius,
+                limit=limit,
+                alpha=alpha,
+                return_prediction=return_prediction,
+            )
         predicted = predictor_fn(context_vector)
         now_ms = int(time.time() * 1000)
         return self.query(
@@ -351,34 +360,68 @@ class LocalEngramClient:
         steps_back: int = 10,
         steps_forward: int = 10,
     ) -> list[WorldState]:
+        """Reconstruct a trajectory using scroll with scene_id filter."""
         anchor = self._get_state_by_id(state_id)
         if anchor is None:
             return []
+        if not anchor.scene_id:
+            return [anchor]
 
-        backward: list[WorldState] = []
-        current = anchor
-        for _ in range(steps_back):
-            if current.prev_state_id is None:
-                break
-            prev = self._get_state_by_id(current.prev_state_id)
-            if prev is None:
-                break
-            backward.append(prev)
-            current = prev
-        backward.reverse()
+        total_needed = steps_back + 1 + steps_forward
+        all_states: list[WorldState] = []
+        for col in list(self._known_collections):
+            hits = self._store.scroll(
+                collection=col,
+                payload_filter={"scene_id": anchor.scene_id},
+                limit=total_needed * 2,
+                order_by="timestamp_ms",
+            )
+            for hit in hits:
+                all_states.append(_payload_to_state(hit["payload"], hit["id"], hit["vector"]))
 
-        forward: list[WorldState] = []
-        current = anchor
-        for _ in range(steps_forward):
-            if current.next_state_id is None:
+        all_states.sort(key=lambda s: s.timestamp_ms)
+        anchor_idx = None
+        for i, s in enumerate(all_states):
+            if s.id == state_id:
+                anchor_idx = i
                 break
-            nxt = self._get_state_by_id(current.next_state_id)
-            if nxt is None:
-                break
-            forward.append(nxt)
-            current = nxt
 
-        return backward + [anchor] + forward
+        if anchor_idx is None:
+            return [anchor]
+
+        start = max(0, anchor_idx - steps_back)
+        end = min(len(all_states), anchor_idx + steps_forward + 1)
+        return all_states[start:end]
+
+    def get_causal_context(
+        self,
+        state_id: str,
+        window_ms: int = 5000,
+    ) -> list[WorldState]:
+        """Return all states within ±window_ms of the given state in the same scene."""
+        anchor = self._get_state_by_id(state_id)
+        if anchor is None or not anchor.scene_id:
+            return []
+
+        t_min = anchor.timestamp_ms - window_ms
+        t_max = anchor.timestamp_ms + window_ms
+
+        context: list[WorldState] = []
+        for col in list(self._known_collections):
+            hits = self._store.scroll(
+                collection=col,
+                payload_filter={
+                    "scene_id": anchor.scene_id,
+                    "timestamp_ms": {"gte": t_min, "lte": t_max},
+                },
+                limit=100,
+                order_by="timestamp_ms",
+            )
+            for hit in hits:
+                context.append(_payload_to_state(hit["payload"], hit["id"], hit["vector"]))
+
+        context.sort(key=lambda s: s.timestamp_ms)
+        return context
 
     # ------------------------------------------------------------------
     # Helpers
@@ -418,7 +461,7 @@ class LocalEngramClient:
     def _list_active_epochs(self) -> list[int]:
         epochs: list[int] = []
         for col in self._known_collections:
-            if col.startswith("engram_"):
+            if col.startswith("loci_"):
                 try:
                     epochs.append(int(col.split("_", 1)[1]))
                 except ValueError:
@@ -431,19 +474,20 @@ class LocalEngramClient:
 # ------------------------------------------------------------------
 
 
-def _state_to_payload(state: WorldState, hilbert_id: int) -> dict:
-    return {
+def _state_to_payload(state: WorldState, hilbert_ids: dict[str, int]) -> dict:
+    payload = {
         "x": state.x,
         "y": state.y,
         "z": state.z,
         "timestamp_ms": state.timestamp_ms,
-        "hilbert_id": hilbert_id,
         "scene_id": state.scene_id,
         "scale_level": state.scale_level,
         "confidence": state.confidence,
         "prev_state_id": state.prev_state_id,
         "next_state_id": state.next_state_id,
     }
+    payload.update(hilbert_ids)
+    return payload
 
 
 def _payload_to_state(

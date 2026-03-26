@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from engram.temporal.decay import apply_decay, decay_score
+from loci.temporal.decay import apply_decay, decay_score
 
 
 def test_decay_score_zero_age() -> None:

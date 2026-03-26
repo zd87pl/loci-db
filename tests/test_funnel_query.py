@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from engram.local_client import LocalEngramClient
-from engram.schema import WorldState
+from loci.local_client import LocalLociClient
+from loci.schema import WorldState
 
 VEC_SIZE = 4
 
@@ -27,7 +27,7 @@ def _make_state(
 
 @pytest.fixture()
 def client():
-    return LocalEngramClient(
+    return LocalLociClient(
         epoch_size_ms=5000,
         spatial_resolution=4,
         vector_size=VEC_SIZE,

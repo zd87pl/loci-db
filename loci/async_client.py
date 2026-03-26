@@ -1,4 +1,4 @@
-"""Async EngramClient — parallel shard fan-out for high-throughput workloads."""
+"""Async LociClient — parallel shard fan-out for high-throughput workloads."""
 
 from __future__ import annotations
 
@@ -22,12 +22,11 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from engram.schema import WorldState
-from engram.spatial.adaptive import AdaptiveResolution
-from engram.spatial.buckets import expand_bounding_box
-from engram.spatial.hilbert import encode as hilbert_encode
-from engram.temporal.decay import apply_decay
-from engram.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.schema import WorldState
+from loci.spatial.adaptive import AdaptiveResolution
+from loci.spatial.hilbert import HilbertIndex
+from loci.temporal.decay import apply_decay
+from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ _DISTANCE_MAP: dict[str, Distance] = {
 }
 
 
-class AsyncEngramClient:
+class AsyncLociClient:
     """Async high-level client with parallel shard fan-out.
 
     All query operations fan out across temporal shards concurrently
@@ -68,6 +67,7 @@ class AsyncEngramClient:
         adaptive: bool = False,
         max_retries: int = 3,
         retry_backoff: float = 0.5,
+        resolutions: list[int] | None = None,
     ) -> None:
         self._qdrant = AsyncQdrantClient(url=qdrant_url)
         self._epoch_size_ms = epoch_size_ms
@@ -81,6 +81,7 @@ class AsyncEngramClient:
         self._retry_backoff = retry_backoff
         self._known_collections: set[str] = set()
         self._collection_locks: dict[str, asyncio.Lock] = {}
+        self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
             AdaptiveResolution(
                 base_order=spatial_resolution,
@@ -93,7 +94,7 @@ class AsyncEngramClient:
 
     async def _retry(self, fn, *args, **kwargs):
         """Execute an async fn with retry logic."""
-        from engram.retry import async_with_retry
+        from loci.retry import async_with_retry
 
         return await async_with_retry(
             fn,
@@ -112,7 +113,7 @@ class AsyncEngramClient:
         """Close the underlying Qdrant connection."""
         await self._qdrant.close()
 
-    async def __aenter__(self) -> AsyncEngramClient:
+    async def __aenter__(self) -> AsyncLociClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -150,12 +151,15 @@ class AsyncEngramClient:
                         distance=self._distance,
                     ),
                 )
-                await asyncio.gather(
+                index_tasks = [
                     self._qdrant.create_payload_index(
                         collection_name=name,
-                        field_name="hilbert_id",
+                        field_name=f"hilbert_r{r}",
                         field_schema=PayloadSchemaType.INTEGER,
-                    ),
+                    )
+                    for r in self._hilbert.resolutions
+                ]
+                index_tasks.extend([
                     self._qdrant.create_payload_index(
                         collection_name=name,
                         field_name="timestamp_ms",
@@ -166,7 +170,8 @@ class AsyncEngramClient:
                         field_name="scale_level",
                         field_schema=PayloadSchemaType.KEYWORD,
                     ),
-                )
+                ])
+                await asyncio.gather(*index_tasks)
 
             self._known_collections.add(name)
 
@@ -190,18 +195,12 @@ class AsyncEngramClient:
         await self._ensure_collection(col)
 
         t_norm = _normalise_time(state.timestamp_ms, ep, self._epoch_size_ms)
-        hid = hilbert_encode(
-            state.x,
-            state.y,
-            state.z,
-            t_norm,
-            resolution_order=self._spatial_resolution,
-        )
+        hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
 
         if self._adaptive is not None:
             self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-        payload = _state_to_payload(state, hid)
+        payload = _state_to_payload(state, hilbert_ids)
 
         # Causal linking
         prev_id = await self._find_latest_predecessor(col, state.scene_id, state.timestamp_ms)
@@ -247,17 +246,11 @@ class AsyncEngramClient:
             await self._ensure_collection(col)
 
             t_norm = _normalise_time(state.timestamp_ms, ep, self._epoch_size_ms)
-            hid = hilbert_encode(
-                state.x,
-                state.y,
-                state.z,
-                t_norm,
-                resolution_order=self._spatial_resolution,
-            )
+            hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
             if self._adaptive is not None:
                 self._adaptive.record(state.x, state.y, state.z, t_norm)
 
-            payload = _state_to_payload(state, hid)
+            payload = _state_to_payload(state, hilbert_ids)
 
             # Link within the batch
             if state.scene_id and state.scene_id in scene_chains:
@@ -344,21 +337,17 @@ class AsyncEngramClient:
 
         # Build filter
         must_conditions: list = []
+        query_resolution = self._hilbert.resolutions[0]
 
         if spatial_bounds is not None:
-            hids = expand_bounding_box(
-                spatial_bounds.get("x_min", 0.0),
-                spatial_bounds.get("x_max", 1.0),
-                spatial_bounds.get("y_min", 0.0),
-                spatial_bounds.get("y_max", 1.0),
-                spatial_bounds.get("z_min", 0.0),
-                spatial_bounds.get("z_max", 1.0),
-                0.0,
-                1.0,
-                resolution_order=self._spatial_resolution,
+            hids = self._hilbert.query_buckets(
+                spatial_bounds,
+                resolution=query_resolution,
+                overlap_factor=1.2,
             )
             if hids:
-                must_conditions.append(FieldCondition(key="hilbert_id", match=MatchAny(any=hids)))
+                field = self._hilbert.payload_field(query_resolution)
+                must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
             else:
                 return []
 
@@ -481,44 +470,118 @@ class AsyncEngramClient:
         steps_back: int = 10,
         steps_forward: int = 10,
     ) -> list[WorldState]:
-        """Follow causal links to reconstruct a trajectory.
-
-        Args:
-            state_id: ID of the anchor state.
-            steps_back: Number of predecessors to follow.
-            steps_forward: Number of successors to follow.
-
-        Returns:
-            Ordered list of states from oldest to newest.
-        """
+        """Reconstruct a trajectory using scroll API with scene_id filter."""
         anchor = await self._get_state_by_id(state_id)
         if anchor is None:
             return []
+        if not anchor.scene_id:
+            return [anchor]
 
-        backward: list[WorldState] = []
-        current = anchor
-        for _ in range(steps_back):
-            if current.prev_state_id is None:
-                break
-            prev = await self._get_state_by_id(current.prev_state_id)
-            if prev is None:
-                break
-            backward.append(prev)
-            current = prev
-        backward.reverse()
+        total_needed = steps_back + 1 + steps_forward
 
-        forward: list[WorldState] = []
-        current = anchor
-        for _ in range(steps_forward):
-            if current.next_state_id is None:
-                break
-            nxt = await self._get_state_by_id(current.next_state_id)
-            if nxt is None:
-                break
-            forward.append(nxt)
-            current = nxt
+        async def _scroll_shard(col: str) -> list[WorldState]:
+            try:
+                hits = await self._retry(
+                    self._qdrant.scroll,
+                    collection_name=col,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="scene_id",
+                                match=MatchValue(value=anchor.scene_id),
+                            ),
+                        ]
+                    ),
+                    limit=total_needed * 2,
+                    order_by="timestamp_ms",
+                    with_vectors=True,
+                )
+                points = hits[0] if isinstance(hits, tuple) else hits
+                results = []
+                for pt in points:
+                    vec = pt.vector
+                    if isinstance(vec, dict):
+                        vec = list(vec.values())[0] if vec else []
+                    results.append(_payload_to_state(pt.payload, pt.id, vec))
+                return results
+            except Exception:
+                return []
 
-        return backward + [anchor] + forward
+        shard_results = await asyncio.gather(
+            *(_scroll_shard(col) for col in list(self._known_collections))
+        )
+        all_states: list[WorldState] = []
+        for batch in shard_results:
+            all_states.extend(batch)
+
+        all_states.sort(key=lambda s: s.timestamp_ms)
+        anchor_idx = None
+        for i, s in enumerate(all_states):
+            if s.id == state_id:
+                anchor_idx = i
+                break
+
+        if anchor_idx is None:
+            return [anchor]
+
+        start = max(0, anchor_idx - steps_back)
+        end = min(len(all_states), anchor_idx + steps_forward + 1)
+        return all_states[start:end]
+
+    async def get_causal_context(
+        self,
+        state_id: str,
+        window_ms: int = 5000,
+    ) -> list[WorldState]:
+        """Return all states within ±window_ms in the same scene_id."""
+        anchor = await self._get_state_by_id(state_id)
+        if anchor is None or not anchor.scene_id:
+            return []
+
+        t_min = anchor.timestamp_ms - window_ms
+        t_max = anchor.timestamp_ms + window_ms
+
+        async def _scroll_shard(col: str) -> list[WorldState]:
+            try:
+                hits = await self._retry(
+                    self._qdrant.scroll,
+                    collection_name=col,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="scene_id",
+                                match=MatchValue(value=anchor.scene_id),
+                            ),
+                            FieldCondition(
+                                key="timestamp_ms",
+                                range=Range(gte=t_min, lte=t_max),
+                            ),
+                        ]
+                    ),
+                    limit=100,
+                    order_by="timestamp_ms",
+                    with_vectors=True,
+                )
+                points = hits[0] if isinstance(hits, tuple) else hits
+                results = []
+                for pt in points:
+                    vec = pt.vector
+                    if isinstance(vec, dict):
+                        vec = list(vec.values())[0] if vec else []
+                    results.append(_payload_to_state(pt.payload, pt.id, vec))
+                return results
+            except Exception:
+                return []
+
+        shard_results = await asyncio.gather(
+            *(_scroll_shard(col) for col in list(self._known_collections))
+        )
+        context: list[WorldState] = []
+        for batch in shard_results:
+            context.extend(batch)
+
+        context.sort(key=lambda s: s.timestamp_ms)
+        return context
 
     # ------------------------------------------------------------------
     # Helpers
@@ -584,7 +647,7 @@ class AsyncEngramClient:
     def _list_active_epochs(self) -> list[int]:
         epochs: list[int] = []
         for col in self._known_collections:
-            if col.startswith("engram_"):
+            if col.startswith("loci_"):
                 try:
                     epochs.append(int(col.split("_", 1)[1]))
                 except ValueError:
@@ -603,19 +666,20 @@ def _normalise_time(timestamp_ms: int, ep: int, epoch_size_ms: int) -> float:
     return min(1.0, max(0.0, offset / epoch_size_ms))
 
 
-def _state_to_payload(state: WorldState, hilbert_id: int) -> dict:
-    return {
+def _state_to_payload(state: WorldState, hilbert_ids: dict[str, int]) -> dict:
+    payload = {
         "x": state.x,
         "y": state.y,
         "z": state.z,
         "timestamp_ms": state.timestamp_ms,
-        "hilbert_id": hilbert_id,
         "scene_id": state.scene_id,
         "scale_level": state.scale_level,
         "confidence": state.confidence,
         "prev_state_id": state.prev_state_id,
         "next_state_id": state.next_state_id,
     }
+    payload.update(hilbert_ids)
+    return payload
 
 
 def _payload_to_state(

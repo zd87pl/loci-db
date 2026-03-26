@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Basic Engram usage — insert 50 robot states and run a spatiotemporal query.
+"""Basic Loci usage — insert 50 robot states and run a spatiotemporal query.
 
 This script simulates a robot moving linearly through a room over 10 seconds,
 inserts the trajectory, then queries for states near a target position in the
 last 5 seconds.
 
 Requires a local Qdrant instance running on http://localhost:6333, OR
-falls back to the zero-dependency LocalEngramClient automatically.
+falls back to the zero-dependency LocalLociClient automatically.
 
 Start Qdrant with:  docker run -p 6333:6333 qdrant/qdrant
 """
@@ -17,7 +17,7 @@ import math
 import random
 import time
 
-from engram.schema import WorldState
+from loci.schema import WorldState
 
 VECTOR_DIM = 128
 NUM_STATES = 50
@@ -60,9 +60,9 @@ def make_robot_states(now_ms: int) -> list[WorldState]:
 def main() -> None:
     # Try Qdrant, fall back to local
     try:
-        from engram import EngramClient
+        from loci import LociClient
 
-        client = EngramClient(
+        client = LociClient(
             qdrant_url="http://localhost:6333",
             epoch_size_ms=5000,
             spatial_resolution=4,
@@ -72,14 +72,14 @@ def main() -> None:
         client._qdrant.get_collections()
         print("Connected to Qdrant at localhost:6333")
     except Exception:
-        from engram import LocalEngramClient
+        from loci import LocalLociClient
 
-        client = LocalEngramClient(
+        client = LocalLociClient(
             epoch_size_ms=5000,
             spatial_resolution=4,
             vector_size=VECTOR_DIM,
         )
-        print("Qdrant not available — using LocalEngramClient (in-memory)")
+        print("Qdrant not available — using LocalLociClient (in-memory)")
 
     now_ms = int(time.time() * 1000)
     states = make_robot_states(now_ms)

@@ -1,4 +1,4 @@
-"""Integration tests for EngramClient with a mocked Qdrant backend."""
+"""Integration tests for LociClient with a mocked Qdrant backend."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from engram.client import EngramClient
-from engram.schema import WorldState
+from loci.client import LociClient
+from loci.schema import WorldState
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -17,7 +17,7 @@ from engram.schema import WorldState
 @pytest.fixture()
 def mock_qdrant():
     """Patch QdrantClient so no real Qdrant is needed."""
-    with patch("engram.client.QdrantClient") as MockCls:
+    with patch("loci.client.QdrantClient") as MockCls:
         instance = MagicMock()
         MockCls.return_value = instance
 
@@ -45,7 +45,7 @@ def mock_qdrant():
 
 @pytest.fixture()
 def client(mock_qdrant):
-    return EngramClient(
+    return LociClient(
         qdrant_url="http://fake:6333",
         epoch_size_ms=5000,
         spatial_resolution=4,
@@ -75,18 +75,18 @@ def _make_state(**overrides) -> WorldState:
 class TestEnsureCollection:
     def test_creates_collection_on_404(self, client, mock_qdrant):
         """Collection should be created when Qdrant returns 404."""
-        client._ensure_collection("engram_0")
+        client._ensure_collection("loci_0")
 
         mock_qdrant.create_collection.assert_called_once()
         name_arg = mock_qdrant.create_collection.call_args.kwargs["collection_name"]
-        assert name_arg == "engram_0"
+        assert name_arg == "loci_0"
 
     def test_idempotent_after_first_call(self, client, mock_qdrant):
         """Second call should not hit Qdrant again."""
-        client._ensure_collection("engram_0")
+        client._ensure_collection("loci_0")
         mock_qdrant.reset_mock()
 
-        client._ensure_collection("engram_0")
+        client._ensure_collection("loci_0")
         mock_qdrant.get_collection.assert_not_called()
         mock_qdrant.create_collection.assert_not_called()
 
@@ -95,12 +95,12 @@ class TestEnsureCollection:
         mock_qdrant.get_collection.side_effect = None
         mock_qdrant.get_collection.return_value = MagicMock()
 
-        c = EngramClient.__new__(EngramClient)
+        c = LociClient.__new__(LociClient)
         c._qdrant = mock_qdrant
         c._vector_size = 4
         c._known_collections = set()
 
-        c._ensure_collection("engram_0")
+        c._ensure_collection("loci_0")
         mock_qdrant.create_collection.assert_not_called()
 
     def test_propagates_non_404_errors(self, mock_qdrant):
@@ -114,17 +114,17 @@ class TestEnsureCollection:
             content=b"",
             headers=httpx.Headers(),
         )
-        c = EngramClient.__new__(EngramClient)
+        c = LociClient.__new__(LociClient)
         c._qdrant = mock_qdrant
         c._vector_size = 4
         c._known_collections = set()
 
         with pytest.raises(UnexpectedResponse):
-            c._ensure_collection("engram_0")
+            c._ensure_collection("loci_0")
 
     def test_creates_scale_level_index(self, client, mock_qdrant):
         """scale_level should get a KEYWORD payload index."""
-        client._ensure_collection("engram_0")
+        client._ensure_collection("loci_0")
 
         index_calls = mock_qdrant.create_payload_index.call_args_list
         field_names = [c.kwargs["field_name"] for c in index_calls]
@@ -150,20 +150,22 @@ class TestInsert:
         assert state.id == original_id  # should not be modified
 
     def test_upserts_to_correct_collection(self, client, mock_qdrant):
-        # timestamp 10_000 with epoch_size 5000 → epoch 2 → "engram_2"
+        # timestamp 10_000 with epoch_size 5000 → epoch 2 → "loci_2"
         state = _make_state(timestamp_ms=10_000)
         client.insert(state)
 
         upsert_call = mock_qdrant.upsert.call_args
-        assert upsert_call.kwargs["collection_name"] == "engram_2"
+        assert upsert_call.kwargs["collection_name"] == "loci_2"
 
-    def test_payload_includes_hilbert_id(self, client, mock_qdrant):
+    def test_payload_includes_hilbert_ids(self, client, mock_qdrant):
         state = _make_state()
         client.insert(state)
 
         point = mock_qdrant.upsert.call_args.kwargs["points"][0]
-        assert "hilbert_id" in point.payload
-        assert isinstance(point.payload["hilbert_id"], int)
+        assert "hilbert_r4" in point.payload
+        assert isinstance(point.payload["hilbert_r4"], int)
+        assert "hilbert_r8" in point.payload
+        assert "hilbert_r12" in point.payload
 
     def test_payload_stores_all_fields(self, client, mock_qdrant):
         state = _make_state(scene_id="s1", scale_level="frame", confidence=0.9)
@@ -200,18 +202,18 @@ class TestInsertBatch:
 
         upsert_calls = mock_qdrant.upsert.call_args_list
         collections = {c.kwargs["collection_name"] for c in upsert_calls}
-        assert collections == {"engram_0", "engram_1"}
+        assert collections == {"loci_0", "loci_1"}
 
     def test_single_upsert_per_epoch(self, client, mock_qdrant):
         # All in same epoch → exactly one upsert call
         states = [_make_state(timestamp_ms=10_000 + i) for i in range(10)]
         client.insert_batch(states)
 
-        # Filter to only upsert calls for engram_2
+        # Filter to only upsert calls for loci_2
         upsert_calls = [
             c
             for c in mock_qdrant.upsert.call_args_list
-            if c.kwargs["collection_name"] == "engram_2"
+            if c.kwargs["collection_name"] == "loci_2"
         ]
         assert len(upsert_calls) == 1
         assert len(upsert_calls[0].kwargs["points"]) == 10
@@ -333,8 +335,8 @@ class TestBoundingBoxConsistency:
     def test_point_inside_box_is_found(self):
         """A point encoded with round() must be in the Hilbert IDs
         produced by expand_bounding_box for a box that contains it."""
-        from engram.spatial.buckets import expand_bounding_box
-        from engram.spatial.hilbert import encode
+        from loci.spatial.buckets import expand_bounding_box
+        from loci.spatial.hilbert import encode
 
         # The bug: x=0.53, side=15 → round(7.95)=8 but int(7.95)=7
         x, y, z, t = 0.53, 0.5, 0.5, 0.5

@@ -68,9 +68,7 @@ class HilbertIndex:
 
     def __init__(self, resolutions: list[int] | None = None) -> None:
         self.resolutions = resolutions or [4, 8, 12]
-        self._curves: dict[int, HilbertCurve] = {
-            r: _make_curve(r) for r in self.resolutions
-        }
+        self._curves: dict[int, HilbertCurve] = {r: _make_curve(r) for r in self.resolutions}
 
     def encode(
         self,

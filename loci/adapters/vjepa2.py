@@ -61,9 +61,7 @@ class VJEPA2Adapter:
             A WorldState with normalized spatial coordinates.
         """
         if tubelet_embedding.ndim != 1:
-            raise ValueError(
-                f"Expected 1D embedding, got shape {tubelet_embedding.shape}"
-            )
+            raise ValueError(f"Expected 1D embedding, got shape {tubelet_embedding.shape}")
 
         t_idx, h_idx, w_idx = patch_position
         T, H, W = grid_shape
@@ -106,9 +104,7 @@ class VJEPA2Adapter:
             List of WorldState objects, one per tubelet.
         """
         if clip_embeddings.ndim != 4:
-            raise ValueError(
-                f"Expected 4D array (T, H, W, D), got shape {clip_embeddings.shape}"
-            )
+            raise ValueError(f"Expected 4D array (T, H, W, D), got shape {clip_embeddings.shape}")
 
         T, H, W, D = clip_embeddings.shape
         grid_shape = (T, H, W)

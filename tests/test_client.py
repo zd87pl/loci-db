@@ -211,9 +211,7 @@ class TestInsertBatch:
 
         # Filter to only upsert calls for loci_2
         upsert_calls = [
-            c
-            for c in mock_qdrant.upsert.call_args_list
-            if c.kwargs["collection_name"] == "loci_2"
+            c for c in mock_qdrant.upsert.call_args_list if c.kwargs["collection_name"] == "loci_2"
         ]
         assert len(upsert_calls) == 1
         assert len(upsert_calls[0].kwargs["points"]) == 10

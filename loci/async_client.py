@@ -173,18 +173,20 @@ class AsyncLociClient:
                     )
                     for r in self._hilbert.resolutions
                 ]
-                index_tasks.extend([
-                    self._qdrant.create_payload_index(
-                        collection_name=name,
-                        field_name="timestamp_ms",
-                        field_schema=PayloadSchemaType.INTEGER,
-                    ),
-                    self._qdrant.create_payload_index(
-                        collection_name=name,
-                        field_name="scale_level",
-                        field_schema=PayloadSchemaType.KEYWORD,
-                    ),
-                ])
+                index_tasks.extend(
+                    [
+                        self._qdrant.create_payload_index(
+                            collection_name=name,
+                            field_name="timestamp_ms",
+                            field_schema=PayloadSchemaType.INTEGER,
+                        ),
+                        self._qdrant.create_payload_index(
+                            collection_name=name,
+                            field_name="scale_level",
+                            field_schema=PayloadSchemaType.KEYWORD,
+                        ),
+                    ]
+                )
                 await asyncio.gather(*index_tasks)
 
             self._known_collections.add(name)

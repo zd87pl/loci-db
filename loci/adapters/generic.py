@@ -49,9 +49,7 @@ class GenericAdapter:
         if embedding.ndim != 1:
             raise ValueError(f"Expected 1D array, got shape {embedding.shape}")
         if self._expected_dim is not None and embedding.shape[0] != self._expected_dim:
-            raise ValueError(
-                f"Expected {self._expected_dim}-dim, got {embedding.shape[0]}-dim"
-            )
+            raise ValueError(f"Expected {self._expected_dim}-dim, got {embedding.shape[0]}-dim")
 
         x, y, z = position
         return WorldState(

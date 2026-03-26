@@ -15,10 +15,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from loci.client import LociClient
     from loci.schema import WorldState
 
 
@@ -51,7 +50,7 @@ class PredictThenRetrieve:
     - novelty ~ 1.0 → "This is new territory" → alert, proceed carefully
     """
 
-    def __init__(self, client: LociClient) -> None:
+    def __init__(self, client: Any) -> None:
         self._client = client
 
     def retrieve(
@@ -91,7 +90,9 @@ class PredictThenRetrieve:
         Returns:
             PredictRetrieveResult with ranked results and novelty score.
         """
-        now_ms = current_timestamp_ms if current_timestamp_ms is not None else int(time.time() * 1000)
+        now_ms = (
+            current_timestamp_ms if current_timestamp_ms is not None else int(time.time() * 1000)
+        )
 
         # Step 1: Call predictor
         t0 = time.perf_counter()
@@ -167,7 +168,7 @@ class PredictThenRetrieve:
 
 
 def predict_and_retrieve(
-    client: LociClient,
+    client: Any,
     context_vector: list[float],
     predictor_fn: Callable[[list[float]], list[float]],
     future_horizon_ms: int = 1000,
@@ -180,8 +181,9 @@ def predict_and_retrieve(
     """
     predicted_vector = predictor_fn(context_vector)
     now_ms = int(time.time() * 1000)
-    return client.query(
+    results: list[WorldState] = client.query(
         vector=predicted_vector,
         time_window_ms=(now_ms, now_ms + future_horizon_ms),
         limit=limit,
     )
+    return results

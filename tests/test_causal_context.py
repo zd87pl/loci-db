@@ -52,11 +52,15 @@ def test_causal_context_filters_by_scene_id() -> None:
     now = int(time.time() * 1000)
 
     states_a = [
-        WorldState(x=0.5, y=0.5, z=0.5, timestamp_ms=now + i * 100, vector=_vec(), scene_id="scene_a")
+        WorldState(
+            x=0.5, y=0.5, z=0.5, timestamp_ms=now + i * 100, vector=_vec(), scene_id="scene_a"
+        )
         for i in range(10)
     ]
     states_b = [
-        WorldState(x=0.5, y=0.5, z=0.5, timestamp_ms=now + i * 100, vector=_vec(), scene_id="scene_b")
+        WorldState(
+            x=0.5, y=0.5, z=0.5, timestamp_ms=now + i * 100, vector=_vec(), scene_id="scene_b"
+        )
         for i in range(10)
     ]
     ids_a = client.insert_batch(states_a)

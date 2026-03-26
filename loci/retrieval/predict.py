@@ -91,7 +91,7 @@ class PredictThenRetrieve:
         Returns:
             PredictRetrieveResult with ranked results and novelty score.
         """
-        now_ms = current_timestamp_ms or int(time.time() * 1000)
+        now_ms = current_timestamp_ms if current_timestamp_ms is not None else int(time.time() * 1000)
 
         # Step 1: Call predictor
         t0 = time.perf_counter()
@@ -125,8 +125,7 @@ class PredictThenRetrieve:
 
         # Step 4: Combined scoring
         if raw_results:
-            end_ms = now_ms + future_horizon_ms
-            mid_ms = now_ms + future_horizon_ms / 2
+            mid_ms = now_ms + future_horizon_ms // 2
             scored = []
             for i, ws in enumerate(raw_results):
                 # Vector similarity: inverse rank as proxy

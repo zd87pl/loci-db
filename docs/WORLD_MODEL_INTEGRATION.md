@@ -20,7 +20,7 @@ embedding = np.random.randn(1408).astype(np.float32)  # from V-JEPA 2
 ws = adapter.tubelet_to_world_state(
     tubelet_embedding=embedding,
     patch_position=(0, 5, 10),       # (time_idx, h_idx, w_idx)
-    scene_bounds=(10.0, 10.0, 5.0),  # room dimensions in meters
+    grid_shape=(8, 14, 14),           # (T, H, W) patch grid dimensions
     timestamp_ms=1000,
     scene_id="kitchen_patrol",
 )
@@ -30,7 +30,6 @@ client.insert(ws)
 clip_output = np.random.randn(8, 14, 14, 1408)  # (T, H, W, D)
 states = adapter.batch_clip_to_states(
     clip_embeddings=clip_output,
-    scene_bounds=(10.0, 10.0, 5.0),
     start_timestamp_ms=0,
     scene_id="kitchen_patrol",
     frame_interval_ms=33,  # ~30 fps
@@ -41,7 +40,7 @@ client.insert_batch(states)
 ### Position Mapping
 
 The adapter maps patch grid positions to normalized [0, 1] coordinates:
-- `x = w_idx / scene_width`
+- `x = w_idx / (W - 1)`
 - `y = h_idx / scene_height`
 - `z = t_idx / scene_depth`
 

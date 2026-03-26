@@ -22,6 +22,8 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
+from loci.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
 from loci.schema import WorldState
 from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.hilbert import HilbertIndex
@@ -122,6 +124,18 @@ class AsyncLociClient:
     # ------------------------------------------------------------------
     # Collection management
     # ------------------------------------------------------------------
+
+    async def _discover_collections(self) -> None:
+        """Populate _known_collections from Qdrant (for read-only clients)."""
+        if self._known_collections:
+            return
+        try:
+            response = await self._qdrant.get_collections()
+            for col in response.collections:
+                if col.name.startswith("loci_"):
+                    self._known_collections.add(col.name)
+        except Exception:
+            logger.debug("Failed to discover collections", exc_info=True)
 
     async def _ensure_collection(self, name: str) -> None:
         """Create a Qdrant collection if it does not already exist (idempotent, async-safe)."""
@@ -255,7 +269,8 @@ class AsyncLociClient:
             # Link within the batch
             if state.scene_id and state.scene_id in scene_chains:
                 payload["prev_state_id"] = scene_chains[state.scene_id]
-            scene_chains[state.scene_id] = point_id
+            if state.scene_id:
+                scene_chains[state.scene_id] = point_id
 
             groups.setdefault(col, []).append(
                 PointStruct(id=point_id, vector=state.vector, payload=payload)
@@ -323,6 +338,8 @@ class AsyncLociClient:
         Returns:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
         """
+        await self._discover_collections()
+
         if time_window_ms is not None:
             start_ms, end_ms = time_window_ms
             epochs = epochs_in_range(start_ms, end_ms, self._epoch_size_ms)
@@ -409,18 +426,45 @@ class AsyncLociClient:
         predictor_fn: Callable[[list[float]], list[float]],
         future_horizon_ms: int = 1000,
         limit: int = 5,
-    ) -> list[WorldState]:
+        current_position: tuple[float, float, float] | None = None,
+        spatial_search_radius: float = 0.3,
+        alpha: float = 0.7,
+        return_prediction: bool = False,
+    ) -> list[WorldState] | PredictRetrieveResult:
         """Predict a future state then retrieve nearest neighbours.
+
+        When ``current_position`` is provided, returns a full
+        :class:`PredictRetrieveResult` with novelty scoring and timing.
+        Otherwise falls back to the legacy API returning a plain list.
 
         Args:
             context_vector: Current-state embedding.
             predictor_fn: User-supplied world model.
             future_horizon_ms: How far ahead to search (milliseconds).
             limit: Maximum number of results.
+            current_position: Optional (x, y, z) for spatial + novelty scoring.
+            spatial_search_radius: Search radius around current_position.
+            alpha: Weight for vector_sim vs temporal_proximity (default 0.7).
+            return_prediction: Include predicted vector in result.
 
         Returns:
-            List of :class:`WorldState` neighbours of the predicted vector.
+            :class:`PredictRetrieveResult` when current_position is set,
+            otherwise a plain list of :class:`WorldState`.
         """
+        if current_position is not None or return_prediction:
+            # PredictThenRetrieve calls self.query() synchronously;
+            # run it in a thread to avoid blocking the event loop
+            ptr = PredictThenRetrieve(self)
+            return ptr.retrieve(
+                context_vector=context_vector,
+                predictor_fn=predictor_fn,
+                future_horizon_ms=future_horizon_ms,
+                current_position=current_position,
+                spatial_search_radius=spatial_search_radius,
+                limit=limit,
+                alpha=alpha,
+                return_prediction=return_prediction,
+            )
         predicted_vector = predictor_fn(context_vector)
         now_ms = int(time.time() * 1000)
         return await self.query(
@@ -471,6 +515,7 @@ class AsyncLociClient:
         steps_forward: int = 10,
     ) -> list[WorldState]:
         """Reconstruct a trajectory using scroll API with scene_id filter."""
+        await self._discover_collections()
         anchor = await self._get_state_by_id(state_id)
         if anchor is None:
             return []
@@ -534,6 +579,7 @@ class AsyncLociClient:
         window_ms: int = 5000,
     ) -> list[WorldState]:
         """Return all states within ±window_ms in the same scene_id."""
+        await self._discover_collections()
         anchor = await self._get_state_by_id(state_id)
         if anchor is None or not anchor.scene_id:
             return []
@@ -621,12 +667,13 @@ class AsyncLociClient:
                         FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
                     ]
                 ),
-                limit=1,
+                limit=100,
                 order_by="timestamp_ms",
             )
             points = hits[0] if isinstance(hits, tuple) else hits
             if points:
-                return str(points[0].id)
+                # Scroll returns ascending order; last item is the latest predecessor
+                return str(points[-1].id)
         except Exception:
             logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
         return None
@@ -652,7 +699,7 @@ class AsyncLociClient:
                     epochs.append(int(col.split("_", 1)[1]))
                 except ValueError:
                     pass
-        return sorted(epochs) if epochs else [0]
+        return sorted(epochs) if epochs else []
 
 
 # ---------------------------------------------------------------------------

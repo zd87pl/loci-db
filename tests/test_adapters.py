@@ -16,7 +16,7 @@ class TestVJEPA2Adapter:
         ws = adapter.tubelet_to_world_state(
             tubelet_embedding=embedding,
             patch_position=(0, 5, 10),
-            scene_bounds=(20.0, 20.0, 10.0),
+            grid_shape=(4, 14, 14),
             timestamp_ms=1000,
             scene_id="scene_1",
         )
@@ -33,7 +33,7 @@ class TestVJEPA2Adapter:
             adapter.tubelet_to_world_state(
                 tubelet_embedding=np.zeros((2, 1408)),
                 patch_position=(0, 0, 0),
-                scene_bounds=(1.0, 1.0, 1.0),
+                grid_shape=(1, 1, 1),
                 timestamp_ms=0,
                 scene_id="s",
             )
@@ -43,7 +43,6 @@ class TestVJEPA2Adapter:
         clip = np.random.randn(2, 3, 4, 1408).astype(np.float32)
         states = adapter.batch_clip_to_states(
             clip_embeddings=clip,
-            scene_bounds=(10.0, 10.0, 5.0),
             start_timestamp_ms=0,
             scene_id="clip_1",
         )
@@ -57,7 +56,6 @@ class TestVJEPA2Adapter:
         with pytest.raises(ValueError, match="4D"):
             adapter.batch_clip_to_states(
                 clip_embeddings=np.zeros((2, 3, 1408)),
-                scene_bounds=(1.0, 1.0, 1.0),
                 start_timestamp_ms=0,
                 scene_id="s",
             )

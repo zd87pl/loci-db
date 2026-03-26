@@ -59,7 +59,7 @@ class GenericAdapter:
             y=y,
             z=z,
             timestamp_ms=timestamp_ms,
-            vector=embedding.astype(np.float64).tolist(),
+            vector=embedding.tolist(),
             scene_id=scene_id,
             scale_level=scale_level,
             confidence=confidence,

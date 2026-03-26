@@ -127,9 +127,12 @@ class HilbertIndex:
         side = (1 << res) - 1
 
         # Expand bounds by overlap_factor
+        # For zero-width spans (point queries), use minimum padding of one grid cell
+        min_pad = 1.0 / max(side, 1)
+
         def _expand(lo: float, hi: float) -> tuple[float, float]:
             span = hi - lo
-            pad = span * (overlap_factor - 1.0) / 2.0
+            pad = max(span * (overlap_factor - 1.0) / 2.0, min_pad)
             return max(0.0, lo - pad), min(1.0, hi + pad)
 
         x_lo, x_hi = _expand(bounds.x_min, bounds.x_max)

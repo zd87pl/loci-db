@@ -13,11 +13,6 @@ authors = [
     { name = "Loci Contributors" },
 ]
 keywords = ["vector-database", "spatiotemporal", "world-models", "qdrant", "hilbert-curve"]
-
-[project.urls]
-Homepage = "https://github.com/zd87pl/loci-db"
-Repository = "https://github.com/zd87pl/loci-db"
-Issues = "https://github.com/zd87pl/loci-db/issues"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -31,6 +26,11 @@ dependencies = [
     "hilbertcurve>=2.0.5",
     "numpy>=1.24.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/zd87pl/loci-db"
+Repository = "https://github.com/zd87pl/loci-db"
+Issues = "https://github.com/zd87pl/loci-db/issues"
 
 [project.optional-dependencies]
 dev = [

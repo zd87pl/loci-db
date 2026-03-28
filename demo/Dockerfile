@@ -2,14 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+# Install Python dependencies
 COPY demo/requirements.txt /app/demo/requirements.txt
 RUN pip install --no-cache-dir -r demo/requirements.txt
 
-# Copy LOCI source (use local package rather than PyPI)
-COPY loci/ /app/loci/
+# Copy LOCI source and install from local source
 COPY pyproject.toml /app/pyproject.toml
-RUN pip install --no-cache-dir -e .
+COPY loci/ /app/loci/
+RUN pip install --no-cache-dir .
 
 # Copy demo app
 COPY demo/ /app/demo/

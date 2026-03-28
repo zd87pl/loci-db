@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -37,8 +38,8 @@ class SpatialQueryReq(BaseModel):
     x_max: int
     y_min: int
     y_max: int
-    time_start_ms: int | None = None
-    time_end_ms: int | None = None
+    time_start_s: float = 0
+    time_end_s: float = 9999
     limit: int = 20
 
 
@@ -46,8 +47,6 @@ class SimilarQueryReq(BaseModel):
     x: int
     y: int
     radius: int = 5
-    time_start_ms: int | None = None
-    time_end_ms: int | None = None
     limit: int = 5
 
 
@@ -62,8 +61,6 @@ class AnomalyReq(BaseModel):
 
 # ── Static files & index ────────────────────────────────────────────────
 
-import os
-
 _static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
 
 
@@ -72,7 +69,6 @@ async def index():
     return FileResponse(os.path.join(_static_dir, "index.html"))
 
 
-# Mount static after the root route so "/" takes precedence
 app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 
@@ -81,7 +77,7 @@ app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "memory_count": sim.memory_count}
+    return {"status": "ok", "memory_count": sim.memory_count, "running": sim.running}
 
 
 # ── Simulation control ──────────────────────────────────────────────────
@@ -104,8 +100,15 @@ async def stop_simulation():
 
 @app.post("/api/simulation/reset")
 async def reset_simulation():
+    global _sim_task
     sim.running = False
-    await asyncio.sleep(0.1)
+    if _sim_task and not _sim_task.done():
+        _sim_task.cancel()
+        try:
+            await _sim_task
+        except asyncio.CancelledError:
+            pass
+    _sim_task = None
     sim.reset()
     return {"status": "reset"}
 
@@ -118,6 +121,7 @@ async def simulation_state():
         "tick": sim.tick_count,
         "elapsed_ms": sim.elapsed_ms,
         "memory_count": sim.memory_count,
+        "start_time_ms": sim.start_time_ms,
         "anomalies": [{"x": a[0], "y": a[1]} for a in sim.anomalies],
     }
 
@@ -135,15 +139,13 @@ async def query_spatial(req: SpatialQueryReq):
     if sim.memory_count == 0:
         return {"results": [], "stats": {}, "message": "No memories stored yet. Start the simulation first."}
 
-    # Use the robot's current embedding as query vector
-    visible_keys = sim.get_visible_object_keys(sim.robot_x, sim.robot_y)
     from .embeddings import generate_embedding
 
-    query_vec = generate_embedding(
-        (req.x_min + req.x_max) // 2,
-        (req.y_min + req.y_max) // 2,
-        visible_keys,
-    )
+    # Generate embedding for the center of the bounding box
+    center_x = (req.x_min + req.x_max) // 2
+    center_y = (req.y_min + req.y_max) // 2
+    visible_keys = sim.get_visible_object_keys(center_x, center_y)
+    query_vec = generate_embedding(center_x, center_y, visible_keys)
 
     # Normalize grid coords to [0,1]
     spatial_bounds = {
@@ -155,9 +157,12 @@ async def query_spatial(req: SpatialQueryReq):
         "z_max": 1.0,
     }
 
+    # Convert seconds-from-start to absolute timestamps
     time_window = None
-    if req.time_start_ms is not None and req.time_end_ms is not None:
-        time_window = (req.time_start_ms, req.time_end_ms)
+    if sim.start_time_ms > 0:
+        t_start = sim.start_time_ms + int(req.time_start_s * 1000)
+        t_end = sim.start_time_ms + int(req.time_end_s * 1000)
+        time_window = (t_start, t_end)
 
     results = sim.client.query(
         vector=query_vec,
@@ -176,7 +181,9 @@ async def query_spatial(req: SpatialQueryReq):
                 "x": round(r.x * 19),
                 "y": round(r.y * 19),
                 "timestamp_ms": r.timestamp_ms,
-                "scene_id": r.scene_id,
+                "elapsed_s": round((r.timestamp_ms - sim.start_time_ms) / 1000, 1)
+                if sim.start_time_ms
+                else 0,
             }
             for r in results
         ],
@@ -197,38 +204,30 @@ async def query_similar(req: SimilarQueryReq):
 
     from .embeddings import generate_embedding
 
-    # Generate embedding for the clicked point
     visible_keys = sim.get_visible_object_keys(req.x, req.y)
     click_vec = generate_embedding(req.x, req.y, visible_keys)
 
-    # First find the nearest memory to this click point (narrow spatial)
+    # Find nearest memory to click point
     nx = req.x / 19.0
     ny = req.y / 19.0
     narrow_bounds = {
-        "x_min": max(0.0, nx - 0.1),
-        "x_max": min(1.0, nx + 0.1),
-        "y_min": max(0.0, ny - 0.1),
-        "y_max": min(1.0, ny + 0.1),
+        "x_min": max(0.0, nx - 0.15),
+        "x_max": min(1.0, nx + 0.15),
+        "y_min": max(0.0, ny - 0.15),
+        "y_max": min(1.0, ny + 0.15),
         "z_min": 0.0,
         "z_max": 1.0,
     }
 
-    anchor_results = sim.client.query(
-        vector=click_vec,
-        spatial_bounds=narrow_bounds,
-        limit=1,
-    )
-
+    anchor_results = sim.client.query(vector=click_vec, spatial_bounds=narrow_bounds, limit=1)
     if not anchor_results:
-        # Try without spatial bounds
         anchor_results = sim.client.query(vector=click_vec, limit=1)
-
     if not anchor_results:
-        return {"anchor": None, "results": [], "message": "No nearby memories found."}
+        return {"anchor": None, "results": [], "message": "No memories found near that location."}
 
     anchor = anchor_results[0]
 
-    # Now find similar memories within radius
+    # Find similar memories within radius
     radius_norm = req.radius / 19.0
     wide_bounds = {
         "x_min": max(0.0, anchor.x - radius_norm),
@@ -239,18 +238,9 @@ async def query_similar(req: SimilarQueryReq):
         "z_max": 1.0,
     }
 
-    time_window = None
-    if req.time_start_ms is not None and req.time_end_ms is not None:
-        time_window = (req.time_start_ms, req.time_end_ms)
-
     similar = sim.client.query(
-        vector=anchor.vector,
-        spatial_bounds=wide_bounds,
-        time_window_ms=time_window,
-        limit=req.limit + 1,  # +1 because anchor might be in results
+        vector=anchor.vector, spatial_bounds=wide_bounds, limit=req.limit + 1
     )
-
-    # Remove anchor from results if present
     similar = [r for r in similar if r.id != anchor.id][: req.limit]
 
     stats = sim.client.last_query_stats
@@ -285,7 +275,7 @@ async def query_predict(req: PredictQueryReq):
         return {
             "novelty": None,
             "results": [],
-            "message": "Need at least 3 memories for prediction. Let the simulation run a bit.",
+            "message": "Need at least 3 memories. Let the simulation run a bit first.",
         }
 
     if not sim.recent_embeddings:
@@ -294,7 +284,6 @@ async def query_predict(req: PredictQueryReq):
     context_vec = sim.recent_embeddings[-1]
     predictor_fn = sim.make_predictor(req.steps_ahead)
 
-    # Current position normalized
     cx = sim.robot_x / 19.0
     cy = sim.robot_y / 19.0
 
@@ -309,16 +298,20 @@ async def query_predict(req: PredictQueryReq):
         return_prediction=True,
     )
 
-    # Predict where robot will be in N steps
+    # Calculate predicted position from patrol route
     route_idx = sim.route_idx
     predicted_x, predicted_y = sim.robot_x, sim.robot_y
+    # Also build the predicted path for visualization
+    predicted_path = [{"x": sim.robot_x, "y": sim.robot_y}]
     for _ in range(req.steps_ahead):
         predicted_x, predicted_y = sim.patrol_route[route_idx % len(sim.patrol_route)]
         route_idx = (route_idx + 1) % len(sim.patrol_route)
+        predicted_path.append({"x": predicted_x, "y": predicted_y})
 
     return {
         "novelty": round(result.prediction_novelty, 3),
         "predicted_position": {"x": predicted_x, "y": predicted_y},
+        "predicted_path": predicted_path,
         "current_position": {"x": sim.robot_x, "y": sim.robot_y},
         "predictor_ms": round(result.predictor_call_ms, 2),
         "retrieval_ms": round(result.retrieval_latency_ms, 2),
@@ -336,18 +329,17 @@ async def query_predict(req: PredictQueryReq):
 
 @app.post("/api/anomaly/place")
 async def place_anomaly(req: AnomalyReq):
-    if 0 <= req.x < 20 and 0 <= req.y < 20:
-        sim.anomalies.append((req.x, req.y))
-        # Also add to warehouse_grid so observations pick it up
-        sim.warehouse_grid[(req.x, req.y)] = "anomaly"
-        return {"status": "placed", "x": req.x, "y": req.y, "total_anomalies": len(sim.anomalies)}
-    return {"status": "error", "message": "Position out of bounds"}
+    x = max(0, min(19, req.x))
+    y = max(0, min(19, req.y))
+    sim.anomalies.append((x, y))
+    sim.warehouse_grid[(x, y)] = "anomaly"
+    return {"status": "placed", "x": x, "y": y, "total_anomalies": len(sim.anomalies)}
 
 
 @app.get("/api/stats")
 async def stats():
     store = sim.client.store
-    collections = [name for name in store._collections]
+    collections = list(store._collections.keys())
     return {
         "memory_count": sim.memory_count,
         "epoch_count": len(collections),
@@ -358,9 +350,16 @@ async def stats():
     }
 
 
+# Cached heatmap
+_heatmap_cache: dict = {"tick": -1, "data": None}
+
+
 @app.get("/api/heatmap")
 async def heatmap():
-    """Return memory density per grid cell."""
+    """Return memory density per grid cell (cached per tick)."""
+    if _heatmap_cache["tick"] == sim.tick_count and _heatmap_cache["data"]:
+        return _heatmap_cache["data"]
+
     grid = [[0] * 20 for _ in range(20)]
     store = sim.client.store
     for col in store._collections.values():
@@ -370,7 +369,17 @@ async def heatmap():
             gx = max(0, min(19, gx))
             gy = max(0, min(19, gy))
             grid[gy][gx] += 1
-    return {"grid": grid, "max_density": max(max(row) for row in grid) if sim.memory_count > 0 else 0}
+
+    max_val = 0
+    for row in grid:
+        for v in row:
+            if v > max_val:
+                max_val = v
+
+    data = {"grid": grid, "max_density": max_val}
+    _heatmap_cache["tick"] = sim.tick_count
+    _heatmap_cache["data"] = data
+    return data
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────
@@ -382,9 +391,7 @@ async def ws_simulation(ws: WebSocket):
     sim.subscribers.add(ws)
     try:
         while True:
-            # Keep connection alive; handle client messages if needed
-            data = await ws.receive_text()
-            # Could handle client commands here
+            await ws.receive_text()
     except WebSocketDisconnect:
         sim.subscribers.discard(ws)
     except Exception:

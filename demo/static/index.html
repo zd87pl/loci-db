@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LOCI Demo</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f0f1a;--panel:#1a1a2e;--border:#2a2a3e;--text:#e0e0e0;--muted:#888;--accent:#00bcd4;--red:#ff4444;--green:#4caf50;--yellow:#ffc107;--blue:#4a6fa5;--gray:#555}
+body{font-family:'Courier New',monospace;background:var(--bg);color:var(--text);overflow-x:hidden}
+h1{font-size:1.3rem;color:var(--accent)}
+h2{font-size:1rem;color:var(--accent);margin-bottom:8px}
+h3{font-size:0.85rem;color:var(--muted);margin-bottom:4px}
+button{background:var(--border);color:var(--text);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:0.8rem;transition:background .2s}
+button:hover{background:#3a3a4e}
+button.active{background:var(--accent);color:#000;border-color:var(--accent)}
+button.danger{border-color:var(--red);color:var(--red)}
+button.danger:hover{background:var(--red);color:#fff}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.header{padding:12px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:16px}
+.header .subtitle{color:var(--muted);font-size:0.8rem}
+.main{display:flex;height:calc(100vh - 140px);overflow:hidden}
+.canvas-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:16px;position:relative}
+canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
+.sidebar{width:360px;min-width:360px;border-left:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
+.tabs{display:flex;border-bottom:1px solid var(--border)}
+.tabs button{flex:1;border:none;border-bottom:2px solid transparent;border-radius:0;padding:10px 4px;font-size:0.75rem}
+.tabs button.active{border-bottom-color:var(--accent);background:transparent;color:var(--accent)}
+.tab-content{padding:12px;flex:1;overflow-y:auto}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+.controls{padding:8px 20px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.controls .stats{margin-left:auto;color:var(--muted);font-size:0.75rem}
+.timeline{padding:8px 20px;border-top:1px solid var(--border)}
+.timeline label{font-size:0.7rem;color:var(--muted)}
+.result-item{background:var(--bg);padding:6px 8px;border-radius:4px;margin:4px 0;font-size:0.75rem;border-left:3px solid var(--accent)}
+.result-item .pos{color:var(--accent)}
+.result-item .time{color:var(--muted)}
+.explainer{background:#1e1e30;border:1px solid var(--border);border-radius:4px;padding:10px;margin-top:12px;font-size:0.75rem;line-height:1.5;color:var(--muted)}
+.explainer strong{color:var(--text)}
+.stat-row{display:flex;justify-content:space-between;font-size:0.75rem;padding:2px 0;color:var(--muted)}
+.stat-row .val{color:var(--accent)}
+.novelty-gauge{text-align:center;margin:12px 0}
+.novelty-gauge .score{font-size:2rem;font-weight:bold}
+.novelty-gauge .label{font-size:0.7rem;color:var(--muted)}
+.footer{border-top:1px solid var(--border);padding:12px 20px}
+.footer summary{cursor:pointer;color:var(--accent);font-size:0.85rem}
+.cards{display:flex;gap:12px;margin-top:12px;flex-wrap:wrap}
+.card{flex:1;min-width:200px;background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:12px}
+.card h3{color:var(--accent);margin-bottom:6px;font-size:0.8rem}
+.card p{font-size:0.72rem;line-height:1.5;color:var(--muted)}
+.badge{display:inline-block;padding:2px 6px;border-radius:3px;font-size:0.65rem;font-weight:bold}
+.badge-low{background:#1b5e20;color:#a5d6a7}
+.badge-mid{background:#e65100;color:#ffcc80}
+.badge-high{background:#b71c1c;color:#ef9a9a}
+.input-group{margin:8px 0}
+.input-group label{display:block;font-size:0.7rem;color:var(--muted);margin-bottom:2px}
+.msg{padding:8px;background:#1e1e30;border-radius:4px;color:var(--muted);font-size:0.75rem;margin:8px 0}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>LOCI</h1>
+    <div class="subtitle">Spatiotemporal Memory for Autonomous Systems &mdash; Live Demo</div>
+  </div>
+</div>
+
+<div class="main">
+  <div class="canvas-wrap">
+    <canvas id="warehouse" width="600" height="600"></canvas>
+  </div>
+  <div class="sidebar">
+    <div class="tabs">
+      <button class="active" data-tab="spatial">Where &amp; When</button>
+      <button data-tab="similar">What's Similar?</button>
+      <button data-tab="predict">Predict &amp; Surprise</button>
+    </div>
+    <div class="tab-content">
+
+      <!-- Tab 1: Spatial+Temporal -->
+      <div id="tab-spatial" class="tab-panel active">
+        <h3>Spatial + Temporal Query</h3>
+        <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 8px">Draw a bounding box on the warehouse, then search.</p>
+        <div class="input-group">
+          <label>Time range (seconds from start)</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="number" id="time-start" value="0" min="0" style="width:60px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:4px;font-family:inherit;font-size:0.75rem">
+            <span style="color:var(--muted)">to</span>
+            <input type="number" id="time-end" value="999" min="0" style="width:60px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:4px;font-family:inherit;font-size:0.75rem">
+          </div>
+        </div>
+        <button id="btn-spatial-search" style="width:100%;margin:8px 0">Search Region</button>
+        <div id="spatial-results"></div>
+        <div class="explainer">
+          <strong>How it works:</strong> Traditional vector databases scan every embedding with 3 independent float-range filters (x, y, z). LOCI uses <strong>Hilbert curve bucketing</strong> to pre-filter spatially with a single integer-set lookup, and <strong>epoch sharding</strong> to skip irrelevant time windows entirely.
+        </div>
+      </div>
+
+      <!-- Tab 2: Similar -->
+      <div id="tab-similar" class="tab-panel">
+        <h3>Vector Similarity + Spatial Filter</h3>
+        <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 8px">Click any point on the warehouse to find similar memories.</p>
+        <div class="input-group">
+          <label>Search radius (cells): <span id="radius-val">5</span></label>
+          <input type="range" id="sim-radius" min="1" max="10" value="5">
+        </div>
+        <button id="btn-similar-search" style="width:100%;margin:8px 0">Find Similar (click map first)</button>
+        <div id="similar-results"></div>
+        <div class="explainer">
+          <strong>How it works:</strong> This combines <strong>vector similarity</strong> (what the robot saw) with <strong>spatial proximity</strong> (where it was). A normal vector DB can do similarity search, but can't efficiently bound it to a physical region and time window.
+        </div>
+      </div>
+
+      <!-- Tab 3: Predict -->
+      <div id="tab-predict" class="tab-panel">
+        <h3>Predict-then-Retrieve with Novelty</h3>
+        <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 8px">What does the robot expect to see ahead?</p>
+        <div class="input-group">
+          <label>Steps ahead: <span id="steps-val">10</span></label>
+          <input type="range" id="predict-steps" min="1" max="30" value="10">
+        </div>
+        <button id="btn-predict" style="width:100%;margin:8px 0">Predict Future</button>
+        <div id="predict-results"></div>
+        <div class="explainer">
+          <strong>How it works:</strong> In one atomic call, LOCI runs a world model prediction, searches for matching memories, and scores how <strong>novel</strong> the situation is. This is how autonomous systems detect anomalies &mdash; "I expected to see shelves here, but something is different."
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="controls">
+  <button id="btn-start" class="active">&#9654; Start</button>
+  <button id="btn-stop">&#9646;&#9646; Pause</button>
+  <button id="btn-reset">&#8634; Reset</button>
+  <button id="btn-anomaly" class="danger">&#128680; Place Anomaly</button>
+  <button id="btn-heatmap">Heatmap</button>
+  <div class="stats">
+    <span id="stat-memories">0</span> memories &middot;
+    <span id="stat-tick">0</span> ticks &middot;
+    <span id="stat-elapsed">0.0</span>s
+  </div>
+</div>
+
+<div class="timeline">
+  <label>Timeline: <span id="timeline-label">0.0s</span></label>
+  <input type="range" id="timeline" min="0" max="1000" value="0" disabled>
+</div>
+
+<div class="footer">
+  <details>
+    <summary>How It Works</summary>
+    <div class="cards">
+      <div class="card">
+        <h3>Hilbert Curves</h3>
+        <p>LOCI maps 4D coordinates (x, y, z, t) to a single integer via space-filling curves. This turns expensive multi-axis range queries into simple integer-set comparisons. A spatial bounding box becomes a single filter: <code>hilbert_r4 IN {ids}</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Temporal Sharding</h3>
+        <p>Vectors are automatically routed to time-partitioned collections (loci_0, loci_1, ...). Queries skip irrelevant epochs entirely. The async client searches all matching shards concurrently via asyncio.gather.</p>
+      </div>
+      <div class="card">
+        <h3>Novelty Scoring</h3>
+        <p>Compare predicted future embeddings against stored memories. High distance = high novelty = something unexpected. Score 0.0 means "I've seen this exact situation before." Score 1.0 means "This is completely new territory."</p>
+      </div>
+    </div>
+  </details>
+</div>
+
+<script>
+const C = document.getElementById('warehouse');
+const ctx = C.getContext('2d');
+const GRID = 20, CELL = C.width / GRID;
+
+// State
+let warehouse = [], robot = {x:2, y:18}, running = false;
+let queryResults = [], similarAnchor = null, similarResults = [];
+let predictedPos = null, noveltyScore = null;
+let heatmapData = null, showHeatmap = false;
+let anomalyMode = false, anomalies = [];
+let bbox = null, dragging = false, dragStart = null;
+let clickedCell = null;
+let currentTab = 'spatial';
+let ws = null;
+
+// Colors
+const OBJ_COLORS = {
+  shelf: '#4a6fa5', charger: '#4caf50', dock: '#ffc107',
+  obstacle: '#555', anomaly: '#ff4444'
+};
+
+// --- Init ---
+async function init() {
+  const resp = await fetch('/api/warehouse');
+  const data = await resp.json();
+  warehouse = data.objects;
+  draw();
+  connectWS();
+}
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws/simulation`);
+  ws.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (d.type === 'tick') {
+      robot = d.robot;
+      running = true;
+      document.getElementById('stat-memories').textContent = d.memory_count;
+      document.getElementById('stat-tick').textContent = d.tick;
+      document.getElementById('stat-elapsed').textContent = (d.elapsed_ms/1000).toFixed(1);
+      document.getElementById('timeline-label').textContent = (d.elapsed_ms/1000).toFixed(1)+'s';
+      document.getElementById('timeline').max = d.elapsed_ms;
+      document.getElementById('timeline').value = d.elapsed_ms;
+      draw();
+    }
+  };
+  ws.onclose = () => setTimeout(connectWS, 2000);
+}
+
+// --- Drawing ---
+function draw() {
+  ctx.fillStyle = '#0f0f1a';
+  ctx.fillRect(0, 0, C.width, C.height);
+
+  // Grid lines
+  ctx.strokeStyle = '#1a1a2e';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= GRID; i++) {
+    ctx.beginPath(); ctx.moveTo(i*CELL, 0); ctx.lineTo(i*CELL, C.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i*CELL); ctx.lineTo(C.width, i*CELL); ctx.stroke();
+  }
+
+  // Axis labels
+  ctx.fillStyle = '#444';
+  ctx.font = '9px monospace';
+  for (let i = 0; i < GRID; i++) {
+    ctx.fillText(i, i*CELL+CELL/2-3, C.height-2);
+    ctx.fillText(i, 2, i*CELL+CELL/2+3);
+  }
+
+  // Heatmap overlay
+  if (showHeatmap && heatmapData) {
+    const max = heatmapData.max_density || 1;
+    for (let y = 0; y < 20; y++) {
+      for (let x = 0; x < 20; x++) {
+        const v = heatmapData.grid[y][x];
+        if (v > 0) {
+          const t = v / max;
+          const r = Math.round(50 + 205 * t);
+          const g = Math.round(50 * (1 - t));
+          const b = Math.round(200 * (1 - t));
+          ctx.fillStyle = `rgba(${r},${g},${b},0.35)`;
+          ctx.fillRect(x*CELL, y*CELL, CELL, CELL);
+        }
+      }
+    }
+  }
+
+  // Warehouse objects
+  for (const obj of warehouse) {
+    const color = OBJ_COLORS[obj.type] || '#555';
+    ctx.fillStyle = color;
+    if (obj.type === 'anomaly') {
+      // Draw X
+      const cx = obj.x*CELL+CELL/2, cy = obj.y*CELL+CELL/2, s = CELL*0.35;
+      ctx.strokeStyle = '#ff4444';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(cx-s, cy-s); ctx.lineTo(cx+s, cy+s); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx+s, cy-s); ctx.lineTo(cx-s, cy+s); ctx.stroke();
+    } else {
+      const pad = 2;
+      ctx.fillRect(obj.x*CELL+pad, obj.y*CELL+pad, CELL-2*pad, CELL-2*pad);
+    }
+  }
+
+  // Query results (cyan dots)
+  for (const r of queryResults) {
+    ctx.fillStyle = 'rgba(0,188,212,0.7)';
+    ctx.beginPath();
+    ctx.arc(r.x*CELL+CELL/2, r.y*CELL+CELL/2, 4, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // Similar: anchor (yellow) + results (cyan) with lines
+  if (similarAnchor) {
+    const ax = similarAnchor.x*CELL+CELL/2, ay = similarAnchor.y*CELL+CELL/2;
+    ctx.fillStyle = '#ffc107';
+    ctx.beginPath(); ctx.arc(ax, ay, 6, 0, Math.PI*2); ctx.fill();
+    for (const r of similarResults) {
+      const rx = r.x*CELL+CELL/2, ry = r.y*CELL+CELL/2;
+      ctx.strokeStyle = 'rgba(0,188,212,0.4)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(rx, ry); ctx.stroke();
+      ctx.fillStyle = 'rgba(0,188,212,0.7)';
+      ctx.beginPath(); ctx.arc(rx, ry, 4, 0, Math.PI*2); ctx.fill();
+    }
+  }
+
+  // Clicked cell highlight
+  if (clickedCell && currentTab === 'similar') {
+    ctx.strokeStyle = '#ffc107';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(clickedCell.x*CELL, clickedCell.y*CELL, CELL, CELL);
+  }
+
+  // Predicted position (ghost dot)
+  if (predictedPos) {
+    ctx.fillStyle = 'rgba(156,39,176,0.6)';
+    ctx.beginPath();
+    ctx.arc(predictedPos.x*CELL+CELL/2, predictedPos.y*CELL+CELL/2, 8, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = '#9c27b0';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  // Bounding box selection
+  if (bbox) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 3]);
+    const x1 = Math.min(bbox.x1, bbox.x2)*CELL;
+    const y1 = Math.min(bbox.y1, bbox.y2)*CELL;
+    const w = (Math.abs(bbox.x2-bbox.x1)+1)*CELL;
+    const h = (Math.abs(bbox.y2-bbox.y1)+1)*CELL;
+    ctx.strokeRect(x1, y1, w, h);
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(0,188,212,0.08)';
+    ctx.fillRect(x1, y1, w, h);
+  }
+
+  // Robot observation radius
+  ctx.fillStyle = 'rgba(255,68,68,0.06)';
+  ctx.beginPath();
+  ctx.arc(robot.x*CELL+CELL/2, robot.y*CELL+CELL/2, 3*CELL, 0, Math.PI*2);
+  ctx.fill();
+
+  // Robot
+  ctx.fillStyle = '#ff4444';
+  ctx.beginPath();
+  ctx.arc(robot.x*CELL+CELL/2, robot.y*CELL+CELL/2, CELL*0.4, 0, Math.PI*2);
+  ctx.fill();
+  ctx.strokeStyle = '#ff8888';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+// --- Canvas interactions ---
+function cellFromEvent(e) {
+  const rect = C.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) / CELL);
+  const y = Math.floor((e.clientY - rect.top) / CELL);
+  return {x: Math.max(0, Math.min(19, x)), y: Math.max(0, Math.min(19, y))};
+}
+
+C.addEventListener('mousedown', e => {
+  const cell = cellFromEvent(e);
+  if (anomalyMode) {
+    placeAnomaly(cell.x, cell.y);
+    anomalyMode = false;
+    document.getElementById('btn-anomaly').classList.remove('active');
+    return;
+  }
+  if (currentTab === 'spatial') {
+    dragging = true;
+    dragStart = cell;
+    bbox = {x1: cell.x, y1: cell.y, x2: cell.x, y2: cell.y};
+  } else if (currentTab === 'similar') {
+    clickedCell = cell;
+    draw();
+  }
+});
+
+C.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const cell = cellFromEvent(e);
+  bbox.x2 = cell.x;
+  bbox.y2 = cell.y;
+  draw();
+});
+
+C.addEventListener('mouseup', e => {
+  if (dragging) {
+    dragging = false;
+    const cell = cellFromEvent(e);
+    bbox.x2 = cell.x;
+    bbox.y2 = cell.y;
+    draw();
+  }
+});
+
+// --- Tabs ---
+document.querySelectorAll('.tabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    currentTab = btn.dataset.tab;
+    document.getElementById('tab-'+currentTab).classList.add('active');
+    // Clear results on tab switch
+    queryResults = []; similarAnchor = null; similarResults = [];
+    predictedPos = null; noveltyScore = null; bbox = null; clickedCell = null;
+    draw();
+  });
+});
+
+// --- Sliders ---
+document.getElementById('sim-radius').addEventListener('input', e => {
+  document.getElementById('radius-val').textContent = e.target.value;
+});
+document.getElementById('predict-steps').addEventListener('input', e => {
+  document.getElementById('steps-val').textContent = e.target.value;
+});
+
+// --- Controls ---
+document.getElementById('btn-start').addEventListener('click', async () => {
+  await fetch('/api/simulation/start', {method:'POST'});
+});
+document.getElementById('btn-stop').addEventListener('click', async () => {
+  await fetch('/api/simulation/stop', {method:'POST'});
+  running = false;
+});
+document.getElementById('btn-reset').addEventListener('click', async () => {
+  await fetch('/api/simulation/reset', {method:'POST'});
+  running = false;
+  queryResults = []; similarAnchor = null; similarResults = [];
+  predictedPos = null; noveltyScore = null; bbox = null;
+  heatmapData = null; anomalies = [];
+  document.getElementById('stat-memories').textContent = '0';
+  document.getElementById('stat-tick').textContent = '0';
+  document.getElementById('stat-elapsed').textContent = '0.0';
+  // Reload warehouse
+  const resp = await fetch('/api/warehouse');
+  const data = await resp.json();
+  warehouse = data.objects;
+  draw();
+});
+document.getElementById('btn-anomaly').addEventListener('click', () => {
+  anomalyMode = !anomalyMode;
+  document.getElementById('btn-anomaly').classList.toggle('active', anomalyMode);
+});
+document.getElementById('btn-heatmap').addEventListener('click', async () => {
+  showHeatmap = !showHeatmap;
+  document.getElementById('btn-heatmap').classList.toggle('active', showHeatmap);
+  if (showHeatmap) {
+    const resp = await fetch('/api/heatmap');
+    heatmapData = await resp.json();
+  }
+  draw();
+});
+
+// --- Anomaly ---
+async function placeAnomaly(x, y) {
+  const resp = await fetch('/api/anomaly/place', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({x, y})
+  });
+  const data = await resp.json();
+  anomalies.push({x, y});
+  warehouse.push({x, y, type:'anomaly'});
+  draw();
+}
+
+// --- Spatial query ---
+document.getElementById('btn-spatial-search').addEventListener('click', async () => {
+  if (!bbox) {
+    document.getElementById('spatial-results').innerHTML = '<div class="msg">Draw a bounding box on the warehouse first (click and drag).</div>';
+    return;
+  }
+  const tStart = parseInt(document.getElementById('time-start').value) || 0;
+  const tEnd = parseInt(document.getElementById('time-end').value) || 999;
+  const state = await (await fetch('/api/simulation/state')).json();
+  const startMs = (state.elapsed_ms > 0 ? state.elapsed_ms - (tEnd * 1000) : 0);
+
+  const body = {
+    x_min: Math.min(bbox.x1, bbox.x2),
+    x_max: Math.max(bbox.x1, bbox.x2),
+    y_min: Math.min(bbox.y1, bbox.y2),
+    y_max: Math.max(bbox.y1, bbox.y2),
+    time_start_ms: tStart * 1000 + (state.elapsed_ms > 0 ? state.elapsed_ms - state.elapsed_ms : 0),
+    time_end_ms: null,
+    limit: 20
+  };
+  // Use absolute timestamps if simulation has state
+  if (state.elapsed_ms > 0) {
+    const baseMs = Date.now() - state.elapsed_ms;
+    body.time_start_ms = baseMs + tStart * 1000;
+    body.time_end_ms = baseMs + tEnd * 1000;
+  }
+
+  const resp = await fetch('/api/query/spatial', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  const data = await resp.json();
+  queryResults = data.results || [];
+  draw();
+
+  let html = '';
+  if (data.message) {
+    html = `<div class="msg">${data.message}</div>`;
+  } else {
+    const s = data.stats;
+    html += `<div style="margin:8px 0">
+      <div class="stat-row"><span>Results found</span><span class="val">${data.results.length}</span></div>
+      <div class="stat-row"><span>Shards searched</span><span class="val">${s.shards_searched}</span></div>
+      <div class="stat-row"><span>Candidates evaluated</span><span class="val">${s.total_candidates}</span></div>
+      <div class="stat-row"><span>Hilbert IDs in filter</span><span class="val">${s.hilbert_ids_in_filter}</span></div>
+      <div class="stat-row"><span>Total memories</span><span class="val">${s.total_points}</span></div>
+      <div class="stat-row"><span>Query time</span><span class="val">${s.elapsed_ms}ms</span></div>
+    </div>`;
+    if (s.total_points > 0 && s.total_candidates < s.total_points) {
+      const pct = ((1 - s.total_candidates / s.total_points) * 100).toFixed(0);
+      html += `<div class="msg">LOCI skipped <strong>${pct}%</strong> of stored memories using Hilbert bucketing + temporal sharding.</div>`;
+    }
+    for (const r of data.results) {
+      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">t=${r.timestamp_ms}</span></div>`;
+    }
+  }
+  document.getElementById('spatial-results').innerHTML = html;
+});
+
+// --- Similar query ---
+document.getElementById('btn-similar-search').addEventListener('click', async () => {
+  if (!clickedCell) {
+    document.getElementById('similar-results').innerHTML = '<div class="msg">Click a point on the warehouse first.</div>';
+    return;
+  }
+  const radius = parseInt(document.getElementById('sim-radius').value);
+  const resp = await fetch('/api/query/similar', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({x: clickedCell.x, y: clickedCell.y, radius, limit: 5})
+  });
+  const data = await resp.json();
+  similarAnchor = data.anchor;
+  similarResults = data.results || [];
+  queryResults = [];
+  draw();
+
+  let html = '';
+  if (data.message) {
+    html = `<div class="msg">${data.message}</div>`;
+  } else {
+    const s = data.stats;
+    html += `<div style="margin:8px 0">
+      <div class="stat-row"><span>Anchor</span><span class="val">(${data.anchor.x}, ${data.anchor.y})</span></div>
+      <div class="stat-row"><span>Similar found</span><span class="val">${data.results.length}</span></div>
+      <div class="stat-row"><span>Query time</span><span class="val">${s.elapsed_ms}ms</span></div>
+    </div>`;
+    for (const r of data.results) {
+      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">t=${r.timestamp_ms}</span></div>`;
+    }
+  }
+  document.getElementById('similar-results').innerHTML = html;
+});
+
+// --- Predict query ---
+document.getElementById('btn-predict').addEventListener('click', async () => {
+  const steps = parseInt(document.getElementById('predict-steps').value);
+  const resp = await fetch('/api/query/predict', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({steps_ahead: steps})
+  });
+  const data = await resp.json();
+
+  if (data.predicted_position) {
+    predictedPos = data.predicted_position;
+  }
+  noveltyScore = data.novelty;
+  queryResults = data.results || [];
+  draw();
+
+  let html = '';
+  if (data.message) {
+    html = `<div class="msg">${data.message}</div>`;
+  } else {
+    // Novelty gauge
+    const n = data.novelty;
+    let badgeClass = 'badge-low', badgeText = 'Familiar';
+    if (n > 0.7) { badgeClass = 'badge-high'; badgeText = 'Novel!'; }
+    else if (n > 0.3) { badgeClass = 'badge-mid'; badgeText = 'Somewhat new'; }
+
+    html += `<div class="novelty-gauge">
+      <div class="score" style="color:${n > 0.7 ? '#ff4444' : n > 0.3 ? '#ffc107' : '#4caf50'}">${n.toFixed(3)}</div>
+      <div class="label">Novelty Score <span class="badge ${badgeClass}">${badgeText}</span></div>
+      <div style="margin-top:6px;font-size:0.7rem;color:var(--muted)">0.0 = seen before &middot; 1.0 = completely new</div>
+    </div>`;
+
+    html += `<div style="margin:8px 0">
+      <div class="stat-row"><span>Current pos</span><span class="val">(${data.current_position.x}, ${data.current_position.y})</span></div>
+      <div class="stat-row"><span>Predicted pos</span><span class="val">(${data.predicted_position.x}, ${data.predicted_position.y})</span></div>
+      <div class="stat-row"><span>Predictor time</span><span class="val">${data.predictor_ms}ms</span></div>
+      <div class="stat-row"><span>Retrieval time</span><span class="val">${data.retrieval_ms}ms</span></div>
+      <div class="stat-row"><span>Matches found</span><span class="val">${data.results.length}</span></div>
+    </div>`;
+
+    for (const r of data.results) {
+      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">t=${r.timestamp_ms}</span></div>`;
+    }
+  }
+  document.getElementById('predict-results').innerHTML = html;
+});
+
+// Refresh heatmap periodically if active
+setInterval(async () => {
+  if (showHeatmap && running) {
+    const resp = await fetch('/api/heatmap');
+    heatmapData = await resp.json();
+    draw();
+  }
+}, 3000);
+
+init();
+</script>
+</body>
+</html>

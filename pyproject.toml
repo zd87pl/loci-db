@@ -27,6 +27,11 @@ dependencies = [
     "numpy>=1.24.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/zd87pl/loci-db"
+Repository = "https://github.com/zd87pl/loci-db"
+Issues = "https://github.com/zd87pl/loci-db/issues"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",

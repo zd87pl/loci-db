@@ -17,10 +17,10 @@ button.active{background:var(--accent);color:#000;border-color:var(--accent)}
 button.danger{border-color:var(--red);color:var(--red)}
 button.danger:hover{background:var(--red);color:#fff}
 input[type=range]{width:100%;accent-color:var(--accent)}
-.header{padding:12px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:16px}
+.header{padding:16px 20px;border-bottom:2px solid transparent;border-image:linear-gradient(90deg,#00bcd4,#9c27b0,transparent) 1;display:flex;align-items:center;gap:16px}
 .header .subtitle{color:var(--muted);font-size:0.8rem}
-.main{display:flex;height:calc(100vh - 140px);overflow:hidden}
-.canvas-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:16px;position:relative}
+.main{display:flex;height:calc(100vh - 195px);overflow:hidden}
+.canvas-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:16px;position:relative;flex-direction:column}
 canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
 .sidebar{width:360px;min-width:360px;border-left:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
 .tabs{display:flex;border-bottom:1px solid var(--border)}
@@ -28,7 +28,8 @@ canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
 .tabs button.active{border-bottom-color:var(--accent);background:transparent;color:var(--accent)}
 .tab-content{padding:12px;flex:1;overflow-y:auto}
 .tab-panel{display:none}
-.tab-panel.active{display:block}
+.tab-panel.active{display:block;animation:fadeIn .2s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 .controls{padding:8px 20px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .controls .stats{margin-left:auto;color:var(--muted);font-size:0.75rem}
 .timeline{padding:8px 20px;border-top:1px solid var(--border)}
@@ -56,6 +57,26 @@ canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
 .input-group{margin:8px 0}
 .input-group label{display:block;font-size:0.7rem;color:var(--muted);margin-bottom:2px}
 .msg{padding:8px;background:#1e1e30;border-radius:4px;color:var(--muted);font-size:0.75rem;margin:8px 0}
+.hero{padding:10px 20px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,#12121f,var(--bg))}
+.hero p{font-size:0.78rem;color:var(--muted);line-height:1.6;max-width:800px}
+.canvas-legend{position:absolute;top:12px;right:12px;background:rgba(15,15,26,0.88);border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:0.65rem;pointer-events:none;z-index:5}
+.canvas-legend .legend-item{display:flex;align-items:center;gap:6px;margin:2px 0;color:var(--muted)}
+.canvas-legend .legend-dot{width:10px;height:10px;display:inline-block;border-radius:2px}
+.activity-log{width:100%;max-width:600px;max-height:100px;overflow-y:auto;background:rgba(15,15,26,0.9);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:0.7rem;margin-top:4px}
+.activity-log::-webkit-scrollbar{width:4px}
+.activity-log::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.activity-log .log-entry{padding:2px 0;border-bottom:1px solid rgba(42,42,62,0.5);color:var(--muted)}
+.activity-log .log-entry:last-child{border-bottom:none}
+.activity-log .log-accent{color:var(--accent)}
+.tour-overlay{position:fixed;bottom:24px;right:24px;z-index:1000;max-width:320px;background:var(--panel);border:1px solid var(--accent);border-radius:8px;padding:14px 16px;box-shadow:0 0 20px rgba(0,188,212,0.15)}
+.tour-overlay.hidden{display:none}
+.tour-step{font-size:0.78rem;line-height:1.8;color:var(--muted);transition:opacity .3s}
+.tour-step .step-num{display:inline-block;width:20px;height:20px;border-radius:50%;background:var(--border);color:var(--text);text-align:center;font-weight:bold;font-size:0.65rem;line-height:20px;margin-right:6px}
+.tour-step.done .step-num{background:var(--green)}
+.tour-step.current{color:var(--text)}
+.tour-step.current .step-num{background:var(--accent);color:#000}
+.tour-dismiss{cursor:pointer;color:var(--muted);font-size:0.85rem}
+.tour-dismiss:hover{color:var(--text)}
 </style>
 </head>
 <body>
@@ -67,9 +88,26 @@ canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
   </div>
 </div>
 
+<div class="hero">
+  <p>
+    <strong style="color:var(--red)">The Problem:</strong> AI agents operate in physical space, but vector databases are spatially blind &mdash; they can't efficiently filter by <em>where</em> or <em>when</em>.
+    <strong style="color:var(--accent);margin-left:8px">LOCI's Solution:</strong> 4D spatiotemporal indexing via Hilbert curves + temporal sharding. One query handles space, time, and semantics together.
+  </p>
+</div>
+
 <div class="main">
   <div class="canvas-wrap">
     <canvas id="warehouse" width="600" height="600"></canvas>
+    <div class="canvas-legend">
+      <div class="legend-item"><span class="legend-dot" style="background:#ff4444;border-radius:50%"></span> Robot</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#4a6fa5"></span> Shelf</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#4caf50"></span> Charger</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#ffc107"></span> Dock</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#555"></span> Obstacle</div>
+      <div class="legend-item"><span class="legend-dot" style="background:rgba(0,188,212,0.7);border-radius:50%"></span> Query Result</div>
+      <div class="legend-item"><span class="legend-dot" style="background:#ce93d8;border-radius:50%"></span> Prediction</div>
+    </div>
+    <div class="activity-log" id="activity-log"></div>
   </div>
   <div class="sidebar">
     <div class="tabs">
@@ -213,6 +251,17 @@ canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
   </details>
 </div>
 
+<div class="tour-overlay" id="tour">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <strong style="color:var(--accent);font-size:0.8rem">Quick Start</strong>
+    <span class="tour-dismiss" id="tour-dismiss">&times;</span>
+  </div>
+  <div class="tour-step current" id="tour-step-0"><span class="step-num">1</span> Press <strong>Start</strong> to begin the robot's patrol</div>
+  <div class="tour-step" id="tour-step-1" style="opacity:0.4"><span class="step-num">2</span> Watch the robot build memories as it moves</div>
+  <div class="tour-step" id="tour-step-2" style="opacity:0.4"><span class="step-num">3</span> Try the <strong>query tabs</strong> to explore search modes</div>
+  <div class="tour-step" id="tour-step-3" style="opacity:0.4"><span class="step-num">4</span> Place an <strong>anomaly</strong> and see novelty detection</div>
+</div>
+
 <script>
 const C = document.getElementById('warehouse');
 const ctx = C.getContext('2d');
@@ -231,6 +280,44 @@ let clickedCell = null;
 let currentTab = 'spatial';
 let ws = null;
 let memoryCount = 0, elapsedMs = 0;
+let robotVelocity = [0, 0];
+let visibleObjects = [];
+let lastMemoryCount = 0, lastShardId = -1;
+
+// --- Activity Log ---
+const MAX_LOG = 8;
+function addLog(icon, text) {
+  const log = document.getElementById('activity-log');
+  const el = document.createElement('div');
+  el.className = 'log-entry';
+  el.innerHTML = `${icon} ${text}`;
+  log.appendChild(el);
+  while (log.children.length > MAX_LOG) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
+}
+
+// --- Guided Tour ---
+let tourStep = 0;
+function advanceTour(to) {
+  if (to <= tourStep) return;
+  const steps = document.querySelectorAll('.tour-step');
+  for (let i = 0; i < to; i++) {
+    steps[i].className = 'tour-step done';
+    steps[i].style.opacity = '0.5';
+    steps[i].querySelector('.step-num').textContent = '\u2713';
+  }
+  if (to < steps.length) {
+    steps[to].className = 'tour-step current';
+    steps[to].style.opacity = '1';
+  }
+  tourStep = to;
+  if (tourStep >= steps.length) {
+    setTimeout(() => document.getElementById('tour').classList.add('hidden'), 2000);
+  }
+}
+document.getElementById('tour-dismiss').addEventListener('click', () => {
+  document.getElementById('tour').classList.add('hidden');
+});
 
 // Colors
 const OBJ_COLORS = {
@@ -257,6 +344,8 @@ function connectWS() {
       running = true;
       memoryCount = d.memory_count;
       elapsedMs = d.elapsed_ms;
+      robotVelocity = d.robot.velocity || [0, 0];
+      visibleObjects = d.visible_objects || [];
       document.getElementById('stat-memories').textContent = d.memory_count;
       document.getElementById('stat-tick').textContent = d.tick;
       document.getElementById('stat-elapsed').textContent = (d.elapsed_ms/1000).toFixed(1);
@@ -264,6 +353,21 @@ function connectWS() {
       document.getElementById('timeline').max = d.elapsed_ms;
       document.getElementById('timeline').value = d.elapsed_ms;
       document.getElementById('time-end').value = Math.ceil(d.elapsed_ms/1000);
+      // Activity log: new memory
+      if (d.memory_count > lastMemoryCount) {
+        const types = [...new Set(visibleObjects.filter(o=>o.type!=='obstacle').map(o=>o.type))];
+        const objText = types.length > 0 ? ` &mdash; ${types.join(', ')} visible` : '';
+        addLog('&#128200;', `Memory <span class="log-accent">#${d.memory_count}</span> at <span class="log-accent">(${d.robot.x}, ${d.robot.y})</span>${objText}`);
+        lastMemoryCount = d.memory_count;
+      }
+      // Activity log: new epoch shard
+      const shard = Math.floor(d.elapsed_ms / 5000);
+      if (shard > lastShardId) {
+        if (lastShardId >= 0) addLog('&#128451;', `Epoch shard <span class="log-accent">loci_${shard}</span> created`);
+        lastShardId = shard;
+      }
+      // Tour: auto-advance
+      if (memoryCount >= 3) advanceTour(2);
     }
   };
   ws.onclose = () => {
@@ -337,6 +441,19 @@ function draw() {
       const pad = 2;
       ctx.fillRect(obj.x*CELL+pad, obj.y*CELL+pad, CELL-2*pad, CELL-2*pad);
     }
+  }
+
+  // Visible object glow
+  if (running && visibleObjects.length > 0) {
+    for (const vo of visibleObjects) {
+      const vc = OBJ_COLORS[vo.type] || '#555';
+      ctx.shadowColor = vc;
+      ctx.shadowBlur = 8;
+      ctx.strokeStyle = vc;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(vo.x*CELL+1, vo.y*CELL+1, CELL-2, CELL-2);
+    }
+    ctx.shadowBlur = 0;
   }
 
   // Query results (cyan dots)
@@ -435,6 +552,22 @@ function draw() {
   ctx.beginPath(); ctx.arc(rx, ry, CELL*0.25, 0, Math.PI*2); ctx.fill();
   ctx.shadowBlur = 0;
 
+  // Directional arrow
+  if (robotVelocity[0] !== 0 || robotVelocity[1] !== 0) {
+    const angle = Math.atan2(robotVelocity[1], robotVelocity[0]);
+    const arrowLen = CELL * 0.55;
+    const ax = rx + Math.cos(angle) * arrowLen;
+    const ay = ry + Math.sin(angle) * arrowLen;
+    ctx.strokeStyle = '#ffcccc';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(rx, ry); ctx.lineTo(ax, ay); ctx.stroke();
+    const hl = 5;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay); ctx.lineTo(ax - hl*Math.cos(angle-0.4), ay - hl*Math.sin(angle-0.4));
+    ctx.moveTo(ax, ay); ctx.lineTo(ax - hl*Math.cos(angle+0.4), ay - hl*Math.sin(angle+0.4));
+    ctx.stroke();
+  }
+
   // Loading overlay when no memories yet
   if (!running || memoryCount === 0) {
     ctx.fillStyle = 'rgba(15,15,26,0.6)';
@@ -502,6 +635,7 @@ document.querySelectorAll('.tabs button').forEach(btn => {
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     currentTab = btn.dataset.tab;
     document.getElementById('tab-'+currentTab).classList.add('active');
+    advanceTour(3);
     // Clear results on tab switch
     queryResults = []; similarAnchor = null; similarResults = [];
     predictedPos = null; noveltyScore = null; bbox = null; clickedCell = null;
@@ -520,6 +654,7 @@ document.getElementById('predict-steps').addEventListener('input', e => {
 // --- Controls ---
 document.getElementById('btn-start').addEventListener('click', async () => {
   await fetch('/api/simulation/start', {method:'POST'});
+  advanceTour(1);
 });
 document.getElementById('btn-stop').addEventListener('click', async () => {
   await fetch('/api/simulation/stop', {method:'POST'});
@@ -531,6 +666,8 @@ document.getElementById('btn-reset').addEventListener('click', async () => {
   queryResults = []; similarAnchor = null; similarResults = [];
   predictedPos = null; noveltyScore = null; bbox = null;
   heatmapData = null; anomalies = [];
+  lastMemoryCount = 0; lastShardId = -1;
+  document.getElementById('activity-log').innerHTML = '';
   document.getElementById('stat-memories').textContent = '0';
   document.getElementById('stat-tick').textContent = '0';
   document.getElementById('stat-elapsed').textContent = '0.0';
@@ -564,6 +701,8 @@ async function placeAnomaly(x, y) {
   const data = await resp.json();
   anomalies.push({x, y});
   warehouse.push({x, y, type:'anomaly'});
+  addLog('&#128680;', `Anomaly placed at <span class="log-accent">(${x}, ${y})</span>`);
+  advanceTour(4);
   draw();
 }
 
@@ -617,6 +756,7 @@ document.getElementById('btn-spatial-search').addEventListener('click', async ()
     }
   }
   document.getElementById('spatial-results').innerHTML = html;
+  if (data.results) addLog('&#128269;', `Spatial query: <span class="log-accent">${data.results.length} results</span> in ${data.stats?.elapsed_ms||'?'}ms`);
 });
 
 // --- Similar query ---
@@ -653,6 +793,7 @@ document.getElementById('btn-similar-search').addEventListener('click', async ()
     }
   }
   document.getElementById('similar-results').innerHTML = html;
+  if (data.results) addLog('&#128269;', `Similar query: <span class="log-accent">${data.results.length} matches</span> in ${data.stats?.elapsed_ms||'?'}ms`);
 });
 
 // --- Predict query ---
@@ -708,6 +849,10 @@ document.getElementById('btn-predict').addEventListener('click', async () => {
     }
   }
   document.getElementById('predict-results').innerHTML = html;
+  if (data.novelty != null) {
+    const lvl = data.novelty > 0.7 ? 'HIGH' : data.novelty > 0.3 ? 'MED' : 'LOW';
+    addLog('&#129504;', `Novelty: <span class="log-accent">${data.novelty.toFixed(2)}</span> (${lvl})`);
+  }
 });
 
 // Refresh heatmap periodically if active

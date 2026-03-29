@@ -258,6 +258,9 @@ async def query_similar(req: SimilarQueryReq):
                 "x": round(r.x * 19),
                 "y": round(r.y * 19),
                 "timestamp_ms": r.timestamp_ms,
+                "elapsed_s": round((r.timestamp_ms - sim.start_time_ms) / 1000, 1)
+                if sim.start_time_ms
+                else 0,
             }
             for r in similar
         ],

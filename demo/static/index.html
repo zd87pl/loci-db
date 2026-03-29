@@ -315,7 +315,7 @@ function draw() {
           const r = Math.round(50 + 205 * t);
           const g = Math.round(50 * (1 - t));
           const b = Math.round(200 * (1 - t));
-          ctx.fillStyle = `rgba(${r},${g},${b},0.35)`;
+          ctx.fillStyle = `rgba(${r},${g},${b},0.18)`;
           ctx.fillRect(x*CELL, y*CELL, CELL, CELL);
         }
       }
@@ -649,7 +649,7 @@ document.getElementById('btn-similar-search').addEventListener('click', async ()
       <div class="stat-row"><span>Query time</span><span class="val">${s.elapsed_ms}ms</span></div>
     </div>`;
     for (const r of data.results) {
-      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">t=${r.timestamp_ms}</span></div>`;
+      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">${r.elapsed_s != null ? r.elapsed_s+'s' : 't='+r.timestamp_ms}</span></div>`;
     }
   }
   document.getElementById('similar-results').innerHTML = html;
@@ -704,7 +704,7 @@ document.getElementById('btn-predict').addEventListener('click', async () => {
     </div>`;
 
     for (const r of data.results) {
-      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">t=${r.timestamp_ms}</span></div>`;
+      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">${r.elapsed_s != null ? r.elapsed_s+'s' : 't='+r.timestamp_ms}</span></div>`;
     }
   }
   document.getElementById('predict-results').innerHTML = html;

@@ -6,10 +6,10 @@
 <title>LOCI Demo</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#0f0f1a;--panel:#1a1a2e;--border:#2a2a3e;--text:#e0e0e0;--muted:#888;--accent:#00bcd4;--red:#ff4444;--green:#4caf50;--yellow:#ffc107;--blue:#4a6fa5;--gray:#555}
-body{font-family:'Courier New',monospace;background:var(--bg);color:var(--text);overflow-x:hidden}
-h1{font-size:1.3rem;color:var(--accent)}
-h2{font-size:1rem;color:var(--accent);margin-bottom:8px}
+:root{--bg:#0f0f1a;--panel:#171a27;--panel-alt:#1b2237;--border:#2a2a3e;--text:#e0e0e0;--muted:#95a0b8;--accent:#00bcd4;--accent-soft:#113a45;--red:#ff5757;--green:#5ad17b;--yellow:#ffc857;--blue:#4a6fa5;--gray:#555;--ink:#09131c}
+body{font-family:'Courier New',monospace;background:radial-gradient(circle at top,#171b2b 0%,#0f0f1a 45%,#090911 100%);color:var(--text);display:flex;flex-direction:column;min-height:100vh;overflow:hidden}
+h1{font-size:1.5rem;color:var(--accent)}
+h2{font-size:1rem;color:var(--text);margin-bottom:8px}
 h3{font-size:0.85rem;color:var(--muted);margin-bottom:4px}
 button{background:var(--border);color:var(--text);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:0.8rem;transition:background .2s}
 button:hover{background:#3a3a4e}
@@ -17,20 +17,67 @@ button.active{background:var(--accent);color:#000;border-color:var(--accent)}
 button.danger{border-color:var(--red);color:var(--red)}
 button.danger:hover{background:var(--red);color:#fff}
 input[type=range]{width:100%;accent-color:var(--accent)}
-.header{padding:16px 20px;border-bottom:2px solid transparent;border-image:linear-gradient(90deg,#00bcd4,#9c27b0,transparent) 1;display:flex;align-items:center;gap:16px}
-.header .subtitle{color:var(--muted);font-size:0.8rem}
-.main{display:flex;height:calc(100vh - 195px);overflow:hidden}
-.canvas-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:16px;position:relative;flex-direction:column}
-canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
-.sidebar{width:360px;min-width:360px;border-left:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
+.header{padding:18px 20px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;justify-content:space-between;gap:24px;background:linear-gradient(180deg,rgba(16,20,32,.95),rgba(15,15,26,.82))}
+.brand{max-width:360px;display:grid;gap:6px}
+.kicker{font-size:0.68rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--accent)}
+.subtitle{color:var(--muted);font-size:0.86rem;line-height:1.5}
+.header-story{max-width:700px;display:grid;gap:10px}
+.header-story p{font-size:0.84rem;line-height:1.55;color:var(--text)}
+.pill-row{display:flex;gap:8px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 9px;border-radius:999px;background:rgba(17,58,69,.55);border:1px solid rgba(0,188,212,.25);font-size:0.72rem;color:#b9f7ff}
+.main{display:flex;flex:1;min-height:0;overflow:hidden}
+.canvas-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:20px;position:relative;min-height:0}
+canvas{border:1px solid var(--border);border-radius:10px;cursor:crosshair;box-shadow:0 24px 60px rgba(0,0,0,.32)}
+.story-overlay,.map-legend,.canvas-hint{position:absolute;z-index:2;border:1px solid rgba(255,255,255,.08);border-radius:12px;background:rgba(11,15,25,.84);backdrop-filter:blur(10px)}
+.story-overlay{top:24px;left:24px;max-width:320px;padding:14px 14px 12px}
+.story-overlay .story-title{font-size:0.92rem;color:var(--text);margin:4px 0 8px;line-height:1.4}
+.story-overlay .story-body{font-size:0.75rem;line-height:1.55;color:var(--muted)}
+.story-overlay .story-next{margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(17,58,69,.45);color:#b9f7ff;font-size:0.72rem;line-height:1.45}
+.map-legend{top:24px;right:24px;width:226px;padding:12px}
+.legend-title{font-size:0.78rem;color:var(--text);margin-bottom:10px}
+.legend-list{display:grid;gap:8px}
+.legend-item{display:flex;align-items:center;gap:8px;font-size:0.72rem;color:var(--text)}
+.swatch{width:14px;height:14px;display:inline-block;border-radius:4px;border:1px solid rgba(255,255,255,.15);flex:0 0 14px}
+.swatch.robot{border-radius:50%;background:var(--red);border-color:rgba(255,136,136,.65)}
+.swatch.selection{background:rgba(0,188,212,.16);border:1px dashed rgba(255,255,255,.65)}
+.swatch.match{border-radius:50%;background:rgba(0,188,212,.85)}
+.swatch.anchor{border-radius:50%;background:var(--yellow)}
+.swatch.prediction{background:rgba(156,39,176,.55);border-color:rgba(206,147,216,.7)}
+.swatch.surprise{background:rgba(255,87,87,.18);border-color:var(--red)}
+.swatch.route{background:rgba(90,209,123,.16);border-color:rgba(90,209,123,.8)}
+.canvas-hint{left:24px;bottom:24px;max-width:340px;padding:10px 12px;font-size:0.72rem;line-height:1.5;color:var(--text)}
+.canvas-hint strong{color:var(--accent)}
+.sidebar{width:390px;min-width:390px;border-left:1px solid var(--border);overflow-y:auto;display:flex;flex-direction:column;background:rgba(12,15,24,.92)}
+.section-label{font-size:0.66rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--accent)}
+.guide-panel{padding:14px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(18,27,46,.92),rgba(12,15,24,.92))}
+.guide-panel p{font-size:0.74rem;line-height:1.55;color:var(--muted)}
+.status-row{display:flex;align-items:center;gap:8px;margin:10px 0}
+.status-pill{display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;font-size:0.68rem;text-transform:uppercase;letter-spacing:0.08em;border:1px solid transparent}
+.status-pill.idle,.status-pill.paused{background:rgba(85,85,85,.16);border-color:rgba(136,136,136,.35);color:#d0d0d0}
+.status-pill.warming_up{background:rgba(255,200,87,.12);border-color:rgba(255,200,87,.35);color:var(--yellow)}
+.status-pill.ready{background:rgba(90,209,123,.12);border-color:rgba(90,209,123,.35);color:var(--green)}
+.status-pill.anomaly_demo{background:rgba(255,87,87,.12);border-color:rgba(255,87,87,.35);color:#ff9e9e}
+.quick-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}
+.metric-card{padding:10px;border-radius:10px;background:rgba(17,22,36,.86);border:1px solid rgba(255,255,255,.06)}
+.metric-card span{display:block;font-size:0.64rem;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.08em}
+.metric-card strong{font-size:0.86rem;color:var(--text)}
+.guide-steps{display:grid;gap:8px;margin-top:12px}
+.guide-steps button{width:100%;text-align:left;padding:10px 12px;background:var(--panel-alt);border-color:#25304b}
+.guide-note{margin-top:10px;padding:9px 10px;border-radius:8px;background:rgba(255,255,255,.03);font-size:0.72rem;line-height:1.5;color:var(--muted)}
+.value-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:12px 14px;border-bottom:1px solid var(--border)}
+.value-card{padding:10px;border-radius:10px;background:rgba(17,22,36,.84);border:1px solid rgba(255,255,255,.06)}
+.value-card strong{display:block;font-size:0.75rem;color:var(--text);margin-bottom:4px}
+.value-card span{display:block;font-size:0.68rem;line-height:1.5;color:var(--muted)}
+.manual-head{padding:10px 14px 0}
 .tabs{display:flex;border-bottom:1px solid var(--border)}
 .tabs button{flex:1;border:none;border-bottom:2px solid transparent;border-radius:0;padding:10px 4px;font-size:0.75rem}
 .tabs button.active{border-bottom-color:var(--accent);background:transparent;color:var(--accent)}
 .tab-content{padding:12px;flex:1;overflow-y:auto}
 .tab-panel{display:none}
-.tab-panel.active{display:block;animation:fadeIn .2s ease}
-@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-.controls{padding:8px 20px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.tab-panel.active{display:block}
+.lead{font-size:0.74rem;line-height:1.55;color:var(--muted);margin:4px 0 10px}
+.helper-banner{padding:8px 10px;border-radius:8px;background:rgba(17,58,69,.4);border:1px solid rgba(0,188,212,.18);font-size:0.72rem;line-height:1.5;color:#b9f7ff;margin-bottom:10px}
+.controls{padding:10px 20px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:rgba(10,12,19,.96)}
 .controls .stats{margin-left:auto;color:var(--muted);font-size:0.75rem}
 .timeline{padding:8px 20px;border-top:1px solid var(--border)}
 .timeline label{font-size:0.7rem;color:var(--muted)}
@@ -39,6 +86,10 @@ canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
 .result-item .time{color:var(--muted)}
 .explainer{background:#1e1e30;border:1px solid var(--border);border-radius:4px;padding:10px;margin-top:12px;font-size:0.75rem;line-height:1.5;color:var(--muted)}
 .explainer strong{color:var(--text)}
+.result-summary{padding:10px 12px;border-radius:10px;background:rgba(17,22,36,.86);border:1px solid rgba(255,255,255,.06);margin:8px 0 10px;font-size:0.74rem;line-height:1.55;color:var(--text)}
+.advanced{margin:8px 0 10px}
+.advanced summary{cursor:pointer;color:var(--accent);font-size:0.74rem}
+.advanced .advanced-inner{margin-top:8px;padding:10px;border-radius:8px;background:rgba(255,255,255,.03)}
 .stat-row{display:flex;justify-content:space-between;font-size:0.75rem;padding:2px 0;color:var(--muted)}
 .stat-row .val{color:var(--accent)}
 .novelty-gauge{text-align:center;margin:12px 0}
@@ -57,113 +108,175 @@ canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
 .input-group{margin:8px 0}
 .input-group label{display:block;font-size:0.7rem;color:var(--muted);margin-bottom:2px}
 .msg{padding:8px;background:#1e1e30;border-radius:4px;color:var(--muted);font-size:0.75rem;margin:8px 0}
-.hero{padding:10px 20px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,#12121f,var(--bg))}
-.hero p{font-size:0.78rem;color:var(--muted);line-height:1.6;max-width:800px}
-.canvas-legend{position:absolute;top:12px;right:12px;background:rgba(15,15,26,0.88);border:1px solid var(--border);border-radius:4px;padding:8px 10px;font-size:0.65rem;pointer-events:none;z-index:5}
-.canvas-legend .legend-item{display:flex;align-items:center;gap:6px;margin:2px 0;color:var(--muted)}
-.canvas-legend .legend-dot{width:10px;height:10px;display:inline-block;border-radius:2px}
-.activity-log{width:100%;max-width:600px;max-height:100px;overflow-y:auto;background:rgba(15,15,26,0.9);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:0.7rem;margin-top:4px}
-.activity-log::-webkit-scrollbar{width:4px}
-.activity-log::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-.activity-log .log-entry{padding:2px 0;border-bottom:1px solid rgba(42,42,62,0.5);color:var(--muted)}
-.activity-log .log-entry:last-child{border-bottom:none}
-.activity-log .log-accent{color:var(--accent)}
-.tour-overlay{position:fixed;bottom:24px;right:24px;z-index:1000;max-width:320px;background:var(--panel);border:1px solid var(--accent);border-radius:8px;padding:14px 16px;box-shadow:0 0 20px rgba(0,188,212,0.15)}
-.tour-overlay.hidden{display:none}
-.tour-step{font-size:0.78rem;line-height:1.8;color:var(--muted);transition:opacity .3s}
-.tour-step .step-num{display:inline-block;width:20px;height:20px;border-radius:50%;background:var(--border);color:var(--text);text-align:center;font-weight:bold;font-size:0.65rem;line-height:20px;margin-right:6px}
-.tour-step.done .step-num{background:var(--green)}
-.tour-step.current{color:var(--text)}
-.tour-step.current .step-num{background:var(--accent);color:#000}
-.tour-dismiss{cursor:pointer;color:var(--muted);font-size:0.85rem}
-.tour-dismiss:hover{color:var(--text)}
+details summary{list-style:none}
+details summary::-webkit-details-marker{display:none}
+@media (max-width:1100px){
+body{overflow:auto}
+.header{flex-direction:column}
+.main{flex-direction:column}
+.sidebar{width:100%;min-width:0;max-height:none;border-left:none;border-top:1px solid var(--border)}
+.value-grid{grid-template-columns:1fr}
+.story-overlay,.map-legend,.canvas-hint{position:static;max-width:none;width:min(100%,600px);margin-bottom:12px}
+.canvas-wrap{flex-direction:column;padding:16px}
+canvas{width:min(92vw,600px);height:min(92vw,600px)}
+}
 </style>
 </head>
 <body>
 
 <div class="header">
-  <div>
+  <div class="brand">
+    <div class="kicker">Interactive Story Demo</div>
     <h1>LOCI</h1>
-    <div class="subtitle">Spatiotemporal Memory for Autonomous Systems &mdash; Live Demo</div>
+    <div class="subtitle">Memory that remembers what the robot saw, where it saw it, and when it happened.</div>
   </div>
-</div>
-
-<div class="hero">
-  <p>
-    <strong style="color:var(--red)">The Problem:</strong> AI agents operate in physical space, but vector databases are spatially blind &mdash; they can't efficiently filter by <em>where</em> or <em>when</em>.
-    <strong style="color:var(--accent);margin-left:8px">LOCI's Solution:</strong> 4D spatiotemporal indexing via Hilbert curves + temporal sharding. One query handles space, time, and semantics together.
-  </p>
+  <div class="header-story">
+    <p>Watch a warehouse robot build episodic memory in real time, search past visits, find similar situations, and flag surprises before they become problems.</p>
+    <div class="pill-row">
+      <span class="pill">Search by place + time</span>
+      <span class="pill">Find similar moments nearby</span>
+      <span class="pill">Explain unexpected situations</span>
+    </div>
+  </div>
 </div>
 
 <div class="main">
   <div class="canvas-wrap">
-    <canvas id="warehouse" width="600" height="600"></canvas>
-    <div class="canvas-legend">
-      <div class="legend-item"><span class="legend-dot" style="background:#ff4444;border-radius:50%"></span> Robot</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#4a6fa5"></span> Shelf</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#4caf50"></span> Charger</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#ffc107"></span> Dock</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#555"></span> Obstacle</div>
-      <div class="legend-item"><span class="legend-dot" style="background:rgba(0,188,212,0.7);border-radius:50%"></span> Query Result</div>
-      <div class="legend-item"><span class="legend-dot" style="background:#ce93d8;border-radius:50%"></span> Prediction</div>
+    <div class="story-overlay">
+      <div class="section-label">What You Are Seeing</div>
+      <div class="story-title" id="story-title">Start the patrol to let LOCI build memory.</div>
+      <div class="story-body" id="story-body">The robot stores each observation as a memory that keeps the visual embedding together with where and when it happened.</div>
+      <div class="story-body" id="story-observation">Current view: waiting for live observations.</div>
+      <div class="story-next" id="story-next">Next best step: click Build Memory, then let the robot complete part of one aisle.</div>
     </div>
-    <div class="activity-log" id="activity-log"></div>
+    <div class="map-legend">
+      <div class="legend-title">Map Legend</div>
+      <div class="legend-list">
+        <div class="legend-item"><span class="swatch robot"></span><span>Robot</span></div>
+        <div class="legend-item"><span class="swatch selection"></span><span>Selected area</span></div>
+        <div class="legend-item"><span class="swatch match"></span><span>Matching memories</span></div>
+        <div class="legend-item"><span class="swatch anchor"></span><span>Similarity anchor</span></div>
+        <div class="legend-item"><span class="swatch prediction"></span><span>Predicted route</span></div>
+        <div class="legend-item"><span class="swatch surprise"></span><span>Surprise obstacle</span></div>
+        <div class="legend-item"><span class="swatch route"></span><span>Upcoming patrol path</span></div>
+      </div>
+    </div>
+    <div class="canvas-hint" id="canvas-hint"><strong>Start here:</strong> build memory first. Once LOCI has enough memories, the guide buttons will tee up the best interactions automatically.</div>
+    <canvas id="warehouse" width="600" height="600"></canvas>
   </div>
   <div class="sidebar">
+    <div class="guide-panel">
+      <div class="section-label">Guided Demo</div>
+      <h2>Record a clean walkthrough in five clicks</h2>
+      <p>Use the guide to stage the strongest moments automatically, then use the manual explorer below if you want to dig deeper.</p>
+      <div class="status-row">
+        <span class="status-pill idle" id="guide-phase-pill">Idle</span>
+        <span class="subtitle" id="guide-phase-copy">Waiting for the robot to start building memory.</span>
+      </div>
+      <div class="quick-metrics">
+        <div class="metric-card">
+          <span>Stored memories</span>
+          <strong id="guide-memory-count">0</strong>
+        </div>
+        <div class="metric-card">
+          <span>Prediction</span>
+          <strong id="guide-predict-state">warming up</strong>
+        </div>
+        <div class="metric-card">
+          <span>Next waypoint</span>
+          <strong id="guide-next-waypoint">(2, 18)</strong>
+        </div>
+        <div class="metric-card">
+          <span>Route progress</span>
+          <strong id="guide-route-progress">0%</strong>
+        </div>
+      </div>
+      <div class="guide-steps">
+        <button id="guide-build">1. Build memory</button>
+        <button id="guide-spatial">2. Show what happened here</button>
+        <button id="guide-similar">3. Find a similar moment</button>
+        <button id="guide-anomaly">4. Add a surprise obstacle</button>
+        <button id="guide-predict">5. Detect surprises</button>
+      </div>
+      <div class="guide-note" id="guide-note">Start the patrol and let LOCI watch one aisle fill up before moving into search and surprise detection.</div>
+    </div>
+    <div class="value-grid">
+      <div class="value-card">
+        <strong>Where + when + what</strong>
+        <span>Each memory keeps the observation together with its location and time window.</span>
+      </div>
+      <div class="value-card">
+        <strong>Skip irrelevant history</strong>
+        <span>LOCI narrows the search before ranking, instead of scanning every stored vector.</span>
+      </div>
+      <div class="value-card">
+        <strong>Explain surprises</strong>
+        <span>Prediction plus retrieval shows when the robot is entering something unfamiliar.</span>
+      </div>
+    </div>
+    <div class="manual-head">
+      <div class="section-label">Manual Explorer</div>
+    </div>
     <div class="tabs">
-      <button class="active" data-tab="spatial">Where &amp; When</button>
-      <button data-tab="similar">What's Similar?</button>
-      <button data-tab="predict">Predict &amp; Surprise</button>
+      <button class="active" data-tab="spatial">1. Search a Place</button>
+      <button data-tab="similar">2. Find Similar</button>
+      <button data-tab="predict">3. Detect Surprises</button>
     </div>
     <div class="tab-content">
 
       <!-- Tab 1: Spatial+Temporal -->
       <div id="tab-spatial" class="tab-panel active">
-        <h3>Spatial + Temporal Query</h3>
-        <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 8px">Draw a bounding box on the warehouse, then search.</p>
+        <h3>What happened in this area?</h3>
+        <p class="lead">Drag a box over the map to ask LOCI for memories from a place and time window.</p>
+        <div class="helper-banner">Narrator cue: use this after the robot has finished one stretch of the aisle, so the result feels like browsing a real memory.</div>
         <div class="input-group">
-          <label>Time range (seconds from start)</label>
+          <label>Time window (seconds from patrol start)</label>
           <div style="display:flex;gap:8px;align-items:center">
             <input type="number" id="time-start" value="0" min="0" style="width:60px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:4px;font-family:inherit;font-size:0.75rem">
             <span style="color:var(--muted)">to</span>
             <input type="number" id="time-end" value="999" min="0" style="width:60px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:4px;font-family:inherit;font-size:0.75rem">
           </div>
         </div>
-        <button id="btn-spatial-search" style="width:100%;margin:8px 0">Search Region</button>
+        <button id="btn-spatial-search" style="width:100%;margin:8px 0">Search this area</button>
         <div id="spatial-results"></div>
-        <div class="explainer">
-          <strong>How it works:</strong> Traditional vector databases scan every embedding with 3 independent float-range filters (x, y, z). LOCI uses <strong>Hilbert curve bucketing</strong> to pre-filter spatially with a single integer-set lookup, and <strong>epoch sharding</strong> to skip irrelevant time windows entirely.
-        </div>
+        <details class="explainer">
+          <summary><strong>Why this is fast</strong></summary>
+          Traditional vector databases scan every embedding with independent range filters. LOCI narrows space with <strong>Hilbert curve bucketing</strong> and skips irrelevant time windows with <strong>epoch sharding</strong> before ranking memories.
+        </details>
       </div>
 
       <!-- Tab 2: Similar -->
       <div id="tab-similar" class="tab-panel">
-        <h3>Vector Similarity + Spatial Filter</h3>
-        <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 8px">Click any point on the warehouse to find similar memories.</p>
+        <h3>What looked like this before?</h3>
+        <p class="lead">Click a point on the map to find past moments that look similar nearby.</p>
+        <div class="helper-banner">Narrator cue: this is the easiest way to explain that LOCI remembers both appearance and physical context.</div>
         <div class="input-group">
           <label>Search radius (cells): <span id="radius-val">5</span></label>
           <input type="range" id="sim-radius" min="1" max="10" value="5">
         </div>
-        <button id="btn-similar-search" style="width:100%;margin:8px 0">Find Similar (click map first)</button>
+        <button id="btn-similar-search" style="width:100%;margin:8px 0">Find similar moments</button>
         <div id="similar-results"></div>
-        <div class="explainer">
-          <strong>How it works:</strong> This combines <strong>vector similarity</strong> (what the robot saw) with <strong>spatial proximity</strong> (where it was). A normal vector DB can do similarity search, but can't efficiently bound it to a physical region and time window.
-        </div>
+        <details class="explainer">
+          <summary><strong>Why this matters</strong></summary>
+          LOCI combines <strong>vector similarity</strong> with <strong>spatial proximity</strong>. A normal vector DB can rank similar embeddings, but it does not naturally explain <em>what was similar here</em> inside a physical region and time window.
+        </details>
       </div>
 
       <!-- Tab 3: Predict -->
       <div id="tab-predict" class="tab-panel">
-        <h3>Predict-then-Retrieve with Novelty</h3>
-        <p style="font-size:0.72rem;color:var(--muted);margin:4px 0 8px">What does the robot expect to see ahead?</p>
+        <h3>Is something unexpected ahead?</h3>
+        <p class="lead">Ask LOCI what the robot expects a few steps ahead, then compare that prediction with memory.</p>
+        <div class="helper-banner">Narrator cue: add a surprise obstacle first, let the robot get close, then run this step to show the surprise score rise.</div>
         <div class="input-group">
           <label>Steps ahead: <span id="steps-val">10</span></label>
           <input type="range" id="predict-steps" min="1" max="30" value="10">
         </div>
-        <button id="btn-predict" style="width:100%;margin:8px 0">Predict Future</button>
+        <button id="btn-predict" style="width:100%;margin:8px 0">Detect surprises</button>
         <div id="predict-results"></div>
-        <div class="explainer">
-          <strong>How it works:</strong> In one atomic call, LOCI runs a world model prediction, searches for matching memories, and scores how <strong>novel</strong> the situation is. This is how autonomous systems detect anomalies &mdash; "I expected to see shelves here, but something is different."
-        </div>
+        <details class="explainer">
+          <summary><strong>Why this matters</strong></summary>
+          LOCI can run a prediction, search relevant memory, and score how surprising the situation is in one flow. High surprise means the robot is seeing something it did not expect from past experience.
+        </details>
       </div>
 
     </div>
@@ -174,17 +287,17 @@ canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
   <button id="btn-start" class="active">&#9654; Start</button>
   <button id="btn-stop">&#9646;&#9646; Pause</button>
   <button id="btn-reset">&#8634; Reset</button>
-  <button id="btn-anomaly" class="danger">&#128680; Place Anomaly</button>
-  <button id="btn-heatmap">Heatmap</button>
+  <button id="btn-anomaly" class="danger">&#128680; Add Surprise</button>
+  <button id="btn-heatmap">Memory Density</button>
   <div class="stats">
-    <span id="stat-memories">0</span> memories &middot;
-    <span id="stat-tick">0</span> ticks &middot;
-    <span id="stat-elapsed">0.0</span>s
+    <span id="stat-memories">0</span> stored memories &middot;
+    <span id="stat-route">0%</span> route complete &middot;
+    <span id="stat-elapsed">0.0</span>s live
   </div>
 </div>
 
 <div class="timeline">
-  <label>Timeline: <span id="timeline-label">0.0s</span></label>
+  <label>Patrol progress: <span id="timeline-label">0.0s</span></label>
   <input type="range" id="timeline" min="0" max="1000" value="0" disabled>
 </div>
 
@@ -251,17 +364,6 @@ canvas{border:1px solid var(--border);border-radius:4px;cursor:crosshair}
   </details>
 </div>
 
-<div class="tour-overlay" id="tour">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-    <strong style="color:var(--accent);font-size:0.8rem">Quick Start</strong>
-    <span class="tour-dismiss" id="tour-dismiss">&times;</span>
-  </div>
-  <div class="tour-step current" id="tour-step-0"><span class="step-num">1</span> Press <strong>Start</strong> to begin the robot's patrol</div>
-  <div class="tour-step" id="tour-step-1" style="opacity:0.4"><span class="step-num">2</span> Watch the robot build memories as it moves</div>
-  <div class="tour-step" id="tour-step-2" style="opacity:0.4"><span class="step-num">3</span> Try the <strong>query tabs</strong> to explore search modes</div>
-  <div class="tour-step" id="tour-step-3" style="opacity:0.4"><span class="step-num">4</span> Place an <strong>anomaly</strong> and see novelty detection</div>
-</div>
-
 <script>
 const C = document.getElementById('warehouse');
 const ctx = C.getContext('2d');
@@ -279,57 +381,192 @@ let bbox = null, dragging = false, dragStart = null;
 let clickedCell = null;
 let currentTab = 'spatial';
 let ws = null;
-let memoryCount = 0, elapsedMs = 0;
-let robotVelocity = [0, 0];
-let visibleObjects = [];
-let lastMemoryCount = 0, lastShardId = -1;
-
-// --- Activity Log ---
-const MAX_LOG = 8;
-function addLog(icon, text) {
-  const log = document.getElementById('activity-log');
-  const el = document.createElement('div');
-  el.className = 'log-entry';
-  el.innerHTML = `${icon} ${text}`;
-  log.appendChild(el);
-  while (log.children.length > MAX_LOG) log.removeChild(log.firstChild);
-  log.scrollTop = log.scrollHeight;
-}
-
-// --- Guided Tour ---
-let tourStep = 0;
-function advanceTour(to) {
-  if (to <= tourStep) return;
-  const steps = document.querySelectorAll('.tour-step');
-  for (let i = 0; i < to; i++) {
-    steps[i].className = 'tour-step done';
-    steps[i].style.opacity = '0.5';
-    steps[i].querySelector('.step-num').textContent = '\u2713';
-  }
-  if (to < steps.length) {
-    steps[to].className = 'tour-step current';
-    steps[to].style.opacity = '1';
-  }
-  tourStep = to;
-  if (tourStep >= steps.length) {
-    setTimeout(() => document.getElementById('tour').classList.add('hidden'), 2000);
-  }
-}
-document.getElementById('tour-dismiss').addEventListener('click', () => {
-  document.getElementById('tour').classList.add('hidden');
-});
+let memoryCount = 0, elapsedMs = 0, startTimeMs = 0;
+let routeInfo = null, routePreview = [];
+let demoGuide = null, visibleObjects = [];
+let currentVelocity = [0, 0];
+let guideStep = 'build';
+let suggestedAnomaly = null;
 
 // Colors
 const OBJ_COLORS = {
   shelf: '#4a6fa5', charger: '#4caf50', dock: '#ffc107',
   obstacle: '#555', anomaly: '#ff4444'
 };
+const TAB_HINTS = {
+  spatial: 'Drag a box over an aisle to ask: what happened here, and when?',
+  similar: 'Click a point on the map to find nearby moments that looked similar.',
+  predict: 'After adding a surprise obstacle, let the robot get close and run surprise detection.'
+};
+
+function clampCell(value) {
+  return Math.max(0, Math.min(19, value));
+}
+
+function formatCell(cell) {
+  return cell ? `(${cell.x}, ${cell.y})` : 'n/a';
+}
+
+function summarizeVisibleObjects(items) {
+  if (!items || !items.length) {
+    return 'Current view: open floor.';
+  }
+  const order = ['shelf', 'dock', 'charger', 'obstacle', 'anomaly'];
+  const labels = {
+    shelf: ['shelf', 'shelves'],
+    dock: ['dock', 'docks'],
+    charger: ['charger', 'chargers'],
+    obstacle: ['obstacle', 'obstacles'],
+    anomaly: ['anomaly', 'anomalies']
+  };
+  const counts = {};
+  for (const item of items) counts[item.type] = (counts[item.type] || 0) + 1;
+  const parts = [];
+  for (const key of order) {
+    if (!counts[key]) continue;
+    const [singular, plural] = labels[key];
+    parts.push(`${counts[key]} ${counts[key] === 1 ? singular : plural}`);
+  }
+  return `Current view: ${parts.join(', ')} nearby.`;
+}
+
+function setGuideNote(message) {
+  document.getElementById('guide-note').textContent = message;
+}
+
+function setCanvasHint(message) {
+  document.getElementById('canvas-hint').innerHTML = `<strong>Try this:</strong> ${message}`;
+}
+
+function setTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tabs button').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === tab);
+  });
+  document.querySelectorAll('.tab-panel').forEach(panel => {
+    panel.classList.toggle('active', panel.id === `tab-${tab}`);
+  });
+  updateNarrativePanels();
+  draw();
+}
+
+function computeSuggestedBBox() {
+  const points = routePreview.length > 1 ? routePreview.slice(0, 6) : [robot];
+  const xs = points.map(point => point.x);
+  const ys = points.map(point => point.y);
+  return {
+    x1: clampCell(Math.min(...xs) - 1),
+    x2: clampCell(Math.max(...xs) + 1),
+    y1: clampCell(Math.min(...ys) - 2),
+    y2: clampCell(Math.max(...ys) + 2)
+  };
+}
+
+function computeSuggestedTimeWindow() {
+  const end = Math.max(6, Math.ceil(elapsedMs / 1000));
+  const span = demoGuide?.predict?.ready ? 14 : 10;
+  return {start: Math.max(0, end - span), end};
+}
+
+function computeSuggestedAnchor() {
+  if (routePreview.length > 2) {
+    return {x: routePreview[2].x, y: routePreview[2].y};
+  }
+  return {x: robot.x, y: robot.y};
+}
+
+function computeSuggestedAnomaly() {
+  if (routePreview.length > 4) {
+    return {x: routePreview[4].x, y: routePreview[4].y};
+  }
+  const [vx, vy] = currentVelocity;
+  return {
+    x: clampCell(robot.x + (vx || 0) * 3),
+    y: clampCell(robot.y + (vy || -1) * 3)
+  };
+}
+
+function updateNarrativePanels() {
+  const phase = demoGuide?.phase || (running ? 'warming_up' : 'idle');
+  const pill = document.getElementById('guide-phase-pill');
+  pill.className = `status-pill ${phase}`;
+  pill.textContent = (phase || 'idle').replace(/_/g, ' ');
+  document.getElementById('guide-phase-copy').textContent = demoGuide?.summary || 'Waiting for the robot to start building memory.';
+  document.getElementById('guide-memory-count').textContent = `${memoryCount}`;
+  document.getElementById('guide-predict-state').textContent = demoGuide?.predict?.ready ? 'ready' : `${demoGuide?.predict?.memories_remaining ?? 0} to go`;
+  document.getElementById('guide-next-waypoint').textContent = formatCell(routeInfo?.next_waypoint || robot);
+  document.getElementById('guide-route-progress').textContent = `${routeInfo?.route_progress_pct ?? 0}%`;
+  document.getElementById('stat-route').textContent = `${routeInfo?.route_progress_pct ?? 0}%`;
+
+  let title = 'Start the patrol to let LOCI build memory.';
+  if (phase === 'warming_up') title = 'The robot is building memory one observation at a time.';
+  if (phase === 'ready') title = currentTab === 'predict' ? 'LOCI can now compare expectations with memory.' : 'LOCI is ready to answer memory questions.';
+  if (phase === 'anomaly_demo') title = 'A surprise is on the route, so anomaly detection has a clear story.';
+  if (phase === 'paused' && memoryCount > 0) title = 'The patrol is paused, but the stored memory is still searchable.';
+
+  document.getElementById('story-title').textContent = title;
+  document.getElementById('story-body').textContent = demoGuide?.summary || 'The robot stores each observation as a memory that keeps the visual embedding together with where and when it happened.';
+  document.getElementById('story-observation').textContent = demoGuide?.current_view?.summary ? `Current view: ${demoGuide.current_view.summary}.` : summarizeVisibleObjects(visibleObjects);
+
+  let nextStep = 'Next best step: click Build Memory, then let the robot complete part of one aisle.';
+  if (demoGuide?.next_action === 'warmup') nextStep = `Next best step: keep the patrol running until prediction is ready. ${demoGuide.predict.message}`;
+  if (demoGuide?.next_action === 'show_search') nextStep = 'Next best step: show a place search or a similar moment to explain how LOCI uses memory.';
+  if (demoGuide?.next_action === 'predict') nextStep = demoGuide.anomaly_count ? 'Next best step: run surprise detection while the robot approaches the new obstacle.' : 'Next best step: add a surprise obstacle, then run surprise detection.';
+  document.getElementById('story-next').textContent = nextStep;
+
+  const hint = TAB_HINTS[currentTab];
+  if (guideStep === 'anomaly' && suggestedAnomaly) {
+    setCanvasHint(`The guide will place the surprise at ${formatCell(suggestedAnomaly)} on the upcoming route, then you can switch to surprise detection.`);
+  } else {
+    setCanvasHint(hint);
+  }
+}
+
+async function refreshDemoStatus() {
+  const resp = await fetch('/api/demo/status');
+  demoGuide = await resp.json();
+  running = demoGuide.running;
+  memoryCount = demoGuide.memory_count;
+  elapsedMs = demoGuide.elapsed_ms;
+  routeInfo = demoGuide.route || routeInfo;
+  routePreview = demoGuide.route_preview || routePreview;
+  suggestedAnomaly = computeSuggestedAnomaly();
+  document.getElementById('stat-memories').textContent = memoryCount;
+  document.getElementById('stat-elapsed').textContent = (elapsedMs/1000).toFixed(1);
+  document.getElementById('timeline-label').textContent = (elapsedMs/1000).toFixed(1)+'s';
+  document.getElementById('timeline').max = Math.max(elapsedMs, 1000);
+  document.getElementById('timeline').value = elapsedMs;
+  updateNarrativePanels();
+}
 
 // --- Init ---
 async function init() {
-  const resp = await fetch('/api/warehouse');
-  const data = await resp.json();
+  const [warehouseResp, stateResp, demoResp] = await Promise.all([
+    fetch('/api/warehouse'),
+    fetch('/api/simulation/state'),
+    fetch('/api/demo/status')
+  ]);
+  const data = await warehouseResp.json();
+  const state = await stateResp.json();
   warehouse = data.objects;
+  running = state.running;
+  memoryCount = state.memory_count;
+  elapsedMs = state.elapsed_ms;
+  startTimeMs = state.start_time_ms || 0;
+  anomalies = state.anomalies || [];
+  robot = state.robot || robot;
+  robotDisplay = {...robot};
+  routeInfo = state.route || null;
+  demoGuide = await demoResp.json();
+  routePreview = demoGuide.route_preview || [];
+  suggestedAnomaly = computeSuggestedAnomaly();
+  document.getElementById('stat-memories').textContent = memoryCount;
+  document.getElementById('stat-elapsed').textContent = (elapsedMs/1000).toFixed(1);
+  document.getElementById('timeline-label').textContent = (elapsedMs/1000).toFixed(1)+'s';
+  document.getElementById('timeline').max = Math.max(elapsedMs, 1000);
+  document.getElementById('timeline').value = elapsedMs;
+  document.getElementById('time-end').value = Math.max(12, Math.ceil(elapsedMs/1000));
+  updateNarrativePanels();
   draw();
   connectWS();
 }
@@ -344,30 +581,20 @@ function connectWS() {
       running = true;
       memoryCount = d.memory_count;
       elapsedMs = d.elapsed_ms;
-      robotVelocity = d.robot.velocity || [0, 0];
-      visibleObjects = d.visible_objects || [];
+      currentVelocity = d.robot.velocity || currentVelocity;
+      visibleObjects = d.visible_objects || visibleObjects;
+      routeInfo = d.route || routeInfo;
+      demoGuide = d.demo || demoGuide;
+      routePreview = demoGuide?.route_preview || routePreview;
+      startTimeMs = Math.max(startTimeMs, d.timestamp_ms - d.elapsed_ms);
       document.getElementById('stat-memories').textContent = d.memory_count;
-      document.getElementById('stat-tick').textContent = d.tick;
       document.getElementById('stat-elapsed').textContent = (d.elapsed_ms/1000).toFixed(1);
       document.getElementById('timeline-label').textContent = (d.elapsed_ms/1000).toFixed(1)+'s';
       document.getElementById('timeline').max = d.elapsed_ms;
       document.getElementById('timeline').value = d.elapsed_ms;
-      document.getElementById('time-end').value = Math.ceil(d.elapsed_ms/1000);
-      // Activity log: new memory
-      if (d.memory_count > lastMemoryCount) {
-        const types = [...new Set(visibleObjects.filter(o=>o.type!=='obstacle').map(o=>o.type))];
-        const objText = types.length > 0 ? ` &mdash; ${types.join(', ')} visible` : '';
-        addLog('&#128200;', `Memory <span class="log-accent">#${d.memory_count}</span> at <span class="log-accent">(${d.robot.x}, ${d.robot.y})</span>${objText}`);
-        lastMemoryCount = d.memory_count;
-      }
-      // Activity log: new epoch shard
-      const shard = Math.floor(d.elapsed_ms / 5000);
-      if (shard > lastShardId) {
-        if (lastShardId >= 0) addLog('&#128451;', `Epoch shard <span class="log-accent">loci_${shard}</span> created`);
-        lastShardId = shard;
-      }
-      // Tour: auto-advance
-      if (memoryCount >= 3) advanceTour(2);
+      document.getElementById('time-end').value = Math.max(parseFloat(document.getElementById('time-end').value) || 0, Math.ceil(d.elapsed_ms/1000));
+      suggestedAnomaly = computeSuggestedAnomaly();
+      updateNarrativePanels();
     }
   };
   ws.onclose = () => {
@@ -443,17 +670,18 @@ function draw() {
     }
   }
 
-  // Visible object glow
-  if (running && visibleObjects.length > 0) {
-    for (const vo of visibleObjects) {
-      const vc = OBJ_COLORS[vo.type] || '#555';
-      ctx.shadowColor = vc;
-      ctx.shadowBlur = 8;
-      ctx.strokeStyle = vc;
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(vo.x*CELL+1, vo.y*CELL+1, CELL-2, CELL-2);
+  // Upcoming route preview for narration
+  if (routePreview && routePreview.length > 1) {
+    ctx.strokeStyle = 'rgba(90,209,123,0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(routePreview[0].x*CELL+CELL/2, routePreview[0].y*CELL+CELL/2);
+    for (let i = 1; i < routePreview.length; i++) {
+      ctx.lineTo(routePreview[i].x*CELL+CELL/2, routePreview[i].y*CELL+CELL/2);
     }
-    ctx.shadowBlur = 0;
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   // Query results (cyan dots)
@@ -477,6 +705,20 @@ function draw() {
       ctx.fillStyle = 'rgba(0,188,212,0.7)';
       ctx.beginPath(); ctx.arc(rx, ry, 4, 0, Math.PI*2); ctx.fill();
     }
+  }
+
+  // Suggested anomaly target for guided mode
+  if (guideStep === 'anomaly' && suggestedAnomaly) {
+    const sx = suggestedAnomaly.x*CELL+CELL/2, sy = suggestedAnomaly.y*CELL+CELL/2;
+    const pulse = 0.75 + 0.25 * Math.sin(Date.now() / 250);
+    ctx.strokeStyle = `rgba(255,87,87,${0.7 * pulse})`;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 3]);
+    ctx.beginPath(); ctx.arc(sx, sy, 10 + pulse * 4, 0, Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ff9e9e';
+    ctx.font = '9px monospace';
+    ctx.fillText('surprise', sx + 10, sy - 6);
   }
 
   // Clicked cell highlight
@@ -552,22 +794,6 @@ function draw() {
   ctx.beginPath(); ctx.arc(rx, ry, CELL*0.25, 0, Math.PI*2); ctx.fill();
   ctx.shadowBlur = 0;
 
-  // Directional arrow
-  if (robotVelocity[0] !== 0 || robotVelocity[1] !== 0) {
-    const angle = Math.atan2(robotVelocity[1], robotVelocity[0]);
-    const arrowLen = CELL * 0.55;
-    const ax = rx + Math.cos(angle) * arrowLen;
-    const ay = ry + Math.sin(angle) * arrowLen;
-    ctx.strokeStyle = '#ffcccc';
-    ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(rx, ry); ctx.lineTo(ax, ay); ctx.stroke();
-    const hl = 5;
-    ctx.beginPath();
-    ctx.moveTo(ax, ay); ctx.lineTo(ax - hl*Math.cos(angle-0.4), ay - hl*Math.sin(angle-0.4));
-    ctx.moveTo(ax, ay); ctx.lineTo(ax - hl*Math.cos(angle+0.4), ay - hl*Math.sin(angle+0.4));
-    ctx.stroke();
-  }
-
   // Loading overlay when no memories yet
   if (!running || memoryCount === 0) {
     ctx.fillStyle = 'rgba(15,15,26,0.6)';
@@ -575,10 +801,10 @@ function draw() {
     ctx.fillStyle = '#00bcd4';
     ctx.font = '16px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(running ? 'Building memories...' : 'Press Start to begin', C.width/2, C.height/2);
+    ctx.fillText(running ? 'Building memory...' : 'Start the patrol', C.width/2, C.height/2);
     ctx.font = '11px monospace';
     ctx.fillStyle = '#888';
-    ctx.fillText(running ? `${memoryCount} memories stored` : 'Robot will patrol the warehouse', C.width/2, C.height/2+20);
+    ctx.fillText(running ? `${memoryCount} memories stored so far` : 'Watch the robot patrol, remember, and explain surprises', C.width/2, C.height/2+20);
     ctx.textAlign = 'left';
   }
 }
@@ -594,7 +820,7 @@ function cellFromEvent(e) {
 C.addEventListener('mousedown', e => {
   const cell = cellFromEvent(e);
   if (anomalyMode) {
-    placeAnomaly(cell.x, cell.y);
+    void placeAnomaly(cell.x, cell.y);
     anomalyMode = false;
     document.getElementById('btn-anomaly').classList.remove('active');
     return;
@@ -603,8 +829,10 @@ C.addEventListener('mousedown', e => {
     dragging = true;
     dragStart = cell;
     bbox = {x1: cell.x, y1: cell.y, x2: cell.x, y2: cell.y};
+    setGuideNote(`Selected a region around ${formatCell(cell)}. Drag to size the box, then search this area.`);
   } else if (currentTab === 'similar') {
     clickedCell = cell;
+    setGuideNote(`Using ${formatCell(cell)} as the anchor for a similarity search.`);
     draw();
   }
 });
@@ -630,16 +858,8 @@ C.addEventListener('mouseup', e => {
 // --- Tabs ---
 document.querySelectorAll('.tabs button').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-    currentTab = btn.dataset.tab;
-    document.getElementById('tab-'+currentTab).classList.add('active');
-    advanceTour(3);
-    // Clear results on tab switch
-    queryResults = []; similarAnchor = null; similarResults = [];
-    predictedPos = null; noveltyScore = null; bbox = null; clickedCell = null;
-    draw();
+    guideStep = btn.dataset.tab;
+    setTab(btn.dataset.tab);
   });
 });
 
@@ -652,34 +872,50 @@ document.getElementById('predict-steps').addEventListener('input', e => {
 });
 
 // --- Controls ---
-document.getElementById('btn-start').addEventListener('click', async () => {
+async function startSimulation() {
   await fetch('/api/simulation/start', {method:'POST'});
-  advanceTour(1);
-});
-document.getElementById('btn-stop').addEventListener('click', async () => {
+  running = true;
+  guideStep = 'build';
+  await refreshDemoStatus();
+}
+
+async function stopSimulation() {
   await fetch('/api/simulation/stop', {method:'POST'});
   running = false;
-});
-document.getElementById('btn-reset').addEventListener('click', async () => {
+  await refreshDemoStatus();
+}
+
+async function resetSimulation() {
   await fetch('/api/simulation/reset', {method:'POST'});
   running = false;
   queryResults = []; similarAnchor = null; similarResults = [];
-  predictedPos = null; noveltyScore = null; bbox = null;
-  heatmapData = null; anomalies = [];
-  lastMemoryCount = 0; lastShardId = -1;
-  document.getElementById('activity-log').innerHTML = '';
+  predictedPos = null; predictedPath = null; noveltyScore = null; bbox = null;
+  heatmapData = null; anomalies = []; visibleObjects = [];
+  routeInfo = null; routePreview = []; demoGuide = null; currentVelocity = [0, 0];
+  guideStep = 'build';
+  suggestedAnomaly = null;
   document.getElementById('stat-memories').textContent = '0';
-  document.getElementById('stat-tick').textContent = '0';
+  document.getElementById('stat-route').textContent = '0%';
   document.getElementById('stat-elapsed').textContent = '0.0';
   // Reload warehouse
   const resp = await fetch('/api/warehouse');
   const data = await resp.json();
   warehouse = data.objects;
+  const demoResp = await fetch('/api/demo/status');
+  demoGuide = await demoResp.json();
+  routePreview = demoGuide.route_preview || [];
+  routeInfo = demoGuide.route || null;
+  updateNarrativePanels();
   draw();
-});
+}
+
+document.getElementById('btn-start').addEventListener('click', () => { void startSimulation(); });
+document.getElementById('btn-stop').addEventListener('click', () => { void stopSimulation(); });
+document.getElementById('btn-reset').addEventListener('click', () => { void resetSimulation(); });
 document.getElementById('btn-anomaly').addEventListener('click', () => {
   anomalyMode = !anomalyMode;
   document.getElementById('btn-anomaly').classList.toggle('active', anomalyMode);
+  setGuideNote(anomalyMode ? 'Click the map to place a surprise obstacle on the patrol route.' : 'Manual surprise placement cancelled.');
 });
 document.getElementById('btn-heatmap').addEventListener('click', async () => {
   showHeatmap = !showHeatmap;
@@ -692,22 +928,33 @@ document.getElementById('btn-heatmap').addEventListener('click', async () => {
 });
 
 // --- Anomaly ---
-async function placeAnomaly(x, y) {
+async function placeAnomaly(x, y, options = {}) {
   const resp = await fetch('/api/anomaly/place', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({x, y})
   });
   const data = await resp.json();
-  anomalies.push({x, y});
-  warehouse.push({x, y, type:'anomaly'});
-  addLog('&#128680;', `Anomaly placed at <span class="log-accent">(${x}, ${y})</span>`);
-  advanceTour(4);
+  if (!anomalies.some(item => item.x === x && item.y === y)) {
+    anomalies.push({x, y});
+  }
+  if (!warehouse.some(item => item.x === x && item.y === y && item.type === 'anomaly')) {
+    warehouse.push({x, y, type:'anomaly'});
+  }
+  demoGuide = data.guide || demoGuide;
+  routeInfo = demoGuide?.route || routeInfo;
+  routePreview = demoGuide?.route_preview || routePreview;
+  suggestedAnomaly = computeSuggestedAnomaly();
+  guideStep = options.guided ? 'predict' : 'anomaly';
+  if (options.switchToPredict) setTab('predict');
+  setGuideNote(`A surprise obstacle was added at (${x}, ${y}). Let the robot get close, then run surprise detection.`);
+  updateNarrativePanels();
   draw();
+  return data;
 }
 
 // --- Spatial query ---
-document.getElementById('btn-spatial-search').addEventListener('click', async () => {
+async function runSpatialSearch() {
   if (!bbox) {
     document.getElementById('spatial-results').innerHTML = '<div class="msg">Draw a bounding box on the warehouse first (click and drag).</div>';
     return;
@@ -733,34 +980,46 @@ document.getElementById('btn-spatial-search').addEventListener('click', async ()
   });
   const data = await resp.json();
   queryResults = data.results || [];
+  demoGuide = data.guide || demoGuide;
+  routeInfo = demoGuide?.route || routeInfo;
+  routePreview = demoGuide?.route_preview || routePreview;
 
   let html = '';
   if (data.message) {
     html = `<div class="msg">${data.message}</div>`;
   } else {
     const s = data.stats;
-    html += `<div style="margin:8px 0">
-      <div class="stat-row"><span>Results found</span><span class="val">${data.results.length}</span></div>
-      <div class="stat-row"><span>Shards searched</span><span class="val">${s.shards_searched}</span></div>
-      <div class="stat-row"><span>Candidates evaluated</span><span class="val">${s.total_candidates}</span></div>
-      <div class="stat-row"><span>Hilbert IDs in filter</span><span class="val">${s.hilbert_ids_in_filter}</span></div>
-      <div class="stat-row"><span>Total memories</span><span class="val">${s.total_points}</span></div>
-      <div class="stat-row"><span>Query time</span><span class="val">${s.elapsed_ms}ms</span></div>
-    </div>`;
+    const skipped = s.total_points > 0 && s.total_candidates < s.total_points
+      ? ((1 - s.total_candidates / s.total_points) * 100).toFixed(0)
+      : null;
+    html += `<div class="result-summary">LOCI found <strong>${data.results.length}</strong> visits in this area between <strong>${tStart}s</strong> and <strong>${tEnd}s</strong>.${skipped ? ` It skipped <strong>${skipped}%</strong> of irrelevant memory before ranking the results.` : ''}</div>`;
+    html += `<details class="advanced">
+      <summary>Show technical details</summary>
+      <div class="advanced-inner">
+        <div class="stat-row"><span>Time shards searched</span><span class="val">${s.shards_searched}</span></div>
+        <div class="stat-row"><span>Candidates evaluated</span><span class="val">${s.total_candidates}</span></div>
+        <div class="stat-row"><span>Hilbert IDs in filter</span><span class="val">${s.hilbert_ids_in_filter}</span></div>
+        <div class="stat-row"><span>Total stored memories</span><span class="val">${s.total_points}</span></div>
+        <div class="stat-row"><span>Query time</span><span class="val">${s.elapsed_ms}ms</span></div>
+      </div>
+    </details>`;
     if (s.total_points > 0 && s.total_candidates < s.total_points) {
-      const pct = ((1 - s.total_candidates / s.total_points) * 100).toFixed(0);
-      html += `<div class="msg" style="border-left:3px solid var(--green);background:#1a2e1a"><strong>${pct}% of memories skipped</strong> via Hilbert bucketing + temporal sharding. A naive scan would check all ${s.total_points} vectors.</div>`;
+      html += `<div class="msg" style="border-left:3px solid var(--green);background:#1a2e1a"><strong>${skipped}% of memories skipped</strong> before ranking. A naive scan would have checked all ${s.total_points} stored vectors.</div>`;
     }
     for (const r of data.results) {
-      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">${r.elapsed_s}s</span></div>`;
+      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">${r.elapsed_s}s into patrol</span></div>`;
     }
+    setGuideNote(skipped ? `Great narratable moment: LOCI skipped ${skipped}% of memory before ranking only the relevant visits.` : 'This result shows that LOCI can answer what happened here without losing the time window.');
   }
   document.getElementById('spatial-results').innerHTML = html;
-  if (data.results) addLog('&#128269;', `Spatial query: <span class="log-accent">${data.results.length} results</span> in ${data.stats?.elapsed_ms||'?'}ms`);
-});
+  updateNarrativePanels();
+  draw();
+}
+
+document.getElementById('btn-spatial-search').addEventListener('click', () => { void runSpatialSearch(); });
 
 // --- Similar query ---
-document.getElementById('btn-similar-search').addEventListener('click', async () => {
+async function runSimilarSearch() {
   if (!clickedCell) {
     document.getElementById('similar-results').innerHTML = '<div class="msg">Click a point on the warehouse first.</div>';
     return;
@@ -776,6 +1035,9 @@ document.getElementById('btn-similar-search').addEventListener('click', async ()
   similarAnchor = data.anchor;
   similarResults = data.results || [];
   queryResults = [];
+  demoGuide = data.guide || demoGuide;
+  routeInfo = demoGuide?.route || routeInfo;
+  routePreview = demoGuide?.route_preview || routePreview;
   draw();
 
   let html = '';
@@ -783,21 +1045,29 @@ document.getElementById('btn-similar-search').addEventListener('click', async ()
     html = `<div class="msg">${data.message}</div>`;
   } else {
     const s = data.stats;
-    html += `<div style="margin:8px 0">
-      <div class="stat-row"><span>Anchor</span><span class="val">(${data.anchor.x}, ${data.anchor.y})</span></div>
-      <div class="stat-row"><span>Similar found</span><span class="val">${data.results.length}</span></div>
-      <div class="stat-row"><span>Query time</span><span class="val">${s.elapsed_ms}ms</span></div>
-    </div>`;
+    html += `<div class="result-summary">LOCI used the visit at <strong>(${data.anchor.x}, ${data.anchor.y})</strong> from <strong>${data.anchor.elapsed_s}s</strong> as the anchor and found <strong>${data.results.length}</strong> nearby moments that looked similar.</div>`;
+    html += `<details class="advanced">
+      <summary>Show technical details</summary>
+      <div class="advanced-inner">
+        <div class="stat-row"><span>Anchor visit</span><span class="val">(${data.anchor.x}, ${data.anchor.y})</span></div>
+        <div class="stat-row"><span>Similar memories</span><span class="val">${data.results.length}</span></div>
+        <div class="stat-row"><span>Candidates evaluated</span><span class="val">${s.total_candidates}</span></div>
+        <div class="stat-row"><span>Query time</span><span class="val">${s.elapsed_ms}ms</span></div>
+      </div>
+    </details>`;
     for (const r of data.results) {
-      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">${r.elapsed_s != null ? r.elapsed_s+'s' : 't='+r.timestamp_ms}</span></div>`;
+      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">${r.elapsed_s != null ? r.elapsed_s+'s into patrol' : 't='+r.timestamp_ms}</span></div>`;
     }
+    setGuideNote('This is the cleanest moment to explain that LOCI remembers appearance together with physical context.');
   }
   document.getElementById('similar-results').innerHTML = html;
-  if (data.results) addLog('&#128269;', `Similar query: <span class="log-accent">${data.results.length} matches</span> in ${data.stats?.elapsed_ms||'?'}ms`);
-});
+  updateNarrativePanels();
+}
+
+document.getElementById('btn-similar-search').addEventListener('click', () => { void runSimilarSearch(); });
 
 // --- Predict query ---
-document.getElementById('btn-predict').addEventListener('click', async () => {
+async function runPredictSearch() {
   const steps = parseInt(document.getElementById('predict-steps').value);
   document.getElementById('predict-results').innerHTML = '<div class="msg">Predicting...</div>';
   const resp = await fetch('/api/query/predict', {
@@ -811,48 +1081,122 @@ document.getElementById('btn-predict').addEventListener('click', async () => {
   predictedPath = data.predicted_path || null;
   noveltyScore = data.novelty;
   queryResults = data.results || [];
+  demoGuide = data.guide || demoGuide;
+  routeInfo = data.route || demoGuide?.route || routeInfo;
+  routePreview = demoGuide?.route_preview || routePreview;
 
   let html = '';
   if (data.message) {
-    html = `<div class="msg">${data.message}</div>`;
+    html = `<div class="result-summary">${data.message}</div>`;
+    if (data.guide?.predict?.message) {
+      html += `<div class="msg">${data.guide.predict.message}</div>`;
+    }
+    setGuideNote(data.guide?.predict?.message || data.message);
   } else {
     const n = data.novelty;
     const color = n > 0.7 ? '#ff4444' : n > 0.3 ? '#ffc107' : '#4caf50';
     const angle = n * 180; // 0-180 degrees for arc
-    let badgeText = 'Familiar territory';
-    if (n > 0.7) badgeText = 'Anomaly detected!';
-    else if (n > 0.3) badgeText = 'Partially new';
+    let badgeText = 'Low surprise';
+    let explanation = 'The robot is seeing what memory says should be there.';
+    if (n > 0.7) {
+      badgeText = 'High surprise';
+      explanation = 'The robot is seeing something that does not match past memory.';
+    } else if (n > 0.3) {
+      badgeText = 'Medium surprise';
+      explanation = 'Some of the scene matches memory, but something looks off.';
+    }
 
     // SVG arc gauge
+    html += `<div class="result-summary"><strong>${badgeText}:</strong> ${explanation}</div>`;
     html += `<div class="novelty-gauge">
       <svg width="200" height="110" viewBox="0 0 200 110" style="display:block;margin:0 auto">
         <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="#2a2a3e" stroke-width="12" stroke-linecap="round"/>
         <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="${color}" stroke-width="12" stroke-linecap="round"
           stroke-dasharray="${angle/180 * 251.2} 251.2"/>
         <text x="100" y="85" text-anchor="middle" fill="${color}" font-size="28" font-family="monospace" font-weight="bold">${n.toFixed(2)}</text>
-        <text x="100" y="105" text-anchor="middle" fill="#888" font-size="10" font-family="monospace">novelty</text>
+        <text x="100" y="105" text-anchor="middle" fill="#888" font-size="10" font-family="monospace">surprise score</text>
       </svg>
       <div style="text-align:center;font-size:0.8rem;color:${color};font-weight:bold;margin-top:4px">${badgeText}</div>
-      <div style="text-align:center;font-size:0.65rem;color:var(--muted);margin-top:2px">0.0 = seen before &middot; 1.0 = completely new</div>
+      <div style="text-align:center;font-size:0.65rem;color:var(--muted);margin-top:2px">Low = expected &middot; Medium = partly new &middot; High = very unexpected</div>
     </div>`;
 
-    html += `<div style="margin:8px 0">
-      <div class="stat-row"><span>Current pos</span><span class="val">(${data.current_position.x}, ${data.current_position.y})</span></div>
-      <div class="stat-row"><span>Predicted pos</span><span class="val">(${data.predicted_position.x}, ${data.predicted_position.y})</span></div>
-      <div class="stat-row"><span>Predictor time</span><span class="val">${data.predictor_ms}ms</span></div>
-      <div class="stat-row"><span>Retrieval time</span><span class="val">${data.retrieval_ms}ms</span></div>
-      <div class="stat-row"><span>Matches found</span><span class="val">${data.results.length}</span></div>
-    </div>`;
+    html += `<details class="advanced">
+      <summary>Show technical details</summary>
+      <div class="advanced-inner">
+        <div class="stat-row"><span>Current position</span><span class="val">(${data.current_position.x}, ${data.current_position.y})</span></div>
+        <div class="stat-row"><span>Predicted position</span><span class="val">(${data.predicted_position.x}, ${data.predicted_position.y})</span></div>
+        <div class="stat-row"><span>Predictor time</span><span class="val">${data.predictor_ms}ms</span></div>
+        <div class="stat-row"><span>Retrieval time</span><span class="val">${data.retrieval_ms}ms</span></div>
+        <div class="stat-row"><span>Memory matches</span><span class="val">${data.results.length}</span></div>
+      </div>
+    </details>`;
 
-    for (const r of data.results) {
-      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">${r.elapsed_s != null ? r.elapsed_s+'s' : 't='+r.timestamp_ms}</span></div>`;
+    if (data.results.length === 0) {
+      html += `<div class="msg">No close historical match was found near the predicted position.</div>`;
     }
+    for (const r of data.results) {
+      html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">${r.elapsed_s != null ? r.elapsed_s+'s into patrol' : 't='+r.timestamp_ms}</span></div>`;
+    }
+    setGuideNote(`${badgeText}: use this to explain whether the robot is moving through familiar territory or entering something unexpected.`);
   }
   document.getElementById('predict-results').innerHTML = html;
-  if (data.novelty != null) {
-    const lvl = data.novelty > 0.7 ? 'HIGH' : data.novelty > 0.3 ? 'MED' : 'LOW';
-    addLog('&#129504;', `Novelty: <span class="log-accent">${data.novelty.toFixed(2)}</span> (${lvl})`);
+  updateNarrativePanels();
+  draw();
+}
+
+document.getElementById('btn-predict').addEventListener('click', () => { void runPredictSearch(); });
+
+// --- Guided demo buttons ---
+document.getElementById('guide-build').addEventListener('click', async () => {
+  guideStep = 'build';
+  await startSimulation();
+  setTab('spatial');
+  setGuideNote(demoGuide?.predict?.ready ? 'LOCI is already warm enough for prediction. You can move straight into the guided story.' : (demoGuide?.predict?.message || 'Let the robot complete a few more observations.'));
+});
+
+document.getElementById('guide-spatial').addEventListener('click', async () => {
+  guideStep = 'spatial';
+  if (!running) await startSimulation();
+  bbox = computeSuggestedBBox();
+  const window = computeSuggestedTimeWindow();
+  document.getElementById('time-start').value = window.start;
+  document.getElementById('time-end').value = window.end;
+  setTab('spatial');
+  setGuideNote('Showing a place-and-time memory slice so you can narrate what happened in one part of the warehouse.');
+  await runSpatialSearch();
+});
+
+document.getElementById('guide-similar').addEventListener('click', async () => {
+  guideStep = 'similar';
+  if (!running) await startSimulation();
+  clickedCell = computeSuggestedAnchor();
+  setTab('similar');
+  setGuideNote(`Using ${formatCell(clickedCell)} as the anchor to show how LOCI finds similar moments nearby.`);
+  await runSimilarSearch();
+});
+
+document.getElementById('guide-anomaly').addEventListener('click', async () => {
+  guideStep = 'anomaly';
+  if (!running) await startSimulation();
+  await refreshDemoStatus();
+  if (!demoGuide?.anomaly?.ready) {
+    setGuideNote(demoGuide?.anomaly?.message || 'Let the robot build a bit more context before adding a surprise.');
+    return;
   }
+  suggestedAnomaly = computeSuggestedAnomaly();
+  await placeAnomaly(suggestedAnomaly.x, suggestedAnomaly.y, {guided:true, switchToPredict:true});
+});
+
+document.getElementById('guide-predict').addEventListener('click', async () => {
+  guideStep = 'predict';
+  if (!running) await startSimulation();
+  await refreshDemoStatus();
+  if (!demoGuide?.predict?.ready) {
+    setGuideNote(demoGuide?.predict?.message || 'LOCI still needs a few more memories before prediction is useful.');
+    return;
+  }
+  setTab('predict');
+  await runPredictSearch();
 });
 
 // Refresh heatmap periodically if active
@@ -863,6 +1207,12 @@ setInterval(async () => {
     draw();
   }
 }, 3000);
+
+setInterval(() => {
+  if (!running) {
+    void refreshDemoStatus();
+  }
+}, 4000);
 
 init();
 </script>

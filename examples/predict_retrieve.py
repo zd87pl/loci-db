@@ -115,14 +115,16 @@ def main() -> None:
     context_vector = current_state.vector
 
     print(
-        f"\nCurrent robot position: ({current_state.x:.3f}, {current_state.y:.3f}, {current_state.z:.3f})"
+        "\nCurrent robot position: "
+        f"({current_state.x:.3f}, {current_state.y:.3f}, {current_state.z:.3f})"
     )
     print(f"  (patrol step {current_idx}/{NUM_STATES})")
 
     # Show what the predictor thinks
     predicted = linear_predictor(context_vector)
     print(
-        f"\nPredictor says the robot will be near: ({predicted[0]:.3f}, {predicted[1]:.3f}, {predicted[2]:.3f})"
+        "\nPredictor says the robot will be near: "
+        f"({predicted[0]:.3f}, {predicted[1]:.3f}, {predicted[2]:.3f})"
     )
 
     # --- Run predict-then-retrieve with novelty scoring ---
@@ -139,7 +141,7 @@ def main() -> None:
     )
 
     # --- Display results with novelty scoring ---
-    print(f"\n--- Predict-Then-Retrieve Results ---")
+    print("\n--- Predict-Then-Retrieve Results ---")
     print(f"  Prediction novelty:   {result.prediction_novelty:.3f}")
     print(f"  Predictor call time:  {result.predictor_call_ms:.2f} ms")
     print(f"  Retrieval time:       {result.retrieval_latency_ms:.2f} ms")
@@ -160,7 +162,8 @@ def main() -> None:
             frac = (r.timestamp_ms - now_ms) / (LOOP_DURATION_S * 1000)
             angle_deg = frac * 360
             print(
-                f"  {i:<4} ({r.x:.3f}, {r.y:.3f}, {r.z:.3f})  {offset_s:>10.2f}s  patrol angle ~{angle_deg:.0f}°"
+                f"  {i:<4} ({r.x:.3f}, {r.y:.3f}, {r.z:.3f})  "
+                f"{offset_s:>10.2f}s  patrol angle ~{angle_deg:.0f}°"
             )
 
     if result.predicted_vector:

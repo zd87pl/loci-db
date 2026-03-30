@@ -92,3 +92,73 @@ class TestFunnelQuery:
             limit=5,
         )
         assert len(results) == 1
+
+    def test_does_not_promote_unrelated_finer_scale_from_other_epoch(self):
+        c = LocalLociClient(
+            epoch_size_ms=1000,
+            spatial_resolution=4,
+            vector_size=VEC_SIZE,
+            decay_lambda=0.0,
+        )
+        c.insert(
+            WorldState(
+                x=0.5,
+                y=0.5,
+                z=0.5,
+                timestamp_ms=1000,
+                vector=[1, 0, 0, 0],
+                scale_level="sequence",
+                scene_id="scene_a",
+            )
+        )
+        c.insert(
+            WorldState(
+                x=0.5,
+                y=0.5,
+                z=0.5,
+                timestamp_ms=100000,
+                vector=[1, 0, 0, 0],
+                scale_level="patch",
+                scene_id="scene_b",
+            )
+        )
+
+        results = c.funnel_query(vector=[1, 0, 0, 0], limit=5)
+
+        assert len(results) == 1
+        assert results[0].scale_level == "sequence"
+
+    def test_does_not_promote_unrelated_finer_scale_from_other_scene_same_epoch(self):
+        c = LocalLociClient(
+            epoch_size_ms=1000,
+            spatial_resolution=4,
+            vector_size=VEC_SIZE,
+            decay_lambda=0.0,
+        )
+        c.insert(
+            WorldState(
+                x=0.5,
+                y=0.5,
+                z=0.5,
+                timestamp_ms=1000,
+                vector=[1, 0, 0, 0],
+                scale_level="sequence",
+                scene_id="scene_a",
+            )
+        )
+        c.insert(
+            WorldState(
+                x=0.5,
+                y=0.5,
+                z=0.5,
+                timestamp_ms=1100,
+                vector=[1, 0, 0, 0],
+                scale_level="patch",
+                scene_id="scene_b",
+            )
+        )
+
+        results = c.funnel_query(vector=[1, 0, 0, 0], limit=5)
+
+        assert len(results) == 1
+        assert results[0].scale_level == "sequence"

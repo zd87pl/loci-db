@@ -61,7 +61,7 @@ def main() -> None:
     )
 
     stats = client.last_query_stats
-    print(f"\nQuery stats:")
+    print("\nQuery stats:")
     print(f"  Shards searched:    {stats.shards_searched}")
     print(f"  Candidates:         {stats.total_candidates}")
     print(f"  Hilbert filter IDs: {stats.hilbert_ids_in_filter}")

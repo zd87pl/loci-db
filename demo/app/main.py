@@ -77,7 +77,16 @@ app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "memory_count": sim.memory_count, "running": sim.running}
+    demo = sim.get_demo_status()
+    return {
+        "status": "ok",
+        "memory_count": sim.memory_count,
+        "running": sim.running,
+        "demo_phase": demo["phase"],
+        "demo_summary": demo["summary"],
+        "route": demo["route"],
+        "readiness": {"predict": demo["predict"], "anomaly": demo["anomaly"]},
+    }
 
 
 # ── Simulation control ──────────────────────────────────────────────────
@@ -115,6 +124,7 @@ async def reset_simulation():
 
 @app.get("/api/simulation/state")
 async def simulation_state():
+    demo = sim.get_demo_status()
     return {
         "robot": {"x": sim.robot_x, "y": sim.robot_y},
         "running": sim.running,
@@ -123,7 +133,14 @@ async def simulation_state():
         "memory_count": sim.memory_count,
         "start_time_ms": sim.start_time_ms,
         "anomalies": [{"x": a[0], "y": a[1]} for a in sim.anomalies],
+        "route": demo["route"],
+        "guide": demo,
     }
+
+
+@app.get("/api/demo/status")
+async def demo_status():
+    return sim.get_demo_status()
 
 
 @app.get("/api/warehouse")
@@ -137,7 +154,11 @@ async def warehouse_layout():
 @app.post("/api/query/spatial")
 async def query_spatial(req: SpatialQueryReq):
     if sim.memory_count == 0:
-        return {"results": [], "stats": {}, "message": "No memories stored yet. Start the simulation first."}
+        return {
+            "results": [],
+            "stats": {},
+            "message": "No memories stored yet. Start the simulation first.",
+        }
 
     from .embeddings import generate_embedding
 
@@ -187,6 +208,7 @@ async def query_spatial(req: SpatialQueryReq):
             }
             for r in results
         ],
+        "guide": sim.get_demo_status(),
         "stats": {
             "shards_searched": stats.shards_searched if stats else 0,
             "total_candidates": stats.total_candidates if stats else 0,
@@ -251,6 +273,9 @@ async def query_similar(req: SimilarQueryReq):
             "x": round(anchor.x * 19),
             "y": round(anchor.y * 19),
             "timestamp_ms": anchor.timestamp_ms,
+            "elapsed_s": round((anchor.timestamp_ms - sim.start_time_ms) / 1000, 1)
+            if sim.start_time_ms
+            else 0,
         },
         "results": [
             {
@@ -264,6 +289,7 @@ async def query_similar(req: SimilarQueryReq):
             }
             for r in similar
         ],
+        "guide": sim.get_demo_status(),
         "stats": {
             "shards_searched": stats.shards_searched if stats else 0,
             "total_candidates": stats.total_candidates if stats else 0,
@@ -274,18 +300,27 @@ async def query_similar(req: SimilarQueryReq):
 
 @app.post("/api/query/predict")
 async def query_predict(req: PredictQueryReq):
-    if sim.memory_count < 3:
+    demo = sim.get_demo_status()
+    min_memories = demo["predict"]["minimum_memories"]
+    if sim.memory_count < min_memories:
         return {
             "novelty": None,
             "results": [],
-            "message": "Need at least 3 memories. Let the simulation run a bit first.",
+            "message": demo["predict"]["message"],
+            "guide": demo,
         }
 
     if not sim.recent_embeddings:
-        return {"novelty": None, "results": [], "message": "No recent observations."}
+        return {
+            "novelty": None,
+            "results": [],
+            "message": "No recent observations.",
+            "guide": demo,
+        }
 
     context_vec = sim.recent_embeddings[-1]
     predictor_fn = sim.make_predictor(req.steps_ahead)
+    route = sim.get_route_status()
 
     cx = sim.robot_x / 19.0
     cy = sim.robot_y / 19.0
@@ -293,7 +328,7 @@ async def query_predict(req: PredictQueryReq):
     result = sim.client.predict_and_retrieve(
         context_vector=context_vec,
         predictor_fn=predictor_fn,
-        future_horizon_ms=req.steps_ahead * 500,
+        future_horizon_ms=req.steps_ahead * sim.tick_interval_ms,
         current_position=(cx, cy, 0.5),
         spatial_search_radius=0.3,
         limit=5,
@@ -316,6 +351,8 @@ async def query_predict(req: PredictQueryReq):
         "predicted_position": {"x": predicted_x, "y": predicted_y},
         "predicted_path": predicted_path,
         "current_position": {"x": sim.robot_x, "y": sim.robot_y},
+        "route": route,
+        "guide": demo,
         "predictor_ms": round(result.predictor_call_ms, 2),
         "retrieval_ms": round(result.retrieval_latency_ms, 2),
         "results": [
@@ -324,6 +361,9 @@ async def query_predict(req: PredictQueryReq):
                 "x": round(r.x * 19),
                 "y": round(r.y * 19),
                 "timestamp_ms": r.timestamp_ms,
+                "elapsed_s": round((r.timestamp_ms - sim.start_time_ms) / 1000, 1)
+                if sim.start_time_ms
+                else 0,
             }
             for r in result.results
         ],
@@ -336,13 +376,21 @@ async def place_anomaly(req: AnomalyReq):
     y = max(0, min(19, req.y))
     sim.anomalies.append((x, y))
     sim.warehouse_grid[(x, y)] = "anomaly"
-    return {"status": "placed", "x": x, "y": y, "total_anomalies": len(sim.anomalies)}
+    demo = sim.get_demo_status()
+    return {
+        "status": "placed",
+        "x": x,
+        "y": y,
+        "total_anomalies": len(sim.anomalies),
+        "guide": demo,
+    }
 
 
 @app.get("/api/stats")
 async def stats():
     store = sim.client.store
     collections = list(store._collections.keys())
+    demo = sim.get_demo_status()
     return {
         "memory_count": sim.memory_count,
         "epoch_count": len(collections),
@@ -350,6 +398,11 @@ async def stats():
         "tick_count": sim.tick_count,
         "elapsed_ms": sim.elapsed_ms,
         "anomaly_count": len(sim.anomalies),
+        "demo_phase": demo["phase"],
+        "demo_summary": demo["summary"],
+        "route": demo["route"],
+        "predict_ready": demo["predict"]["ready"],
+        "anomaly_ready": demo["anomaly"]["ready"],
     }
 
 

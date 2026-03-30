@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from loci.local_client import LocalLociClient
-from loci.schema import WorldState
+from loci.schema import ScoredWorldState, WorldState
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -146,6 +147,26 @@ class TestQuery:
         assert len(results) == 1
         assert results[0].x == 0.1
 
+    def test_query_applies_exact_post_filter_after_overlap(self, client):
+        client.insert(_make_state(x=0.02, y=0.02, z=0.02, vector=[1, 0, 0, 0]))
+        client.insert(_make_state(x=0.08, y=0.08, z=0.08, vector=[0.99, 0.01, 0, 0]))
+
+        results = client.query(
+            vector=[1, 0, 0, 0],
+            spatial_bounds={
+                "x_min": 0.0,
+                "x_max": 0.03,
+                "y_min": 0.0,
+                "y_max": 0.03,
+                "z_min": 0.0,
+                "z_max": 0.03,
+            },
+            limit=10,
+        )
+
+        assert len(results) == 1
+        assert results[0].x == 0.02
+
     def test_query_empty_returns_empty(self, client):
         results = client.query(vector=[1, 0, 0, 0])
         assert results == []
@@ -238,6 +259,12 @@ class TestCausalLinking:
         traj = client.get_trajectory(id2, steps_back=5, steps_forward=5)
         assert len(traj) == 1  # only the anchor, no cross-scene link
 
+    def test_single_insert_links_across_epochs(self, client):
+        client.insert(_make_state(ts=4900, scene="s1"))
+        id2 = client.insert(_make_state(ts=5100, scene="s1"))
+        traj = client.get_trajectory(id2, steps_back=5, steps_forward=5)
+        assert len(traj) == 2
+
 
 # ---------------------------------------------------------------------------
 # get_trajectory
@@ -263,6 +290,25 @@ class TestTrajectory:
     def test_trajectory_missing_id(self, client):
         assert client.get_trajectory("nonexistent") == []
 
+    def test_batch_links_across_epochs(self, client):
+        ids = client.insert_batch(
+            [
+                _make_state(ts=4900, scene="s1"),
+                _make_state(ts=5100, scene="s1"),
+            ]
+        )
+        traj = client.get_trajectory(ids[1], steps_back=5, steps_forward=5)
+        assert len(traj) == 2
+
+    def test_trajectory_scans_full_scene_beyond_initial_window(self, client):
+        states = [_make_state(ts=100 + i * 10, scene="s1") for i in range(150)]
+        ids = client.insert_batch(states)
+
+        traj = client.get_trajectory(ids[120], steps_back=2, steps_forward=2)
+        expected = [states[i].timestamp_ms for i in range(118, 123)]
+
+        assert [state.timestamp_ms for state in traj] == expected
+
 
 # ---------------------------------------------------------------------------
 # predict_and_retrieve
@@ -280,6 +326,29 @@ class TestPredictAndRetrieve:
             limit=5,
         )
         assert len(results) >= 1
+
+    def test_predict_and_retrieve_uses_real_scores(self, client):
+        low = _make_state(ts=10_500)
+        low.id = "low"
+        high = _make_state(ts=10_500)
+        high.id = "high"
+        client.query_scored = MagicMock(
+            return_value=[
+                ScoredWorldState(state=low, score=0.1, decayed_score=0.1),
+                ScoredWorldState(state=high, score=0.9, decayed_score=0.9),
+            ]
+        )
+
+        with patch("loci.retrieval.predict.time.time", return_value=10.0):
+            result = client.predict_and_retrieve(
+                context_vector=[1.0, 2.0, 3.0, 4.0],
+                predictor_fn=lambda _: [9.0, 8.0, 7.0, 6.0],
+                future_horizon_ms=2000,
+                limit=2,
+                current_position=(0.5, 0.5, 0.5),
+            )
+
+        assert [state.id for state in result.results] == ["high", "low"]
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,8 @@ dev = [
     "hypothesis>=6.0",
     "ruff>=0.4.0",
     "mypy>=1.10",
+    "fastapi[standard]>=0.100.0",
+    "httpx>=0.24.0",
 ]
 
 [tool.hatch.build.targets.wheel]

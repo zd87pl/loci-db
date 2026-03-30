@@ -28,25 +28,29 @@ Collections are created lazily on first insert.  Payload indices:
 
 | Field          | Type      | Purpose                        |
 |----------------|-----------|--------------------------------|
-| `hilbert_id`   | INTEGER   | Spatial bucket pre-filter      |
+| `hilbert_r4/r8/r12` | INTEGER | Multi-resolution spatial bucket pre-filter |
 | `timestamp_ms` | INTEGER   | Temporal range filter          |
 | `scale_level`  | KEYWORD   | Multi-scale funnel search      |
+| `scene_id`     | KEYWORD   | Causal chains and funnel narrowing |
 
 Distance metric is configurable: `cosine` (default), `dot`, or `euclidean`.
 
 ### Layer 2: Indexing & Routing
 
 **Spatial** — The 4D point `(x, y, z, t_normalised)` is mapped to a single
-`int64` via a 4-dimensional Hilbert space-filling curve.  The resolution order
-(default `p=4` → 16 bins per axis) is deliberately low so that bounding-box
-expansion enumerates a manageable number of bucket IDs for `MatchAny` filtering.
+`int64` via a 4-dimensional Hilbert space-filling curve at multiple resolutions.
+Queries start from the coarsest indexed resolution by default (`p=4` → 16 bins
+per axis) so bounding-box expansion enumerates a manageable number of bucket IDs
+for `MatchAny` filtering. When `adaptive=True`, dense regions can be promoted to
+finer stored resolutions as long as the bucket fan-out stays bounded.
 
 Key property: Hilbert curves preserve **spatial locality** — nearby points in 4D
 space map to nearby indices on the 1D curve, making the integer set filter
 a good proxy for a spatial bounding box.
 
-Quantisation in `encode()` uses `round()`.  The `expand_bounding_box()` function
-uses `floor()`/`ceil()` at the boundaries to guarantee no misses at grid edges.
+Quantisation in `encode()` uses `round()`. Query-time expansion uses
+`floor()`/`ceil()` at the boundaries to guarantee no misses at grid edges, and
+an exact payload post-filter is the final source of truth for geometric bounds.
 
 **Temporal** — `timestamp_ms // epoch_size_ms` determines the epoch.  Queries
 compute which epochs overlap the requested time window and fan out searches.
@@ -59,8 +63,9 @@ hypothetical future embedding, then runs a standard query filtered to
 `[now, now + future_horizon_ms]`.
 
 **funnel search** — Cascades through scale levels (sequence → frame → patch)
-to progressively refine results when multi-scale embeddings are stored.
-Always returns results at the finest available granularity.
+to progressively refine results when multi-scale embeddings are stored. Matching
+epochs and scene IDs are carried forward between stages so finer passes do not
+re-scan unrelated shards. Always returns results at the finest available granularity.
 
 **temporal decay** — Re-ranks results using exponential decay:
 `score = similarity × exp(-λ × age_ms)`.  Configurable via `decay_lambda`.
@@ -94,9 +99,11 @@ insert_batch(states)
   → patch next_state_id links
 
 query(vector, bounds, time_window)
-  → determine epoch range → expand bounding box to hilbert IDs
+  → determine epoch range → build epoch-local 4D bounds
+  → choose Hilbert resolution → expand bounds to bucket IDs
   → fan-out search across collections with MatchAny + Range filters
-  → apply temporal decay → re-rank → return WorldStates with vectors
+  → exact post-filter → apply temporal decay → re-rank
+  → return WorldStates with vectors
 
 predict_and_retrieve(context_vector, predictor_fn, horizon)
   → predicted = predictor_fn(context_vector)

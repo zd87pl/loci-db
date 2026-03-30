@@ -32,18 +32,16 @@ waste resources.
 
 ## Priority 2: Integrate existing v0.3 code (high leverage — code already exists)
 
-### 2a. Wire adaptive Hilbert resolution into clients
-**Code exists:** `loci/spatial/adaptive.py` — `AdaptiveResolution` class is
-complete with density tracking, escalation logic, and stats. Just not connected.
+### 2a. Adaptive Hilbert resolution follow-up
+**Status:** `AdaptiveResolution` is already wired into the clients behind the
+optional `adaptive=True/False` flag, and `density_stats` is exposed for
+inspection.
 
-- Replace fixed `HilbertEncoder(order=4)` with `AdaptiveResolution` in both
-  `LociClient` and `AsyncLociClient`
-- On `insert()`, call `adaptive.track(point)` to update density stats
-- On `query()`, use `adaptive.effective_order(region)` for bucket expansion
-- Add `adaptive=True/False` flag to client constructors (default `True`)
 - Persist density stats across client restarts (serialize to Qdrant metadata
   collection or local file)
-- Update `LocalLociClient` similarly
+- Decide whether to flip the constructor default to `True` after persistence
+  is in place
+- Update README/examples to show `adaptive=True` when users want the feature
 
 ### 2b. Expose funnel search in client API
 **Code exists:** `loci/retrieval/funnel.py` — `funnel_search()` is complete.

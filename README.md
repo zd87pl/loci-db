@@ -25,9 +25,10 @@ spatiotemporal structure **first-class** through three novel primitives:
 ### 1. Multi-Resolution Hilbert Bucketing
 
 Encode `(x, y, z, t)` at multiple Hilbert resolutions (p=4, 8, 12).
-Spatial bounding-box queries use the coarsest resolution with an overlap factor
-to catch boundary points — replacing 3 independent float-range filters with a
-single integer set lookup.
+Spatial bounding-box queries use a Hilbert integer pre-filter with overlap, then
+apply an exact payload post-filter as the authoritative geometric check. By
+default queries start at the coarsest indexed resolution; with `adaptive=True`,
+dense regions can be promoted to finer Hilbert resolutions at query time.
 
 ```
          Naive Qdrant               LOCI
@@ -200,6 +201,8 @@ QDRANT_URL=http://localhost:6333 python benchmarks/vs_naive_qdrant.py
 ```
 
 Results are written to `benchmarks/results/latest.json` and printed as a markdown table.
+The benchmark includes both historical fixed-`r4` baselines and a `LOCI current`
+arm that mirrors the shipped query path more closely.
 
 For the local in-memory backend, run `python benchmarks/local_benchmark.py` for insert/query throughput.
 

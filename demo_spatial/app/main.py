@@ -21,12 +21,14 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+import segno
+from fastapi import FastAPI, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -103,6 +105,16 @@ async def scanner():
     if os.path.exists(scanner_path):
         return FileResponse(scanner_path)
     return {"error": "scanner.html not found"}
+
+
+@app.get("/api/scanner-qr")
+async def scanner_qr(url: str = Query(..., description="Scanner URL to encode")):
+    """Generate a scannable QR code PNG for the mobile scanner URL."""
+    qr = segno.make(url, error="l")
+    buf = io.BytesIO()
+    qr.save(buf, kind="png", scale=5, border=2)
+    buf.seek(0)
+    return Response(content=buf.getvalue(), media_type="image/png")
 
 
 # ---------------------------------------------------------------------------

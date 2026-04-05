@@ -171,6 +171,7 @@ button.danger.active{background:var(--red);color:#fff}
     <div class="map-wrap" style="position:relative">
       <canvas id="map-canvas" width="360" height="360" aria-label="2D top-down map of tracked objects" role="img"></canvas>
       <div class="map-legend" aria-label="Map legend">
+        <div style="font-size:0.62rem;color:var(--accent);margin-bottom:4px;letter-spacing:.08em">SPATIAL ZONES (3×3)</div>
         <div style="font-size:0.7rem;color:var(--text);margin-bottom:6px">Legend</div>
         <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>Recent (0–10s)</div>
         <div class="legend-item"><div class="legend-dot" style="background:var(--yellow)"></div>Seen (10–60s)</div>
@@ -237,8 +238,9 @@ button.danger.active{background:var(--red);color:#fff}
         <button onclick="sendTextQuery()" aria-label="Send text query">Ask</button>
       </div>
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px">
-        <button onclick="quickQuery('Where are my keys?')" style="font-size:0.65rem;padding:3px 7px">keys?</button>
-        <button onclick="quickQuery('Where is my phone?')" style="font-size:0.65rem;padding:3px 7px">phone?</button>
+        <button onclick="quickQuery('Where are my keys?')" style="font-size:0.65rem;padding:3px 7px">where keys?</button>
+        <button onclick="quickQuery('Where is my phone?')" style="font-size:0.65rem;padding:3px 7px">where phone?</button>
+        <button onclick="quickQuery('When was I last seen my keys?')" style="font-size:0.65rem;padding:3px 7px">when keys?</button>
         <button onclick="quickQuery('What objects can you see?')" style="font-size:0.65rem;padding:3px 7px">all objects</button>
         <button onclick="quickQuery('What changed recently?')" style="font-size:0.65rem;padding:3px 7px">changes</button>
       </div>
@@ -293,6 +295,15 @@ const API_BASE = window.location.port === '8001'
 const WS_URL = API_BASE.replace(/^http/, 'ws') + '/ws';
 const SCAN_FPS = 2;
 const MAP_SIZE = 360;
+
+function formatClockTime(timestampMs) {
+  if (!timestampMs) return '';
+  const d = new Date(timestampMs);
+  let h = d.getHours(), m = d.getMinutes();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${m.toString().padStart(2, '0')} ${ampm}`;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // State
@@ -518,15 +529,40 @@ function drawMap() {
   ctx.fillStyle = '#0a0e1a';
   ctx.fillRect(0, 0, size, size);
 
-  // Grid
-  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  // Grid — 3x3 zone grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
   ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) {
-    const x = padding + i * (inner / 4);
-    const y = padding + i * (inner / 4);
+  for (let i = 1; i <= 2; i++) {
+    const x = padding + i * (inner / 3);
+    const y = padding + i * (inner / 3);
     ctx.beginPath(); ctx.moveTo(x, padding); ctx.lineTo(x, size - padding); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(padding, y); ctx.lineTo(size - padding, y); ctx.stroke();
   }
+
+  // Zone labels
+  const zoneLabels = [
+    ['L-Back', 'C-Back', 'R-Back'],
+    ['Left', 'Center', 'Right'],
+    ['L-Front', 'C-Front', 'R-Front'],
+  ];
+  ctx.font = '8px Courier New';
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      const zx = padding + col * (inner / 3) + inner / 6;
+      const zy = padding + row * (inner / 3) + inner / 6;
+      const lbl = zoneLabels[row][col];
+      ctx.fillText(lbl, zx - ctx.measureText(lbl).width / 2, zy + 3);
+    }
+  }
+
+  // Compass labels
+  ctx.font = '9px Courier New';
+  ctx.fillStyle = 'rgba(0,188,212,0.3)';
+  ctx.fillText('← LEFT', padding + 2, size - 6);
+  ctx.fillText('RIGHT →', size - padding - ctx.measureText('RIGHT →').width - 2, size - 6);
+  ctx.fillText('BACK (far)', padding + inner / 2 - ctx.measureText('BACK (far)').width / 2, padding - 6);
+  ctx.fillText('FRONT (near)', padding + inner / 2 - ctx.measureText('FRONT (near)').width / 2, size - 4);
 
   // Border
   ctx.strokeStyle = 'rgba(0,188,212,0.15)';
@@ -563,11 +599,22 @@ function drawMap() {
     ctx.fillStyle = color;
     ctx.fill();
 
-    // Label
-    ctx.fillStyle = selectedObject === obj.label ? '#fff' : '#ccc';
+    // Label + time
+    const isSelected = selectedObject === obj.label;
+    ctx.fillStyle = isSelected ? '#fff' : '#ccc';
     ctx.font = '10px Courier New';
-    const lx = Math.min(Math.max(x - ctx.measureText(obj.label).width / 2, 2), size - 60);
-    ctx.fillText(obj.label, lx, y - 9);
+    const labelText = obj.label;
+    const lx = Math.min(Math.max(x - ctx.measureText(labelText).width / 2, 2), size - 60);
+    ctx.fillText(labelText, lx, y - 12);
+
+    // Time annotation below label
+    const clockTime = obj.last_seen_time || formatClockTime(obj.timestamp_ms);
+    if (clockTime) {
+      ctx.fillStyle = isSelected ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.3)';
+      ctx.font = '8px Courier New';
+      const tx = Math.min(Math.max(x - ctx.measureText(clockTime).width / 2, 2), size - 50);
+      ctx.fillText(clockTime, tx, y + 16);
+    }
   });
 }
 
@@ -591,15 +638,16 @@ function updateObjectList() {
     const h = obj.cx < 0.33 ? 'left' : obj.cx > 0.67 ? 'right' : 'center';
     const v = obj.cy < 0.4 ? 'back' : obj.cy > 0.7 ? 'front' : 'mid';
     const age_color = age < 10 ? 'var(--accent)' : age < 60 ? 'var(--yellow)' : '#666';
+    const clockTime = obj.last_seen_time || formatClockTime(obj.timestamp_ms);
     return `<div class="obj-item${selectedObject === obj.label ? ' selected' : ''}"
       onclick="selectObject('${obj.label}')"
       role="button" tabindex="0"
-      aria-label="${obj.label}, ${ageStr}, ${h} ${v}"
+      aria-label="${obj.label}, ${ageStr} at ${clockTime}, ${h} ${v}"
       onkeydown="if(event.key==='Enter')selectObject('${obj.label}')">
       <div class="obj-dot" style="background:${age_color}"></div>
       <span class="obj-label">${obj.label}</span>
       <span class="obj-pos" style="color:var(--muted)">${h}·${v}</span>
-      <span class="obj-age">${ageStr}</span>
+      <span class="obj-age" title="Last seen at ${clockTime}">${ageStr} · ${clockTime}</span>
     </div>`;
   }).join('');
 }
@@ -627,11 +675,14 @@ async function loadHistory(label) {
       const age = o.age_seconds || 0;
       const ageStr = age < 60 ? `${Math.round(age)}s ago` : age < 3600 ? `${Math.round(age/60)}m ago` : `${Math.round(age/3600)}h ago`;
       const conf = Math.round((o.confidence || 1) * 100);
+      const clockTime = o.last_seen_time || formatClockTime(o.timestamp_ms);
+      const clockFull = o.last_seen_at || '';
       return `<div class="timeline-item">
         <div class="timeline-dot"></div>
         <div class="timeline-info">
           <span class="timeline-label">${label}</span>
-          ${h} ${v} · conf ${conf}% · <span style="color:var(--accent)">${ageStr}</span>
+          <span style="color:var(--accent)">${clockTime}</span> (${ageStr}) · ${h} ${v} · conf ${conf}%
+          ${clockFull ? `<br><span style="font-size:0.65rem;color:#667">${clockFull}</span>` : ''}
         </div>
       </div>`;
     }).join('');

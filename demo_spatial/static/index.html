@@ -398,6 +398,11 @@ async function toggleCamera() {
     setCamStatus('Camera stopped.');
     return;
   }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setCamStatus('Camera requires HTTPS or localhost. Please access the demo at https://… or http://localhost:8001');
+    setStatus('backend', 'warn', 'Camera unavailable (not a secure context)');
+    return;
+  }
   try {
     cameraStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'environment' }, audio: false });
     document.getElementById('video').srcObject = cameraStream;
@@ -641,6 +646,10 @@ async function toggleMic() {
   const btn = document.getElementById('mic-btn');
   if (isRecording) {
     stopRecording();
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    document.getElementById('transcript-box').innerHTML = '<span style="color:var(--red)">Microphone requires HTTPS or localhost. Please access the demo at https://… or http://localhost:8001</span>';
     return;
   }
   try {

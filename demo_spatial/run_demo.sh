@@ -17,10 +17,33 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PORT="${PORT:-8001}"
+CERTS_DIR="$SCRIPT_DIR/.certs"
+
+# ── Generate self-signed SSL cert (needed for iPhone camera access) ──
+if [[ ! -f "$CERTS_DIR/cert.pem" ]]; then
+  echo "Generating self-signed SSL certificate for HTTPS..."
+  mkdir -p "$CERTS_DIR"
+  # Get local IP for SAN (Subject Alternative Name) so iPhone trusts it
+  LOCAL_IP=$(python3 -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect(('8.8.8.8',80)); print(s.getsockname()[0]); s.close()" 2>/dev/null || echo "127.0.0.1")
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$CERTS_DIR/key.pem" \
+    -out "$CERTS_DIR/cert.pem" \
+    -days 365 \
+    -subj "/CN=LOCI Spatial Demo" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:${LOCAL_IP}" \
+    2>/dev/null
+  echo "✓ SSL cert generated at $CERTS_DIR/"
+  echo ""
+fi
 
 echo "=== LOCI-DB Spatial Memory Assistant ==="
-echo "Backend URL: http://localhost:${PORT}"
-echo "API docs:    http://localhost:${PORT}/docs"
+echo "Backend URL: https://localhost:${PORT}"
+echo "API docs:    https://localhost:${PORT}/docs"
+echo ""
+echo "📱 iPhone setup:"
+echo "   1. Open https://$(python3 -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect(('8.8.8.8',80)); print(s.getsockname()[0]); s.close()" 2>/dev/null || echo "localhost"):${PORT} on your Mac"
+echo "   2. Click the teal 'iPhone 3D Scanner' button → scan QR with iPhone"
+echo "   3. On iPhone: tap 'Advanced' → 'Accept Risk' for the self-signed cert"
 echo ""
 
 if [[ -z "${OPENAI_API_KEY:-}" ]]; then
@@ -45,6 +68,8 @@ fi
 exec uvicorn demo_spatial.app.main:app \
   --host 0.0.0.0 \
   --port "$PORT" \
+  --ssl-keyfile "$CERTS_DIR/key.pem" \
+  --ssl-certfile "$CERTS_DIR/cert.pem" \
   --reload \
   --reload-dir "$REPO_ROOT/demo_spatial" \
   --reload-dir "$REPO_ROOT/loci"

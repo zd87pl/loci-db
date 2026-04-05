@@ -6,3 +6,6 @@ build/
 .hypothesis/
 .pytest_cache/
 *.egg
+
+# Auto-generated SSL certs for demo
+demo_spatial/.certs/

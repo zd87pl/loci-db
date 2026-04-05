@@ -106,6 +106,22 @@ button.danger.active{background:var(--red);color:#fff}
 .guide-body{color:var(--muted);line-height:1.55}
 .guide-next{margin-top:10px;padding:6px 10px;background:var(--accent-soft);border-radius:8px;color:var(--accent);font-size:0.74rem;font-weight:500}
 
+/* iPhone Scanner FAB */
+.scanner-fab{position:fixed;bottom:24px;right:24px;z-index:100;display:flex;align-items:center;gap:10px;padding:14px 22px;background:linear-gradient(135deg,#0e7490,#06b6d4);border:none;border-radius:50px;color:#fff;font-weight:700;font-size:0.92rem;cursor:pointer;box-shadow:0 4px 20px rgba(6,182,212,.45),0 2px 8px rgba(0,0,0,.2);transition:all .2s;letter-spacing:.02em;animation:fab-pulse 2s ease-in-out 3}
+.scanner-fab:hover{transform:translateY(-2px);box-shadow:0 6px 28px rgba(6,182,212,.55),0 4px 12px rgba(0,0,0,.2);background:linear-gradient(135deg,#0c6a84,#08b8d0)}
+@keyframes fab-pulse{0%,100%{box-shadow:0 4px 20px rgba(6,182,212,.45),0 2px 8px rgba(0,0,0,.2)}50%{box-shadow:0 4px 20px rgba(6,182,212,.45),0 2px 8px rgba(0,0,0,.2),0 0 0 8px rgba(6,182,212,.15)}}
+
+/* Scanner QR modal */
+.scanner-modal-backdrop{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center}
+.scanner-modal-backdrop.open{display:flex}
+.scanner-modal{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:28px;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,.3);text-align:center}
+.scanner-modal h2{font-size:1.1rem;margin-bottom:4px}
+.scanner-modal .qr-img{margin:16px auto;border-radius:8px;background:#fff;padding:8px;border:1px solid var(--border);display:block}
+.scanner-modal .scanner-url-box{font-size:0.78rem;color:var(--text);padding:8px 12px;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;word-break:break-all;cursor:pointer;margin:12px 0}
+.scanner-modal .scanner-url-box:hover{border-color:var(--accent)}
+.scanner-modal .close-btn{margin-top:12px;padding:8px 20px;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;color:var(--muted);font-size:0.82rem;cursor:pointer}
+.scanner-modal .close-btn:hover{background:#f0f2f5;border-color:#cdd3de}
+
 /* Metrics */
 .metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border)}
 .metric{padding:10px 12px;background:var(--panel);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow-sm)}
@@ -170,25 +186,6 @@ button.danger.active{background:var(--red);color:#fff}
       <button id="btn-camera" onclick="toggleCamera()" aria-label="Toggle camera">Start Camera</button>
       <button id="btn-scan" onclick="toggleScan()" disabled aria-label="Toggle object scanning">Start Scanning</button>
       <button onclick="clearMemory()" class="danger" aria-label="Clear all spatial memory">Clear Memory</button>
-    </div>
-    <!-- iPhone 3D Scanner button — prominent standalone row -->
-    <div style="padding:8px 16px;border-top:1px solid var(--border)">
-      <button onclick="showMobileScanner()" style="width:100%;padding:10px 16px;background:linear-gradient(135deg,#0e7490,#06b6d4);border:1px solid rgba(6,182,212,.5);color:#fff;font-weight:600;font-size:0.85rem;border-radius:8px;letter-spacing:.02em;box-shadow:0 2px 8px rgba(6,182,212,.25)" aria-label="Open iPhone 3D scanner to generate QR code">&#128241; iPhone 3D Scanner — Generate QR Code</button>
-    </div>
-    <!-- Mobile scanner QR panel -->
-    <div id="mobile-scanner-panel" style="display:none;padding:12px 14px;border-top:1px solid var(--border);background:var(--panel-alt)">
-      <div style="display:flex;gap:12px;align-items:center">
-        <canvas id="qr-canvas" width="120" height="120" style="border:1px solid var(--border);border-radius:6px;background:#fff;flex:0 0 120px"></canvas>
-        <div>
-          <div style="font-size:0.78rem;color:var(--accent);margin-bottom:4px;font-weight:bold">iPhone 3D Scanner</div>
-          <div style="font-size:0.7rem;color:var(--muted);line-height:1.5;margin-bottom:6px">
-            Scan this QR code with your iPhone to open the 3D scanner.
-            Uses rear camera + LiDAR for depth-aware object detection.
-          </div>
-          <div id="scanner-url" style="font-size:0.65rem;color:var(--text);padding:4px 6px;background:rgba(0,0,0,.3);border-radius:4px;word-break:break-all;cursor:pointer" onclick="copyScannerURL()" title="Click to copy"></div>
-          <div style="font-size:0.58rem;color:var(--muted);margin-top:4px">Click URL to copy &middot; Both devices must be on same network</div>
-        </div>
-      </div>
     </div>
   </section>
 
@@ -313,6 +310,26 @@ button.danger.active{background:var(--red);color:#fff}
 
 <!-- Audio element for TTS playback -->
 <audio id="tts-audio" aria-label="Text to speech output" style="display:none"></audio>
+
+<!-- iPhone 3D Scanner — floating action button (always visible) -->
+<button class="scanner-fab" onclick="openScannerModal()" aria-label="Open iPhone 3D Scanner QR code">
+  &#128241; iPhone 3D Scanner
+</button>
+
+<!-- Scanner QR code modal -->
+<div class="scanner-modal-backdrop" id="scanner-modal" onclick="closeScannerModal(event)">
+  <div class="scanner-modal" onclick="event.stopPropagation()">
+    <h2>iPhone 3D Scanner</h2>
+    <div style="font-size:0.82rem;color:var(--muted)">Scan this QR code with your iPhone camera</div>
+    <img id="scanner-qr-img" class="qr-img" width="180" height="180" alt="QR code for iPhone scanner">
+    <div class="scanner-url-box" id="scanner-url" onclick="copyScannerURL()" title="Click to copy URL">
+      Loading scanner URL...
+    </div>
+    <div style="font-size:0.72rem;color:var(--muted);margin-bottom:4px">Click URL to copy &middot; Both devices must be on same network</div>
+    <div style="font-size:0.72rem;color:var(--muted)">Uses rear camera + LiDAR for depth-aware 3D object detection</div>
+    <button class="close-btn" onclick="closeScannerModal()">Close</button>
+  </div>
+</div>
 
 <script>
 // ─────────────────────────────────────────────────────────────────────────────
@@ -932,124 +949,35 @@ setInterval(() => {
 }, 2000);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mobile Scanner QR Code
+// iPhone Scanner Modal + QR Code (server-generated)
 // ─────────────────────────────────────────────────────────────────────────────
-function showMobileScanner() {
-  const panel = document.getElementById('mobile-scanner-panel');
-  const isVisible = panel.style.display !== 'none';
-  panel.style.display = isVisible ? 'none' : '';
-  if (!isVisible) generateQR();
-}
-
 function getScannerURL() {
-  // Build the scanner URL using the current server address
-  const host = _hostname === 'localhost' ? getLocalIP() : _hostname;
+  const host = _hostname === 'localhost' ? window.location.hostname : _hostname;
   const port = window.location.port || '8001';
   return `http://${host}:${port}/scanner`;
 }
 
-function getLocalIP() {
-  // Suggest using the machine's local IP for cross-device access
-  // On localhost, we show the URL with a note to replace with local IP
-  return window.location.hostname || 'localhost';
+function openScannerModal() {
+  const modal = document.getElementById('scanner-modal');
+  const url = getScannerURL();
+  document.getElementById('scanner-url').textContent = url;
+  document.getElementById('scanner-qr-img').src = `/api/scanner-qr?url=${encodeURIComponent(url)}`;
+  modal.classList.add('open');
+}
+
+function closeScannerModal(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('scanner-modal').classList.remove('open');
 }
 
 function copyScannerURL() {
-  const url = document.getElementById('scanner-url').textContent;
+  const el = document.getElementById('scanner-url');
+  const url = el.textContent;
   navigator.clipboard.writeText(url).then(() => {
-    document.getElementById('scanner-url').style.color = 'var(--green)';
-    setTimeout(() => {
-      document.getElementById('scanner-url').style.color = '';
-    }, 1500);
+    el.style.color = 'var(--green)';
+    el.textContent = 'Copied!';
+    setTimeout(() => { el.style.color = ''; el.textContent = url; }, 1500);
   }).catch(() => {});
-}
-
-function generateQR() {
-  const url = getScannerURL();
-  document.getElementById('scanner-url').textContent = url;
-
-  // Minimal QR code renderer (uses canvas)
-  const canvas = document.getElementById('qr-canvas');
-  const ctx = canvas.getContext('2d');
-  const size = 120;
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(0, 0, size, size);
-
-  // Generate QR matrix using a simple encoder
-  const modules = qrEncode(url);
-  if (!modules) {
-    // Fallback: show URL text
-    ctx.fillStyle = '#000';
-    ctx.font = '10px Courier New';
-    ctx.fillText('Scan QR at:', 4, 30);
-    ctx.fillText('/scanner', 4, 50);
-    return;
-  }
-  const cellSize = Math.floor(size / (modules.length + 2));
-  const offset = Math.floor((size - cellSize * modules.length) / 2);
-  ctx.fillStyle = '#000';
-  for (let r = 0; r < modules.length; r++) {
-    for (let c = 0; c < modules[r].length; c++) {
-      if (modules[r][c]) {
-        ctx.fillRect(offset + c * cellSize, offset + r * cellSize, cellSize, cellSize);
-      }
-    }
-  }
-}
-
-// Minimal QR Code encoder (Version 2, Level L, byte mode)
-// This handles URLs up to ~32 chars with QR Version 2; longer URLs use Version 4.
-function qrEncode(text) {
-  // Use a simplified approach: render URL as a visual pattern
-  // For a production app, use a QR library. Here we create a recognizable pattern.
-  const data = [];
-  for (let i = 0; i < text.length; i++) data.push(text.charCodeAt(i));
-
-  // Create a deterministic 25x25 grid pattern from the URL
-  const n = 25;
-  const grid = Array.from({length: n}, () => Array(n).fill(false));
-
-  // Finder patterns (standard QR)
-  function drawFinder(r, c) {
-    for (let dr = 0; dr < 7; dr++) for (let dc = 0; dc < 7; dc++) {
-      const edge = dr === 0 || dr === 6 || dc === 0 || dc === 6;
-      const inner = dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4;
-      if (r+dr < n && c+dc < n) grid[r+dr][c+dc] = edge || inner;
-    }
-  }
-  drawFinder(0, 0);
-  drawFinder(0, n - 7);
-  drawFinder(n - 7, 0);
-
-  // Timing patterns
-  for (let i = 8; i < n - 8; i++) {
-    grid[6][i] = i % 2 === 0;
-    grid[i][6] = i % 2 === 0;
-  }
-
-  // Data modules (encode URL bytes as pattern)
-  let bitIdx = 0;
-  const bits = [];
-  for (const b of data) {
-    for (let i = 7; i >= 0; i--) bits.push((b >> i) & 1);
-  }
-  // Fill remaining data area
-  for (let col = n - 1; col >= 1; col -= 2) {
-    if (col === 6) col = 5;
-    for (let row = 0; row < n; row++) {
-      for (let dc = 0; dc < 2 && col - dc >= 0; dc++) {
-        const c = col - dc;
-        const r = row;
-        if (grid[r][c]) continue; // skip finder/timing
-        if (r < 9 && c < 9) continue;
-        if (r < 9 && c >= n - 8) continue;
-        if (r >= n - 8 && c < 9) continue;
-        if (r === 6 || c === 6) continue;
-        grid[r][c] = bitIdx < bits.length ? !!bits[bitIdx++] : (bitIdx++ % 3 === 0);
-      }
-    }
-  }
-  return grid;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

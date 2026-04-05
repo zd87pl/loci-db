@@ -3,6 +3,9 @@ fastapi[standard]>=0.100.0
 uvicorn[standard]>=0.20.0
 python-multipart>=0.0.6
 
+# QR code generation (zero-dependency, pure Python)
+segno>=1.6.0
+
 # Object detection — YOLO
 ultralytics>=8.3.0
 Pillow>=10.0.0

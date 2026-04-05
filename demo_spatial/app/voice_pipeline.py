@@ -47,7 +47,10 @@ _WHERE_PATTERNS = [
 ]
 
 _HISTORY_PATTERNS = [
-    r"(?:when|last time)\s+(?:was|did|have)\s+(?:i\s+)?(?:seen|used|placed)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
+    r"(?:when|last time)\s+(?:was|did|have)\s+(?:i\s+)?(?:seen|used|placed|put|left)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
+    r"when\s+(?:did you|did i|have you)\s+(?:last\s+)?(?:see|seen|spot|notice)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
+    r"when\s+(?:was\s+)?(?:my\s+|the\s+)?(.+?)\s+(?:last\s+)?(?:seen|spotted|detected)",
+    r"how\s+long\s+(?:ago|since)\s+(?:was|did|have)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$|seen|spotted)",
     r"history\s+(?:of\s+)?(?:my\s+)?(.+?)(?:\?|$)",
 ]
 
@@ -101,6 +104,55 @@ def parse_intent(text: str) -> QueryIntent:
     return QueryIntent(kind="unknown", object_name="", raw_text=text)
 
 
+def _format_age(age: float) -> str:
+    """Format age in seconds to a human-readable relative time string."""
+    if age < 10:
+        return "just now"
+    elif age < 60:
+        return f"{int(age)} seconds ago"
+    elif age < 3600:
+        mins = int(age / 60)
+        return f"{mins} minute{'s' if mins != 1 else ''} ago"
+    else:
+        hrs = int(age / 3600)
+        return f"{hrs} hour{'s' if hrs != 1 else ''} ago"
+
+
+def _format_clock_time(timestamp_ms: int) -> str:
+    """Format a Unix ms timestamp as a human-readable clock time (e.g., '2:15 PM')."""
+    from datetime import datetime
+    dt = datetime.fromtimestamp(timestamp_ms / 1000)
+    return dt.strftime("%I:%M %p").lstrip("0")
+
+
+def _describe_position(cx: float, cy: float) -> str:
+    """Describe a normalized (cx, cy) position in natural spatial terms."""
+    h_pos = "on the left" if cx < 0.33 else ("on the right" if cx > 0.67 else "in the center")
+    v_pos = "toward the back" if cy < 0.35 else ("near the front" if cy > 0.70 else "in the middle area")
+    return f"{h_pos}, {v_pos}"
+
+
+def _describe_position_relative(target, all_objects: list) -> str:
+    """Describe target position relative to other nearby tracked objects."""
+    if not all_objects or len(all_objects) < 2:
+        return ""
+    others = [o for o in all_objects if o.label != target.label]
+    if not others:
+        return ""
+    # Find closest other object by Euclidean distance
+    closest = min(others, key=lambda o: ((o.cx - target.cx) ** 2 + (o.cy - target.cy) ** 2) ** 0.5)
+    dx = target.cx - closest.cx
+    dy = target.cy - closest.cy
+    dist = (dx ** 2 + dy ** 2) ** 0.5
+    if dist > 0.5:
+        return ""  # too far apart to be useful
+    if abs(dx) > abs(dy):
+        direction = "to the right of" if dx > 0 else "to the left of"
+    else:
+        direction = "in front of" if dy > 0 else "behind"
+    return f"It's {direction} the {closest.label}."
+
+
 def build_response_text(intent: QueryIntent, memory: "SpatialMemory", vlm_answer: str = "") -> str:
     """Build a natural language response from intent + LOCI-DB query results."""
     if vlm_answer:
@@ -110,44 +162,56 @@ def build_response_text(intent: QueryIntent, memory: "SpatialMemory", vlm_answer
         objects = memory.current_objects()
         if not objects:
             return "I haven't seen any objects yet. Try pointing the camera around the room."
-        labels = [o.label for o in objects[:8]]
-        if len(objects) > 8:
-            labels.append(f"and {len(objects) - 8} more")
-        return "I can see: " + ", ".join(labels) + "."
+        parts = []
+        for o in objects[:6]:
+            pos = _describe_position(o.cx, o.cy)
+            age_str = _format_age(o.age_seconds)
+            parts.append(f"{o.label} ({pos}, seen {age_str})")
+        result = "I'm tracking: " + "; ".join(parts) + "."
+        if len(objects) > 6:
+            result += f" Plus {len(objects) - 6} more objects."
+        return result
 
     if intent.kind == "changes":
         recent = memory.recent_changes(window_seconds=60)
         if not recent:
             return "No objects have moved in the last minute."
-        labels = [o.label for o in recent[:5]]
-        return "Recently spotted: " + ", ".join(labels) + "."
+        parts = []
+        for o in recent[:5]:
+            pos = _describe_position(o.cx, o.cy)
+            time_str = _format_clock_time(o.timestamp_ms)
+            parts.append(f"{o.label} at {time_str}, {pos}")
+        return "Recently spotted: " + "; ".join(parts) + "."
 
     if intent.kind in ("where_is", "history") and intent.object_name:
-        results = memory.where_is(intent.object_name, limit=3)
+        results = memory.where_is(intent.object_name, limit=5)
         if not results:
             return f"I haven't seen your {intent.object_name} yet. Try scanning the area."
 
         obj = results[0]
-        # Describe position in human terms
-        cx, cy = obj.cx, obj.cy
-        h_pos = "on the left" if cx < 0.33 else ("on the right" if cx > 0.67 else "in the center")
-        v_pos = "toward the back" if cy < 0.35 else ("near the front" if cy > 0.70 else "")
-        pos_parts = [h_pos]
-        if v_pos:
-            pos_parts.append(v_pos)
-        pos = " and ".join(pos_parts)
+        pos = _describe_position(obj.cx, obj.cy)
+        age_str = _format_age(obj.age_seconds)
+        clock_time = _format_clock_time(obj.timestamp_ms)
 
-        age = obj.age_seconds
-        if age < 10:
-            time_desc = "just now"
-        elif age < 60:
-            time_desc = f"{int(age)} seconds ago"
-        elif age < 3600:
-            time_desc = f"{int(age / 60)} minute{'s' if age >= 120 else ''} ago"
-        else:
-            time_desc = f"{int(age / 3600)} hour{'s' if age >= 7200 else ''} ago"
+        # Build the main answer with both when and where
+        answer = f"Your {intent.object_name} was last seen {pos}. That was {age_str}, at {clock_time}."
 
-        return f"Your {intent.object_name} was last seen {pos}, {time_desc}."
+        # Add relative position to other objects if available
+        all_objects = memory.current_objects()
+        rel = _describe_position_relative(obj, all_objects)
+        if rel:
+            answer += f" {rel}"
+
+        # For history intent, add previous sightings
+        if intent.kind == "history" and len(results) > 1:
+            answer += " Previous sightings:"
+            for prev in results[1:4]:
+                prev_pos = _describe_position(prev.cx, prev.cy)
+                prev_time = _format_clock_time(prev.timestamp_ms)
+                prev_age = _format_age(prev.age_seconds)
+                answer += f" At {prev_time} ({prev_age}), {prev_pos}."
+
+        return answer
 
     return "I'm not sure what you're asking. Try saying 'where is my [object]?'"
 

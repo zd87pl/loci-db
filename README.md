@@ -65,6 +65,41 @@ print(f"Novelty: {result.prediction_novelty:.2f}")
 
 ## Quick Start
 
+### Quick Start with Docker
+
+The fastest way to run LOCI with a persistent Qdrant backend:
+
+```bash
+docker compose up
+```
+
+This starts two services:
+- **loci** — the LOCI REST API on `http://localhost:8000`
+- **qdrant** — the Qdrant vector store on `http://localhost:6333`
+
+Qdrant data is persisted in a named volume so it survives restarts.
+
+Once running, insert and query world states via the HTTP API:
+
+```bash
+# Health check
+curl http://localhost:8000/health
+
+# Insert a world state (512-dim vector)
+curl -X POST http://localhost:8000/insert \
+  -H 'Content-Type: application/json' \
+  -d '{"x":0.5,"y":0.3,"z":0.8,"timestamp_ms":1700000000000,"vector":[0.1],"scene_id":"s1"}'
+
+# Query (spatial + time window)
+curl -X POST http://localhost:8000/query \
+  -H 'Content-Type: application/json' \
+  -d '{"vector":[0.1],"x_min":0.0,"x_max":1.0,"limit":10}'
+```
+
+Interactive API docs: `http://localhost:8000/docs`
+
+---
+
 ### No Docker? No problem — in-memory mode
 
 Try LOCI instantly with zero infrastructure using `LocalLociClient`:

@@ -1,0 +1,30 @@
+services:
+  loci:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      LOCI_VECTOR_SIZE: "512"
+      LOCI_EPOCH_SIZE_MS: "5000"
+      LOCI_DISTANCE: cosine
+    depends_on:
+      - qdrant
+    networks:
+      - loci-net
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - loci-net
+
+networks:
+  loci-net:
+
+volumes:
+  qdrant-data:

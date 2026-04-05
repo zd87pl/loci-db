@@ -170,7 +170,10 @@ button.danger.active{background:var(--red);color:#fff}
       <button id="btn-camera" onclick="toggleCamera()" aria-label="Toggle camera">Start Camera</button>
       <button id="btn-scan" onclick="toggleScan()" disabled aria-label="Toggle object scanning">Start Scanning</button>
       <button onclick="clearMemory()" class="danger" aria-label="Clear all spatial memory">Clear Memory</button>
-      <button onclick="showMobileScanner()" style="background:var(--accent-soft);border-color:rgba(0,188,212,.3);color:var(--accent)" aria-label="Open iPhone 3D scanner">iPhone 3D Scanner</button>
+    </div>
+    <!-- iPhone 3D Scanner button — prominent standalone row -->
+    <div style="padding:8px 16px;border-top:1px solid var(--border)">
+      <button onclick="showMobileScanner()" style="width:100%;padding:10px 16px;background:linear-gradient(135deg,#0e7490,#06b6d4);border:1px solid rgba(6,182,212,.5);color:#fff;font-weight:600;font-size:0.85rem;border-radius:8px;letter-spacing:.02em;box-shadow:0 2px 8px rgba(6,182,212,.25)" aria-label="Open iPhone 3D scanner to generate QR code">&#128241; iPhone 3D Scanner — Generate QR Code</button>
     </div>
     <!-- Mobile scanner QR panel -->
     <div id="mobile-scanner-panel" style="display:none;padding:12px 14px;border-top:1px solid var(--border);background:var(--panel-alt)">

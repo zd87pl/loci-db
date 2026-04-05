@@ -3,6 +3,7 @@
 **A 4D spatiotemporal vector database for AI world models.**
 
 [![CI](https://github.com/zd87pl/loci-db/actions/workflows/ci.yml/badge.svg)](https://github.com/zd87pl/loci-db/actions)
+[![PyPI version](https://img.shields.io/pypi/v/loci-db.svg)](https://pypi.org/project/loci-db/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 

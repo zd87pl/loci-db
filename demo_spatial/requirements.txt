@@ -1,0 +1,24 @@
+# Core web framework
+fastapi[standard]>=0.100.0
+uvicorn[standard]>=0.20.0
+python-multipart>=0.0.6
+
+# Object detection — YOLO
+ultralytics>=8.3.0
+Pillow>=10.0.0
+
+# Cloud AI (VLM + STT + TTS)
+openai>=1.30.0
+
+# Optional: local TTS backends
+# piper-tts>=1.2.0          # local neural TTS (uncomment + download model)
+# edge-tts>=6.1.9            # Microsoft Edge TTS (free cloud)
+
+# Optional: local STT
+# faster-whisper>=1.0.0      # offline Whisper (uncomment for air-gapped deploy)
+
+# Optional: Gemini VLM
+# google-generativeai>=0.5.0
+
+# Optional: server-side webcam capture
+# opencv-python>=4.9.0

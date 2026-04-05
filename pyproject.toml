@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "loci-db"
+name = "loci-stdb"
 version = "0.3.0"
 description = "4D spatiotemporal vector database middleware for AI world models"
 readme = "README.md"

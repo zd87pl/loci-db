@@ -3,7 +3,7 @@
 **A 4D spatiotemporal vector database for AI world models.**
 
 [![CI](https://github.com/zd87pl/loci-db/actions/workflows/ci.yml/badge.svg)](https://github.com/zd87pl/loci-db/actions)
-[![PyPI version](https://img.shields.io/pypi/v/loci-db.svg)](https://pypi.org/project/loci-db/)
+[![PyPI version](https://img.shields.io/pypi/v/loci-stdb.svg)](https://pypi.org/project/loci-stdb/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
@@ -71,7 +71,7 @@ print(f"Novelty: {result.prediction_novelty:.2f}")
 Try LOCI instantly with zero infrastructure using `LocalLociClient`:
 
 ```bash
-pip install loci-db          # or: pip install -e ".[dev]"
+pip install loci-stdb          # or: pip install -e ".[dev]"
 ```
 
 ```python
@@ -102,7 +102,7 @@ results = client.query(
 ### With Qdrant (production)
 
 ```bash
-pip install loci-db
+pip install loci-stdb
 docker run -p 6333:6333 qdrant/qdrant
 ```
 

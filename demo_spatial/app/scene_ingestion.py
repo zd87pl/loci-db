@@ -41,9 +41,10 @@ class Detection:
     height: float       # normalized bbox height
     confidence: float
     source: str = "yolo"   # "yolo" | "vlm"
+    depth_m: float | None = None  # LiDAR depth in meters (None if unavailable)
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "label": self.label,
             "cx": round(self.cx, 3),
             "cy": round(self.cy, 3),
@@ -52,6 +53,9 @@ class Detection:
             "confidence": round(self.confidence, 3),
             "source": self.source,
         }
+        if self.depth_m is not None:
+            result["depth_m"] = round(self.depth_m, 3)
+        return result
 
 
 class SceneIngestion:
@@ -130,11 +134,38 @@ class SceneIngestion:
             logger.error("YOLO inference error: %s", e)
             return []
 
+    @staticmethod
+    def _lookup_depth(
+        cx: float, cy: float, depth_samples: dict[str, float] | None
+    ) -> float | None:
+        """Estimate depth at (cx, cy) by interpolating the nearest LiDAR grid sample.
+
+        The depth_samples dict maps 3x3 grid keys (tl, tc, tr, ml, mc, mr, bl, bc, br)
+        to depth values in meters. We pick the nearest sample to the detection center.
+        """
+        if not depth_samples:
+            return None
+        grid_positions = {
+            "tl": (0.25, 0.25), "tc": (0.5, 0.25), "tr": (0.75, 0.25),
+            "ml": (0.25, 0.5),  "mc": (0.5, 0.5),  "mr": (0.75, 0.5),
+            "bl": (0.25, 0.75), "bc": (0.5, 0.75), "br": (0.75, 0.75),
+        }
+        best_key = None
+        best_dist = float("inf")
+        for key, (gx, gy) in grid_positions.items():
+            if key in depth_samples:
+                dist = (cx - gx) ** 2 + (cy - gy) ** 2
+                if dist < best_dist:
+                    best_dist = dist
+                    best_key = key
+        return depth_samples.get(best_key) if best_key else None
+
     async def process_frame(
         self,
         image_bytes: bytes,
         timestamp_ms: int | None = None,
         use_vlm: bool | None = None,
+        depth_samples: dict[str, float] | None = None,
     ) -> list[Detection]:
         """Process a single camera frame and store detections in LOCI-DB.
 
@@ -142,6 +173,7 @@ class SceneIngestion:
             image_bytes: Raw JPEG/PNG image data.
             timestamp_ms: Override timestamp (defaults to now).
             use_vlm: Override VLM fallback for this frame.
+            depth_samples: Optional LiDAR depth grid from the 3D scanner.
 
         Returns:
             List of all detections (YOLO + optional VLM-enriched).
@@ -179,6 +211,11 @@ class SceneIngestion:
 
         all_detections = yolo_detections + vlm_detections
 
+        # Step 2.5: Assign depth from LiDAR samples to each detection
+        if depth_samples:
+            for det in all_detections:
+                det.depth_m = self._lookup_depth(det.cx, det.cy, depth_samples)
+
         # Step 3: store each detection in spatial memory
         for det in all_detections:
             try:
@@ -188,6 +225,7 @@ class SceneIngestion:
                     cy=det.cy,
                     confidence=det.confidence,
                     timestamp_ms=ts,
+                    depth_m=det.depth_m,
                 )
             except Exception as e:
                 logger.error("Failed to store detection %s: %s", det.label, e)

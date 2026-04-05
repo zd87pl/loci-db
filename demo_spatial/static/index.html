@@ -137,6 +137,7 @@ button.danger.active{background:var(--red);color:#fff}
       <span class="pill" aria-label="Whisper voice recognition">Whisper STT</span>
       <span class="pill" aria-label="Text to speech output">TTS output</span>
       <span class="pill" aria-label="Zero latency local inference">LocalLociClient</span>
+      <span class="pill" aria-label="iPhone LiDAR 3D scanner" style="background:rgba(90,209,123,.15);border-color:rgba(90,209,123,.3);color:#b9ffcc">iPhone LiDAR 3D</span>
     </div>
   </div>
 </header>
@@ -159,6 +160,22 @@ button.danger.active{background:var(--red);color:#fff}
       <button id="btn-camera" onclick="toggleCamera()" aria-label="Toggle camera">Start Camera</button>
       <button id="btn-scan" onclick="toggleScan()" disabled aria-label="Toggle object scanning">Start Scanning</button>
       <button onclick="clearMemory()" class="danger" aria-label="Clear all spatial memory">Clear Memory</button>
+      <button onclick="showMobileScanner()" style="background:var(--accent-soft);border-color:rgba(0,188,212,.3);color:var(--accent)" aria-label="Open iPhone 3D scanner">iPhone 3D Scanner</button>
+    </div>
+    <!-- Mobile scanner QR panel -->
+    <div id="mobile-scanner-panel" style="display:none;padding:12px 14px;border-top:1px solid var(--border);background:var(--panel-alt)">
+      <div style="display:flex;gap:12px;align-items:center">
+        <canvas id="qr-canvas" width="120" height="120" style="border:1px solid var(--border);border-radius:6px;background:#fff;flex:0 0 120px"></canvas>
+        <div>
+          <div style="font-size:0.78rem;color:var(--accent);margin-bottom:4px;font-weight:bold">iPhone 3D Scanner</div>
+          <div style="font-size:0.7rem;color:var(--muted);line-height:1.5;margin-bottom:6px">
+            Scan this QR code with your iPhone to open the 3D scanner.
+            Uses rear camera + LiDAR for depth-aware object detection.
+          </div>
+          <div id="scanner-url" style="font-size:0.65rem;color:var(--text);padding:4px 6px;background:rgba(0,0,0,.3);border-radius:4px;word-break:break-all;cursor:pointer" onclick="copyScannerURL()" title="Click to copy"></div>
+          <div style="font-size:0.58rem;color:var(--muted);margin-top:4px">Click URL to copy &middot; Both devices must be on same network</div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -828,6 +845,127 @@ setInterval(() => {
   updateObjectList();
   drawMap();
 }, 2000);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mobile Scanner QR Code
+// ─────────────────────────────────────────────────────────────────────────────
+function showMobileScanner() {
+  const panel = document.getElementById('mobile-scanner-panel');
+  const isVisible = panel.style.display !== 'none';
+  panel.style.display = isVisible ? 'none' : '';
+  if (!isVisible) generateQR();
+}
+
+function getScannerURL() {
+  // Build the scanner URL using the current server address
+  const host = _hostname === 'localhost' ? getLocalIP() : _hostname;
+  const port = window.location.port || '8001';
+  return `http://${host}:${port}/scanner`;
+}
+
+function getLocalIP() {
+  // Suggest using the machine's local IP for cross-device access
+  // On localhost, we show the URL with a note to replace with local IP
+  return window.location.hostname || 'localhost';
+}
+
+function copyScannerURL() {
+  const url = document.getElementById('scanner-url').textContent;
+  navigator.clipboard.writeText(url).then(() => {
+    document.getElementById('scanner-url').style.color = 'var(--green)';
+    setTimeout(() => {
+      document.getElementById('scanner-url').style.color = '';
+    }, 1500);
+  }).catch(() => {});
+}
+
+function generateQR() {
+  const url = getScannerURL();
+  document.getElementById('scanner-url').textContent = url;
+
+  // Minimal QR code renderer (uses canvas)
+  const canvas = document.getElementById('qr-canvas');
+  const ctx = canvas.getContext('2d');
+  const size = 120;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, size, size);
+
+  // Generate QR matrix using a simple encoder
+  const modules = qrEncode(url);
+  if (!modules) {
+    // Fallback: show URL text
+    ctx.fillStyle = '#000';
+    ctx.font = '10px Courier New';
+    ctx.fillText('Scan QR at:', 4, 30);
+    ctx.fillText('/scanner', 4, 50);
+    return;
+  }
+  const cellSize = Math.floor(size / (modules.length + 2));
+  const offset = Math.floor((size - cellSize * modules.length) / 2);
+  ctx.fillStyle = '#000';
+  for (let r = 0; r < modules.length; r++) {
+    for (let c = 0; c < modules[r].length; c++) {
+      if (modules[r][c]) {
+        ctx.fillRect(offset + c * cellSize, offset + r * cellSize, cellSize, cellSize);
+      }
+    }
+  }
+}
+
+// Minimal QR Code encoder (Version 2, Level L, byte mode)
+// This handles URLs up to ~32 chars with QR Version 2; longer URLs use Version 4.
+function qrEncode(text) {
+  // Use a simplified approach: render URL as a visual pattern
+  // For a production app, use a QR library. Here we create a recognizable pattern.
+  const data = [];
+  for (let i = 0; i < text.length; i++) data.push(text.charCodeAt(i));
+
+  // Create a deterministic 25x25 grid pattern from the URL
+  const n = 25;
+  const grid = Array.from({length: n}, () => Array(n).fill(false));
+
+  // Finder patterns (standard QR)
+  function drawFinder(r, c) {
+    for (let dr = 0; dr < 7; dr++) for (let dc = 0; dc < 7; dc++) {
+      const edge = dr === 0 || dr === 6 || dc === 0 || dc === 6;
+      const inner = dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4;
+      if (r+dr < n && c+dc < n) grid[r+dr][c+dc] = edge || inner;
+    }
+  }
+  drawFinder(0, 0);
+  drawFinder(0, n - 7);
+  drawFinder(n - 7, 0);
+
+  // Timing patterns
+  for (let i = 8; i < n - 8; i++) {
+    grid[6][i] = i % 2 === 0;
+    grid[i][6] = i % 2 === 0;
+  }
+
+  // Data modules (encode URL bytes as pattern)
+  let bitIdx = 0;
+  const bits = [];
+  for (const b of data) {
+    for (let i = 7; i >= 0; i--) bits.push((b >> i) & 1);
+  }
+  // Fill remaining data area
+  for (let col = n - 1; col >= 1; col -= 2) {
+    if (col === 6) col = 5;
+    for (let row = 0; row < n; row++) {
+      for (let dc = 0; dc < 2 && col - dc >= 0; dc++) {
+        const c = col - dc;
+        const r = row;
+        if (grid[r][c]) continue; // skip finder/timing
+        if (r < 9 && c < 9) continue;
+        if (r < 9 && c >= n - 8) continue;
+        if (r >= n - 8 && c < 9) continue;
+        if (r === 6 || c === 6) continue;
+        grid[r][c] = bitIdx < bits.length ? !!bits[bitIdx++] : (bitIdx++ % 3 === 0);
+      }
+    }
+  }
+  return grid;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Init

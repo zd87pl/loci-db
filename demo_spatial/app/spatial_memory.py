@@ -87,13 +87,14 @@ class ObjectObservation:
     confidence: float
     timestamp_ms: int
     state_id: str
+    depth_m: float | None = None   # LiDAR depth in meters (None if 2D only)
 
     @property
     def age_seconds(self) -> float:
         return (int(time.time() * 1000) - self.timestamp_ms) / 1000.0
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "label": self.label,
             "cx": round(self.cx, 3),
             "cy": round(self.cy, 3),
@@ -102,6 +103,9 @@ class ObjectObservation:
             "age_seconds": round(self.age_seconds, 1),
             "state_id": self.state_id,
         }
+        if self.depth_m is not None:
+            result["depth_m"] = round(self.depth_m, 3)
+        return result
 
 
 class SpatialMemory:
@@ -134,6 +138,7 @@ class SpatialMemory:
         cy: float,
         confidence: float = 1.0,
         timestamp_ms: int | None = None,
+        depth_m: float | None = None,
     ) -> str:
         """Record an object sighting in spatial memory. Returns the state_id."""
         ts = timestamp_ms if timestamp_ms is not None else int(time.time() * 1000)
@@ -142,11 +147,14 @@ class SpatialMemory:
         cy = max(0.0, min(1.0, cy))
         confidence = max(0.0, min(1.0, confidence))
 
+        # Normalize depth to [0, 1] range (0m = 0.0, 5m+ = 1.0)
+        z_normalized = min(depth_m / 5.0, 1.0) if depth_m is not None else 0.0
+
         vector = _object_embedding(label, cx, cy)
         state = WorldState(
             x=cx,
             y=cy,
-            z=0.0,
+            z=z_normalized,
             timestamp_ms=ts,
             vector=vector,
             scene_id=label.strip().lower(),  # scene_id groups observations by object
@@ -156,6 +164,7 @@ class SpatialMemory:
         obs = ObjectObservation(
             label=label, cx=cx, cy=cy,
             confidence=confidence, timestamp_ms=ts, state_id=state_id,
+            depth_m=depth_m,
         )
         self._latest[label.strip().lower()] = obs
         self._observation_count += 1

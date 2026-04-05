@@ -96,6 +96,15 @@ async def index():
     return {"message": "LOCI Spatial Memory Assistant API", "docs": "/docs"}
 
 
+@app.get("/scanner")
+async def scanner():
+    """Mobile-optimized 3D scanner page for iPhone (camera + LiDAR)."""
+    scanner_path = os.path.join(_static_dir, "scanner.html")
+    if os.path.exists(scanner_path):
+        return FileResponse(scanner_path)
+    return {"error": "scanner.html not found"}
+
+
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
@@ -113,6 +122,17 @@ class TextQueryRequest(BaseModel):
 class CaptureStartRequest(BaseModel):
     camera_index: int = Field(0, description="Camera device index")
     fps: float = Field(2.0, description="Capture rate in frames per second", ge=0.1, le=30.0)
+
+
+class Frame3DRequest(BaseModel):
+    image_b64: str = Field(..., description="Base64-encoded JPEG/PNG frame (data URI or raw)")
+    timestamp_ms: int | None = Field(None, description="Override frame timestamp")
+    use_vlm: bool | None = Field(None, description="Force VLM usage for this frame")
+    has_lidar: bool = Field(False, description="Whether LiDAR depth data is available")
+    depth_samples: dict[str, float] | None = Field(
+        None,
+        description="Depth samples from LiDAR at grid positions (e.g. 'mc': 1.23 meters)",
+    )
 
 
 class RegionQueryRequest(BaseModel):
@@ -160,6 +180,39 @@ async def ingest_frame(req: FrameRequest):
         "detections": [d.to_dict() for d in detections],
         "frame_count": ingestion.frame_count,
         "observation_count": memory.observation_count,
+    }
+    # Broadcast to WebSocket subscribers
+    if _ws_subscribers:
+        msg = json.dumps({"type": "detections", **result})
+        dead = set()
+        for ws in list(_ws_subscribers):
+            try:
+                await ws.send_text(msg)
+            except Exception:
+                dead.add(ws)
+        _ws_subscribers.difference_update(dead)
+    return result
+
+
+@app.post("/api/ingest/frame3d")
+async def ingest_frame_3d(req: Frame3DRequest):
+    """Submit a camera frame with optional LiDAR depth data for 3D spatial indexing.
+
+    Used by the mobile scanner (/scanner) to send frames from iPhone camera + LiDAR.
+    Depth samples are a dict mapping grid positions (tl, tc, tr, ml, mc, mr, bl, bc, br)
+    to depth values in meters. Each detection is matched to the nearest depth sample.
+    """
+    detections = await ingestion.process_frame_b64(
+        req.image_b64,
+        timestamp_ms=req.timestamp_ms,
+        use_vlm=req.use_vlm,
+        depth_samples=req.depth_samples if req.has_lidar else None,
+    )
+    result = {
+        "detections": [d.to_dict() for d in detections],
+        "frame_count": ingestion.frame_count,
+        "observation_count": memory.observation_count,
+        "has_lidar": req.has_lidar,
     }
     # Broadcast to WebSocket subscribers
     if _ws_subscribers:

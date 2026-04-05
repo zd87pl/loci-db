@@ -17,6 +17,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PORT="${PORT:-8001}"
+
+# Performance defaults: local STT + TTS avoids cloud round-trips (~600 ms vs 7-10 s)
+export WHISPER_LOCAL="${WHISPER_LOCAL:-1}"
+export WHISPER_LOCAL_MODEL="${WHISPER_LOCAL_MODEL:-tiny}"
+export TTS_ENGINE="${TTS_ENGINE:-edge}"
 CERTS_DIR="$SCRIPT_DIR/.certs"
 
 # ── Generate self-signed SSL cert (needed for iPhone camera access) ──
@@ -46,9 +51,13 @@ echo "   2. Click the teal 'iPhone 3D Scanner' button → scan QR with iPhone"
 echo "   3. On iPhone: tap 'Advanced' → 'Accept Risk' for the self-signed cert"
 echo ""
 
+echo "STT:  ${WHISPER_LOCAL:+local faster-whisper (${WHISPER_LOCAL_MODEL})}${WHISPER_LOCAL:-cloud Whisper API}"
+echo "TTS:  ${TTS_ENGINE}"
+echo ""
+
 if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-  echo "⚠  OPENAI_API_KEY not set — VLM, STT and OpenAI TTS will be disabled."
-  echo "   Voice queries will use rule-based responses only."
+  echo "⚠  OPENAI_API_KEY not set — VLM scene analysis will be disabled."
+  echo "   Voice queries use rule-based responses (fast, no API key needed)."
   echo ""
 fi
 

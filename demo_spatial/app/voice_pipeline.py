@@ -516,30 +516,7 @@ class VoicePipeline:
         )
 
     async def _generate_answer(self, intent: QueryIntent) -> str:
-        """Query LOCI-DB and optionally use VLM to compose a natural answer."""
-        # Get candidate objects from spatial memory
-        if intent.kind in ("where_is", "history") and intent.object_name:
-            objects = self._memory.where_is(intent.object_name, limit=3)
-            objects_data = [o.to_dict() for o in objects]
-        elif intent.kind == "list_objects":
-            objects_data = [o.to_dict() for o in self._memory.current_objects()]
-        elif intent.kind == "changes":
-            objects_data = [o.to_dict() for o in self._memory.recent_changes(60)]
-        else:
-            objects_data = []
-
-        # Use VLM for natural language composition if available and objects found
-        if self._vlm and self._vlm.is_available and objects_data:
-            try:
-                vlm_answer = await self._vlm.answer_location_question(
-                    intent.raw_text, objects_data
-                )
-                if vlm_answer:
-                    return vlm_answer
-            except Exception as e:
-                logger.warning("VLM answer generation failed: %s", e)
-
-        # Fallback: rule-based answer
+        """Query LOCI-DB and build a rule-based answer. Fast path: no LLM call."""
         return build_response_text(intent, self._memory)
 
     @property

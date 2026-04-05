@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from loci import LocalLociClient, WorldState
+from loci.temporal.sharding import collection_name, epoch_id
 
 from .embeddings import EMBEDDING_DIM, generate_embedding
 
@@ -389,9 +390,11 @@ class Simulation:
 
         # Insert into LOCI
         timestamp_ms = self.start_time_ms + self.elapsed_ms
+        nx = self.robot_x / (GRID_W - 1)
+        ny = self.robot_y / (GRID_H - 1)
         state = WorldState(
-            x=self.robot_x / (GRID_W - 1),
-            y=self.robot_y / (GRID_H - 1),
+            x=nx,
+            y=ny,
             z=0.5,
             timestamp_ms=timestamp_ms,
             vector=embedding,
@@ -399,6 +402,42 @@ class Simulation:
             scale_level="patch",
         )
         state_id = self.client.insert(state)
+
+        # Build inference log entries for the UI
+        ep = epoch_id(timestamp_ms, self.client._epoch_size_ms)
+        col = collection_name(ep)
+        t_norm = self.client._normalise_time(timestamp_ms, ep)
+        hilbert_ids = self.client._hilbert.encode(nx, ny, 0.5, t_norm)
+        hilbert_summary = ", ".join(
+            f"r{k.split('_r')[1]}={v}" for k, v in sorted(hilbert_ids.items())
+        )
+        inference_log = [
+            {
+                "ts": timestamp_ms,
+                "tag": "EMBED",
+                "msg": (
+                    f"128-d vector from pos ({self.robot_x},{self.robot_y})"
+                    f" + {len(visible_keys)} visible obj"
+                ),
+            },
+            {
+                "ts": timestamp_ms,
+                "tag": "HILBERT",
+                "msg": (
+                    f"4D→1D  ({nx:.2f}, {ny:.2f}, 0.50, {t_norm:.2f})"
+                    f" → {hilbert_summary}"
+                ),
+            },
+            {
+                "ts": timestamp_ms,
+                "tag": "STORE",
+                "msg": (
+                    f"Shard {col} (epoch {ep})"
+                    f" | id={state_id[:8]}…"
+                    f" | total={self.memory_count}"
+                ),
+            },
+        ]
 
         # Track recent history for prediction
         self.recent_embeddings.append(embedding)
@@ -425,6 +464,7 @@ class Simulation:
             "timestamp_ms": timestamp_ms,
             "route": route_status,
             "demo": self.get_demo_status(),
+            "inference_log": inference_log,
         }
 
         # Broadcast to WebSocket subscribers

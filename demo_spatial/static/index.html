@@ -964,7 +964,8 @@ async function getScannerURL() {
   }
   const host = _cachedLocalIP;
   const port = window.location.port || '8001';
-  return `http://${host}:${port}/scanner`;
+  const proto = window.location.protocol === 'https:' ? 'https' : 'http';
+  return `${proto}://${host}:${port}/scanner`;
 }
 
 async function openScannerModal() {

@@ -179,8 +179,31 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
     </button>
     <div class="ctrl-row">
       <button class="ctrl-btn" id="btn-flip" onclick="flipCamera()">Flip</button>
-      <button class="ctrl-btn" id="btn-ar" onclick="toggleAR()">AR</button>
+      <button class="ctrl-btn" id="btn-lidar" onclick="toggleLiDARGuide()">LiDAR ℹ</button>
     </div>
+  </div>
+</div>
+
+<!-- LiDAR Depth Guide panel -->
+<div id="lidar-guide" style="display:none;position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.75);backdrop-filter:blur(6px);padding:32px 20px;overflow-y:auto" onclick="if(event.target===this)toggleLiDARGuide()">
+  <div style="max-width:400px;margin:0 auto;background:#0a0e18;border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:24px">
+    <h2 style="font-size:1rem;margin-bottom:4px;color:#e0e0e0">📡 Real LiDAR Depth</h2>
+    <p style="font-size:0.78rem;color:#7a8899;margin-bottom:16px">iOS Safari cannot expose LiDAR to web pages (Apple restriction). Here are your options:</p>
+    <div style="font-size:0.82rem;line-height:1.7;color:#e0e0e0">
+      <div style="padding:12px;border:1px solid rgba(0,188,212,.3);border-radius:10px;background:rgba(0,188,212,.08);margin-bottom:10px">
+        <strong style="color:#00bcd4">Option A — Free (Best)</strong><br>
+        1. Install <strong>Scaniverse</strong> (free)<br>
+        2. Scan your room<br>
+        3. Export → <strong>PLY</strong><br>
+        4. AirDrop to Mac → upload on the dashboard<br>
+        <span style="color:#7a8899;font-size:0.74rem">→ Full 3D point cloud on the map</span>
+      </div>
+      <div style="padding:12px;border:1px solid rgba(255,255,255,.08);border-radius:10px;margin-bottom:10px">
+        <strong>Option B — This scanner (active now)</strong><br>
+        Detects objects + relative positions. No depth in meters, but works instantly.
+      </div>
+    </div>
+    <button onclick="toggleLiDARGuide()" style="margin-top:16px;width:100%;padding:10px;background:#00bcd4;border:none;border-radius:8px;color:#000;font-weight:700;cursor:pointer">Got it</button>
   </div>
 </div>
 
@@ -695,6 +718,11 @@ function toggle3DOverlay() {
   show3D = !show3D;
   document.getElementById('three-layer').style.display = show3D ? '' : 'none';
   document.getElementById('btn-3d').classList.toggle('active', show3D);
+}
+
+function toggleLiDARGuide() {
+  const el = document.getElementById('lidar-guide');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
 function toggleVoice() {

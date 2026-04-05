@@ -25,7 +25,9 @@ import io
 import json
 import logging
 import os
+import random
 import socket
+import struct
 from contextlib import asynccontextmanager
 
 import segno
@@ -53,6 +55,9 @@ ingestion = SceneIngestion(memory, vlm_client=vlm_client, use_vlm_fallback=True)
 voice = VoicePipeline(memory, vlm_client=vlm_client)
 
 _ws_subscribers: set[WebSocket] = set()
+
+# In-memory store for the latest uploaded LiDAR point cloud
+_point_cloud: dict = {"points": [], "count": 0, "filename": None}
 
 
 @asynccontextmanager
@@ -479,6 +484,187 @@ async def stats():
         "ingestion": ingestion.status(),
         "voice": voice.status(),
         "ws_subscribers": len(_ws_subscribers),
+    }
+
+
+# ---------------------------------------------------------------------------
+# LiDAR point cloud upload (from Scaniverse / Polycam / 3D Scanner App)
+# ---------------------------------------------------------------------------
+
+def _parse_ply(data: bytes) -> list[dict]:
+    """Parse a PLY file (ASCII or binary little-endian) and return point list.
+
+    Each point dict has: x, y, z (float) and optionally r, g, b (0-255 int).
+    Returns an empty list on any parse failure.
+    """
+    try:
+        # Split header from data
+        if b"end_header" not in data:
+            return []
+        header_raw, body = data.split(b"end_header\n", 1)
+        header = header_raw.decode("utf-8", errors="replace")
+
+        lines = header.splitlines()
+        fmt = "ascii"
+        vertex_count = 0
+        props: list[tuple[str, str]] = []  # (name, type)
+        in_vertex = False
+
+        for line in lines:
+            line = line.strip()
+            if line.startswith("format"):
+                parts = line.split()
+                if "binary_little_endian" in line:
+                    fmt = "binary_le"
+                elif "binary_big_endian" in line:
+                    fmt = "binary_be"
+            elif line.startswith("element vertex"):
+                vertex_count = int(line.split()[-1])
+                in_vertex = True
+            elif line.startswith("element") and not line.startswith("element vertex"):
+                in_vertex = False
+            elif line.startswith("property") and in_vertex:
+                parts = line.split()
+                if len(parts) >= 3:
+                    props.append((parts[-1], parts[1]))  # (name, type)
+
+        if vertex_count == 0 or not props:
+            return []
+
+        # Determine field indices
+        prop_names = [p[0] for p in props]
+        prop_types = [p[1] for p in props]
+
+        def _idx(candidates):
+            for c in candidates:
+                if c in prop_names:
+                    return prop_names.index(c)
+            return -1
+
+        ix = _idx(["x"])
+        iy = _idx(["y"])
+        iz = _idx(["z"])
+        if ix < 0 or iy < 0 or iz < 0:
+            return []
+
+        ir = _idx(["red", "r", "diffuse_red"])
+        ig = _idx(["green", "g", "diffuse_green"])
+        ib = _idx(["blue", "b", "diffuse_blue"])
+
+        points: list[dict] = []
+
+        if fmt == "ascii":
+            text_lines = body.decode("utf-8", errors="replace").splitlines()
+            for i, tl in enumerate(text_lines):
+                if i >= vertex_count:
+                    break
+                vals = tl.strip().split()
+                if len(vals) < max(ix, iy, iz) + 1:
+                    continue
+                pt: dict = {
+                    "x": float(vals[ix]),
+                    "y": float(vals[iy]),
+                    "z": float(vals[iz]),
+                }
+                if ir >= 0 and len(vals) > ir:
+                    pt["r"] = int(float(vals[ir]))
+                    pt["g"] = int(float(vals[ig]))
+                    pt["b"] = int(float(vals[ib]))
+                points.append(pt)
+
+        else:  # binary
+            _TYPE_FMT = {
+                "float": "f", "float32": "f",
+                "double": "d", "float64": "d",
+                "int": "i", "int32": "i",
+                "uint": "I", "uint32": "I",
+                "short": "h", "int16": "h",
+                "ushort": "H", "uint16": "H",
+                "char": "b", "int8": "b",
+                "uchar": "B", "uint8": "B",
+            }
+            endian = "<" if fmt == "binary_le" else ">"
+            row_fmt = endian + "".join(_TYPE_FMT.get(t, "f") for _, t in props)
+            row_size = struct.calcsize(row_fmt)
+            for i in range(vertex_count):
+                offset = i * row_size
+                if offset + row_size > len(body):
+                    break
+                vals = struct.unpack_from(row_fmt, body, offset)
+                pt: dict = {
+                    "x": float(vals[ix]),
+                    "y": float(vals[iy]),
+                    "z": float(vals[iz]),
+                }
+                if ir >= 0:
+                    pt["r"] = int(vals[ir]) & 0xFF
+                    pt["g"] = int(vals[ig]) & 0xFF
+                    pt["b"] = int(vals[ib]) & 0xFF
+                points.append(pt)
+
+        return points
+
+    except Exception as exc:
+        logger.warning("PLY parse error: %s", exc)
+        return []
+
+
+@app.post("/api/ingest/pointcloud")
+async def upload_pointcloud(file: UploadFile):
+    """Upload a LiDAR point cloud (PLY format) from Scaniverse, Polycam, or 3D Scanner App.
+
+    The point cloud is stored in memory and exposed via GET /api/pointcloud/latest
+    for real-time Three.js visualization on the dashboard.
+
+    Supported exports:
+      - Scaniverse (free): Share → Export → PLY
+      - Polycam (free tier): Export → Point Cloud → PLY
+      - 3D Scanner App (free): Export → Point Cloud (PLY)
+    """
+    global _point_cloud
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    # Parse PLY
+    points = await asyncio.get_event_loop().run_in_executor(None, _parse_ply, data)
+    if not points:
+        raise HTTPException(
+            status_code=422,
+            detail="Could not parse PLY file. Make sure to export as PLY from your scanning app.",
+        )
+
+    _point_cloud = {
+        "points": points,
+        "count": len(points),
+        "filename": file.filename or "scan.ply",
+    }
+    logger.info("Point cloud uploaded: %d points from %s", len(points), file.filename)
+    return {
+        "count": len(points),
+        "filename": file.filename,
+        "has_color": "r" in points[0] if points else False,
+    }
+
+
+@app.get("/api/pointcloud/latest")
+async def get_pointcloud(max_points: int = Query(5000, ge=100, le=50000)):
+    """Return the latest uploaded point cloud (downsampled for web visualization).
+
+    Returns up to max_points points (default 5000) randomly sampled from the full cloud.
+    Each point: { x, y, z } and optionally { r, g, b } (0-255).
+    """
+    pts = _point_cloud["points"]
+    if not pts:
+        return {"count": 0, "points": [], "filename": None}
+    # Random downsample for web
+    sample = random.sample(pts, min(max_points, len(pts))) if len(pts) > max_points else pts
+    return {
+        "count": _point_cloud["count"],
+        "sampled": len(sample),
+        "filename": _point_cloud["filename"],
+        "has_color": "r" in pts[0] if pts else False,
+        "points": sample,
     }
 
 

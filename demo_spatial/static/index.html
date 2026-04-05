@@ -7,114 +7,124 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
-  --bg:#0f0f1a;--panel:#171a27;--panel-alt:#1b2237;--border:#2a2a3e;
-  --text:#e0e0e0;--muted:#95a0b8;--accent:#00bcd4;--accent-soft:#113a45;
-  --red:#ff5757;--green:#5ad17b;--yellow:#ffc857;--blue:#4a6fa5;
-  --font:'Courier New',monospace;
+  --bg:#f4f6fa;--panel:#ffffff;--panel-alt:#f9fafb;--border:#e0e4ed;
+  --text:#1e2330;--muted:#5f6b7a;--accent:#0891b2;--accent-soft:#e0f7fa;
+  --red:#ef4444;--green:#16a34a;--yellow:#ca8a04;--blue:#3b82f6;
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+  --shadow-sm:0 1px 3px rgba(0,0,0,.08);
+  --shadow-md:0 4px 12px rgba(0,0,0,.1);
 }
-body{font-family:var(--font);background:radial-gradient(circle at top,#171b2b 0%,#0f0f1a 45%,#090911 100%);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
-h1{font-size:1.4rem;color:var(--accent)}
-h2{font-size:0.9rem;color:var(--text);margin-bottom:6px}
-h3{font-size:0.78rem;color:var(--muted)}
-button{background:var(--border);color:var(--text);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer;font-family:var(--font);font-size:0.8rem;transition:all .15s}
-button:hover{background:#3a3a4e}
+body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
+h1{font-size:1.35rem;font-weight:700;color:var(--text)}
+h2{font-size:0.92rem;font-weight:600;color:var(--text);margin-bottom:6px}
+h3{font-size:0.82rem;font-weight:600;color:var(--muted)}
+button{background:var(--panel);color:var(--text);border:1px solid var(--border);padding:7px 16px;border-radius:8px;cursor:pointer;font-family:var(--font);font-size:0.82rem;font-weight:500;transition:all .15s;box-shadow:var(--shadow-sm)}
+button:hover{background:#f0f2f5;border-color:#cdd3de}
 button:disabled{opacity:.4;cursor:not-allowed}
-button.active{background:var(--accent);color:#000;border-color:var(--accent)}
+button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 button.danger{border-color:var(--red);color:var(--red)}
+button.danger:hover{background:#fef2f2}
 button.danger.active{background:var(--red);color:#fff}
 
 /* Layout */
-.header{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;justify-content:space-between;gap:16px;background:linear-gradient(180deg,rgba(16,20,32,.95),rgba(15,15,26,.82))}
+.header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;justify-content:space-between;gap:20px;background:var(--panel);box-shadow:var(--shadow-sm)}
 .brand{display:grid;gap:4px}
-.kicker{font-size:0.64rem;letter-spacing:.18em;text-transform:uppercase;color:var(--accent)}
-.subtitle{color:var(--muted);font-size:0.8rem}
-.narrative{max-width:680px;font-size:0.82rem;line-height:1.55;color:var(--text)}
-.pill-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
-.pill{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:999px;background:rgba(17,58,69,.55);border:1px solid rgba(0,188,212,.25);font-size:0.68rem;color:#b9f7ff}
+.kicker{font-size:0.7rem;letter-spacing:.15em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.subtitle{color:var(--muted);font-size:0.85rem}
+.narrative{max-width:680px;font-size:0.88rem;line-height:1.6;color:var(--muted)}
+.pill-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.pill{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;background:var(--accent-soft);border:1px solid rgba(8,145,178,.2);font-size:0.72rem;color:var(--accent);font-weight:500}
 
 .main{display:flex;flex:1;gap:0;overflow:hidden}
 
 /* Camera panel */
-.cam-panel{flex:0 0 420px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--panel)}
-.panel-header{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;justify-content:space-between}
-.panel-title{font-size:0.78rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent)}
-.cam-wrap{position:relative;aspect-ratio:4/3;background:#000;overflow:hidden}
+.cam-panel{flex:0 0 400px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--panel)}
+.panel-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;justify-content:space-between}
+.panel-title{font-size:0.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.cam-wrap{position:relative;aspect-ratio:4/3;background:#1a1a2e;overflow:hidden}
 .cam-wrap video{width:100%;height:100%;object-fit:cover;display:block}
 .cam-wrap canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
-.cam-status{padding:8px 14px;font-size:0.72rem;color:var(--muted);border-top:1px solid var(--border)}
-.cam-controls{padding:10px 14px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap}
+.cam-status{padding:10px 16px;font-size:0.8rem;color:var(--muted);border-top:1px solid var(--border);background:var(--panel-alt)}
+.cam-controls{padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap}
 
 /* Map panel */
-.map-panel{flex:1;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--panel)}
-.map-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:16px;position:relative}
-#map-canvas{border:1px solid var(--border);border-radius:8px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
-.map-legend{position:absolute;top:24px;right:24px;padding:10px 12px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(11,15,25,.84);backdrop-filter:blur(8px);font-size:0.7rem;min-width:120px}
-.legend-item{display:flex;align-items:center;gap:6px;margin:4px 0;color:var(--muted)}
+.map-panel{flex:1;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--panel-alt)}
+.map-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:20px;position:relative}
+#map-canvas{border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow-md);background:#fff}
+.map-legend{position:absolute;top:28px;right:28px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.95);backdrop-filter:blur(8px);font-size:0.76rem;min-width:130px;box-shadow:var(--shadow-sm)}
+.legend-item{display:flex;align-items:center;gap:8px;margin:5px 0;color:var(--muted)}
 .legend-dot{width:10px;height:10px;border-radius:50%;flex:0 0 10px}
 
 /* Voice + sidebar */
-.sidebar{width:340px;min-width:340px;border-left:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;background:rgba(12,15,24,.92)}
+.sidebar{width:360px;min-width:360px;display:flex;flex-direction:column;overflow-y:auto;background:var(--panel);border-left:1px solid var(--border)}
 
 /* Voice card */
-.voice-card{padding:14px;border-bottom:1px solid var(--border)}
-.mic-btn{width:64px;height:64px;border-radius:50%;border:2px solid var(--accent);background:var(--accent-soft);color:var(--accent);font-size:1.6rem;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;margin:8px auto}
-.mic-btn:hover{background:rgba(0,188,212,.2)}
+.voice-card{padding:16px;border-bottom:1px solid var(--border)}
+.mic-btn{width:64px;height:64px;border-radius:50%;border:2px solid var(--accent);background:var(--accent-soft);color:var(--accent);font-size:1.6rem;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;margin:8px auto;box-shadow:var(--shadow-sm)}
+.mic-btn:hover{background:rgba(8,145,178,.15);box-shadow:0 2px 8px rgba(8,145,178,.25)}
 .mic-btn.recording{background:var(--red);border-color:var(--red);color:#fff;animation:pulse 1s infinite}
-@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,87,87,.4)}50%{box-shadow:0 0 0 10px rgba(255,87,87,0)}}
-.waveform{height:40px;background:rgba(0,0,0,.3);border-radius:6px;border:1px solid var(--border);margin:8px 0;overflow:hidden;position:relative}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.4)}50%{box-shadow:0 0 0 12px rgba(239,68,68,0)}}
+.waveform{height:44px;background:var(--panel-alt);border-radius:8px;border:1px solid var(--border);margin:8px 0;overflow:hidden;position:relative}
 #waveform-canvas{width:100%;height:100%}
-.transcript-box{background:rgba(0,0,0,.25);border:1px solid var(--border);border-radius:6px;padding:8px;min-height:36px;font-size:0.78rem;color:var(--muted);margin:6px 0;line-height:1.45}
-.answer-box{background:rgba(17,58,69,.35);border:1px solid rgba(0,188,212,.2);border-radius:6px;padding:8px;min-height:36px;font-size:0.82rem;color:var(--text);margin:6px 0;line-height:1.5}
-.latency-row{font-size:0.68rem;color:var(--muted);text-align:right}
+.transcript-box{background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;padding:10px 12px;min-height:40px;font-size:0.85rem;color:var(--muted);margin:6px 0;line-height:1.5}
+.answer-box{background:var(--accent-soft);border:1px solid rgba(8,145,178,.2);border-radius:8px;padding:10px 12px;min-height:40px;font-size:0.88rem;color:var(--text);margin:6px 0;line-height:1.55;font-weight:500}
+.latency-row{font-size:0.74rem;color:var(--muted);text-align:right}
 
 /* Text query */
-.text-query{padding:0 14px 10px;border-bottom:1px solid var(--border)}
-.text-query input{width:100%;padding:7px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--font);font-size:0.8rem;outline:none}
-.text-query input:focus{border-color:var(--accent)}
+.text-query{padding:0 16px 12px;border-bottom:1px solid var(--border)}
+.text-query input{width:100%;padding:9px 12px;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--font);font-size:0.85rem;outline:none;transition:border-color .15s}
+.text-query input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(8,145,178,.1)}
 
 /* Object list */
-.obj-list{padding:10px 14px;border-bottom:1px solid var(--border)}
-.obj-item{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:6px;margin:3px 0;background:rgba(0,0,0,.18);cursor:pointer;transition:background .15s;font-size:0.75rem}
-.obj-item:hover{background:rgba(0,188,212,.07)}
-.obj-item.selected{background:rgba(0,188,212,.12);border:1px solid rgba(0,188,212,.2)}
-.obj-dot{width:8px;height:8px;border-radius:50%;flex:0 0 8px;background:var(--accent)}
-.obj-label{flex:1;color:var(--text)}
-.obj-age{color:var(--muted);font-size:0.68rem}
-.obj-pos{color:var(--muted);font-size:0.68rem}
+.obj-list{padding:12px 16px;border-bottom:1px solid var(--border)}
+.obj-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;margin:4px 0;background:var(--panel-alt);cursor:pointer;transition:all .15s;font-size:0.82rem;border:1px solid transparent}
+.obj-item:hover{background:#eef1f6;border-color:var(--border)}
+.obj-item.selected{background:var(--accent-soft);border:1px solid rgba(8,145,178,.3)}
+.obj-dot{width:10px;height:10px;border-radius:50%;flex:0 0 10px;background:var(--accent)}
+.obj-label{flex:1;color:var(--text);font-weight:500}
+.obj-age{color:var(--muted);font-size:0.74rem}
+.obj-pos{color:var(--muted);font-size:0.74rem}
 
 /* History timeline */
-.history-panel{padding:10px 14px;flex:1}
-.timeline-item{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:0.72rem}
-.timeline-dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:0 0 6px;margin-top:5px}
-.timeline-info{color:var(--muted);line-height:1.4}
-.timeline-label{color:var(--text);margin-right:4px}
+.history-panel{padding:12px 16px;flex:1}
+.timeline-item{display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);font-size:0.8rem}
+.timeline-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:0 0 8px;margin-top:5px}
+.timeline-info{color:var(--muted);line-height:1.5}
+.timeline-label{color:var(--text);font-weight:500;margin-right:4px}
 
 /* Status bar */
-.status-bar{padding:6px 14px;border-top:1px solid var(--border);display:flex;align-items:center;gap:12px;font-size:0.68rem;color:var(--muted);background:rgba(9,13,20,.6)}
-.status-dot{width:6px;height:6px;border-radius:50%;background:#555}
+.status-bar{padding:8px 16px;border-top:1px solid var(--border);display:flex;align-items:center;gap:14px;font-size:0.74rem;color:var(--muted);background:var(--panel)}
+.status-dot{width:7px;height:7px;border-radius:50%;background:#bbb}
 .status-dot.ok{background:var(--green)}
 .status-dot.err{background:var(--red)}
 .status-dot.warn{background:var(--yellow)}
 
 /* Demo guide overlay */
-.guide-overlay{position:absolute;left:16px;top:16px;max-width:280px;padding:12px;border:1px solid rgba(255,255,255,.08);border-radius:10px;background:rgba(11,15,25,.88);backdrop-filter:blur(8px);z-index:5;font-size:0.75rem}
-.guide-step{font-size:0.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:4px}
-.guide-title{color:var(--text);margin-bottom:6px;font-size:0.84rem}
-.guide-body{color:var(--muted);line-height:1.5}
-.guide-next{margin-top:8px;padding:5px 8px;background:rgba(0,188,212,.08);border-radius:6px;color:#b9f7ff;font-size:0.68rem}
+.guide-overlay{position:absolute;left:20px;top:20px;max-width:300px;padding:14px 16px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.96);backdrop-filter:blur(10px);z-index:5;font-size:0.82rem;box-shadow:var(--shadow-md)}
+.guide-step{font-size:0.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:4px;font-weight:600}
+.guide-title{color:var(--text);margin-bottom:6px;font-size:0.9rem;font-weight:600}
+.guide-body{color:var(--muted);line-height:1.55}
+.guide-next{margin-top:10px;padding:6px 10px;background:var(--accent-soft);border-radius:8px;color:var(--accent);font-size:0.74rem;font-weight:500}
 
 /* Metrics */
-.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border)}
-.metric{padding:8px;background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:6px}
-.metric-val{font-size:1.2rem;color:var(--accent)}
-.metric-lbl{font-size:0.64rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border)}
+.metric{padding:10px 12px;background:var(--panel);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow-sm)}
+.metric-val{font-size:1.3rem;font-weight:700;color:var(--accent)}
+.metric-lbl{font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
 
 /* Accessibility overrides */
 @media (prefers-contrast: high){
-  :root{--bg:#000;--panel:#111;--border:#444;--text:#fff;--muted:#ccc;--accent:#0ff;--accent-soft:#002;--red:#f00;--green:#0f0;--yellow:#ff0}
+  :root{--bg:#fff;--panel:#fff;--panel-alt:#f5f5f5;--border:#000;--text:#000;--muted:#333;--accent:#006d82;--accent-soft:#d0f0f8;--red:#c00;--green:#060;--yellow:#a60}
   .cam-wrap video{filter:contrast(1.2)}
 }
-@media (max-width:900px){.cam-panel{flex:0 0 300px}.sidebar{width:260px;min-width:260px}}
+@media (prefers-color-scheme: dark){
+  :root{--bg:#0f1117;--panel:#1a1d28;--panel-alt:#1e2231;--border:#2d3348;--text:#e4e7ed;--muted:#8b93a7;--accent:#22d3ee;--accent-soft:#0c2d35;--red:#f87171;--green:#4ade80;--yellow:#facc15;--blue:#60a5fa;--shadow-sm:0 1px 3px rgba(0,0,0,.3);--shadow-md:0 4px 12px rgba(0,0,0,.4)}
+  .cam-wrap{background:#000}
+  #map-canvas{background:#141824}
+  .map-legend{background:rgba(26,29,40,.95)}
+  .guide-overlay{background:rgba(26,29,40,.96)}
+}
+@media (max-width:900px){.cam-panel{flex:0 0 300px}.sidebar{width:280px;min-width:280px}}
 @media (max-width:680px){.main{flex-direction:column}.cam-panel,.sidebar{flex:none;width:100%;border-right:none;border-bottom:1px solid var(--border)}}
 </style>
 </head>
@@ -186,9 +196,10 @@ button.danger.active{background:var(--red);color:#fff}
       <span style="font-size:0.68rem;color:var(--muted)" id="mem-count">0 observations</span>
     </div>
     <div class="map-wrap" style="position:relative">
-      <canvas id="map-canvas" width="360" height="360" aria-label="2D top-down map of tracked objects" role="img"></canvas>
+      <canvas id="map-canvas" width="440" height="440" aria-label="2D top-down map of tracked objects" role="img"></canvas>
       <div class="map-legend" aria-label="Map legend">
-        <div style="font-size:0.7rem;color:var(--text);margin-bottom:6px">Legend</div>
+        <div style="font-size:0.68rem;color:var(--accent);margin-bottom:4px;letter-spacing:.06em;font-weight:600">SPATIAL ZONES (3x3)</div>
+        <div style="font-size:0.78rem;color:var(--text);margin-bottom:6px;font-weight:600">Legend</div>
         <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>Recent (0–10s)</div>
         <div class="legend-item"><div class="legend-dot" style="background:var(--yellow)"></div>Seen (10–60s)</div>
         <div class="legend-item"><div class="legend-dot" style="background:#666"></div>Older (&gt;60s)</div>
@@ -230,11 +241,11 @@ button.danger.active{background:var(--red);color:#fff}
       </div>
 
       <div class="transcript-box" aria-live="polite" aria-label="Transcription" id="transcript-box">
-        <span style="color:#555">Your question will appear here...</span>
+        <span style="color:var(--muted);opacity:.6">Your question will appear here...</span>
       </div>
 
       <div class="answer-box" aria-live="assertive" role="alert" aria-label="Answer" id="answer-box">
-        <span style="color:#555">Answer will appear here and be spoken aloud...</span>
+        <span style="color:var(--muted);opacity:.6">Answer will appear here and be spoken aloud...</span>
       </div>
 
       <div class="latency-row" id="latency-row"></div>
@@ -254,8 +265,9 @@ button.danger.active{background:var(--red);color:#fff}
         <button onclick="sendTextQuery()" aria-label="Send text query">Ask</button>
       </div>
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px">
-        <button onclick="quickQuery('Where are my keys?')" style="font-size:0.65rem;padding:3px 7px">keys?</button>
-        <button onclick="quickQuery('Where is my phone?')" style="font-size:0.65rem;padding:3px 7px">phone?</button>
+        <button onclick="quickQuery('Where are my keys?')" style="font-size:0.65rem;padding:3px 7px">where keys?</button>
+        <button onclick="quickQuery('Where is my phone?')" style="font-size:0.65rem;padding:3px 7px">where phone?</button>
+        <button onclick="quickQuery('When was I last seen my keys?')" style="font-size:0.65rem;padding:3px 7px">when keys?</button>
         <button onclick="quickQuery('What objects can you see?')" style="font-size:0.65rem;padding:3px 7px">all objects</button>
         <button onclick="quickQuery('What changed recently?')" style="font-size:0.65rem;padding:3px 7px">changes</button>
       </div>
@@ -309,7 +321,16 @@ const API_BASE = window.location.port === '8001'
   : 'http://localhost:8001';
 const WS_URL = API_BASE.replace(/^http/, 'ws') + '/ws';
 const SCAN_FPS = 2;
-const MAP_SIZE = 360;
+const MAP_SIZE = 440;
+
+function formatClockTime(timestampMs) {
+  if (!timestampMs) return '';
+  const d = new Date(timestampMs);
+  let h = d.getHours(), m = d.getMinutes();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${m.toString().padStart(2, '0')} ${ampm}`;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // State
@@ -511,7 +532,7 @@ function drawBoundingBoxes(detections, vw, vh) {
     ctx.strokeRect(x, y, w, h);
     // Label
     ctx.fillStyle = color;
-    ctx.font = '12px Courier New';
+    ctx.font = '600 12px -apple-system, BlinkMacSystemFont, sans-serif';
     const label = `${d.label} ${Math.round(d.confidence * 100)}%`;
     const tw = ctx.measureText(label).width;
     ctx.fillRect(x, y - 18, tw + 6, 18);
@@ -529,28 +550,71 @@ function drawMap() {
   const canvas = document.getElementById('map-canvas');
   const ctx = canvas.getContext('2d');
   const size = MAP_SIZE;
-  const padding = 20;
+  const padding = 28;
   const inner = size - padding * 2;
 
-  ctx.fillStyle = '#0a0e1a';
+  // Detect dark mode
+  const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+  // Background
+  ctx.fillStyle = isDark ? '#141824' : '#ffffff';
   ctx.fillRect(0, 0, size, size);
 
-  // Grid
-  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  // Zone fills — alternating subtle tint for readability
+  const zoneFills = isDark
+    ? [['#181d2e','#1c2236','#181d2e'],['#1c2236','#202740','#1c2236'],['#181d2e','#1c2236','#181d2e']]
+    : [['#f8f9fc','#f0f3f9','#f8f9fc'],['#f0f3f9','#e8ecf4','#f0f3f9'],['#f8f9fc','#f0f3f9','#f8f9fc']];
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      ctx.fillStyle = zoneFills[row][col];
+      ctx.fillRect(padding + col * (inner / 3), padding + row * (inner / 3), inner / 3, inner / 3);
+    }
+  }
+
+  // Grid lines
+  ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)';
   ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) {
-    const x = padding + i * (inner / 4);
-    const y = padding + i * (inner / 4);
+  for (let i = 1; i <= 2; i++) {
+    const x = padding + i * (inner / 3);
+    const y = padding + i * (inner / 3);
     ctx.beginPath(); ctx.moveTo(x, padding); ctx.lineTo(x, size - padding); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(padding, y); ctx.lineTo(size - padding, y); ctx.stroke();
   }
 
+  // Zone labels
+  const zoneLabels = [
+    ['L-Back', 'C-Back', 'R-Back'],
+    ['Left', 'Center', 'Right'],
+    ['L-Front', 'C-Front', 'R-Front'],
+  ];
+  ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillStyle = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)';
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      const zx = padding + col * (inner / 3) + inner / 6;
+      const zy = padding + row * (inner / 3) + inner / 6;
+      const lbl = zoneLabels[row][col];
+      ctx.fillText(lbl, zx - ctx.measureText(lbl).width / 2, zy + 4);
+    }
+  }
+
+  // Compass labels
+  ctx.font = '600 10px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillStyle = isDark ? 'rgba(34,211,238,0.5)' : 'rgba(8,145,178,0.5)';
+  ctx.fillText('LEFT', padding + 4, size - 8);
+  ctx.fillText('RIGHT', size - padding - ctx.measureText('RIGHT').width - 4, size - 8);
+  ctx.fillText('BACK (far)', padding + inner / 2 - ctx.measureText('BACK (far)').width / 2, padding - 8);
+  ctx.fillText('FRONT (near)', padding + inner / 2 - ctx.measureText('FRONT (near)').width / 2, size - 6);
+
   // Border
-  ctx.strokeStyle = 'rgba(0,188,212,0.15)';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = isDark ? 'rgba(34,211,238,0.15)' : 'rgba(8,145,178,0.2)';
+  ctx.lineWidth = 1.5;
   ctx.strokeRect(padding, padding, inner, inner);
 
   // Objects
+  const accentColor = isDark ? '#22d3ee' : '#0891b2';
+  const warnColor = isDark ? '#facc15' : '#ca8a04';
+  const selectedColor = isDark ? '#f87171' : '#ef4444';
   const now = Date.now();
   const objects = Object.values(trackedObjects);
   objects.forEach(obj => {
@@ -559,32 +623,46 @@ function drawMap() {
     const age = obj.age_seconds || (now - obj.timestamp_ms) / 1000;
 
     let color;
-    if (age < 10) color = '#00bcd4';
-    else if (age < 60) color = '#ffc857';
-    else color = '#555';
+    if (age < 10) color = accentColor;
+    else if (age < 60) color = warnColor;
+    else color = isDark ? '#555' : '#9ca3af';
 
-    if (selectedObject === obj.label) color = '#ff5757';
+    if (selectedObject === obj.label) color = selectedColor;
 
-    // Glow
+    // Glow for recent objects
     if (age < 10) {
-      const grad = ctx.createRadialGradient(x, y, 0, x, y, 20);
-      grad.addColorStop(0, color + '40');
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, 24);
+      grad.addColorStop(0, color + '30');
       grad.addColorStop(1, 'transparent');
       ctx.fillStyle = grad;
-      ctx.fillRect(x - 20, y - 20, 40, 40);
+      ctx.fillRect(x - 24, y - 24, 48, 48);
     }
 
-    // Dot
+    // Dot with outline for visibility
     ctx.beginPath();
-    ctx.arc(x, y, selectedObject === obj.label ? 8 : 6, 0, Math.PI * 2);
+    ctx.arc(x, y, selectedObject === obj.label ? 9 : 7, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
+    ctx.strokeStyle = isDark ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.9)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
 
     // Label
-    ctx.fillStyle = selectedObject === obj.label ? '#fff' : '#ccc';
-    ctx.font = '10px Courier New';
-    const lx = Math.min(Math.max(x - ctx.measureText(obj.label).width / 2, 2), size - 60);
-    ctx.fillText(obj.label, lx, y - 9);
+    const isSelected = selectedObject === obj.label;
+    ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillStyle = isDark ? (isSelected ? '#fff' : '#ddd') : (isSelected ? '#1e2330' : '#374151');
+    const labelText = obj.label;
+    const lx = Math.min(Math.max(x - ctx.measureText(labelText).width / 2, 4), size - 70);
+    ctx.fillText(labelText, lx, y - 14);
+
+    // Time annotation below dot
+    const clockTime = obj.last_seen_time || formatClockTime(obj.timestamp_ms);
+    if (clockTime) {
+      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.35)';
+      ctx.font = '9px -apple-system, BlinkMacSystemFont, sans-serif';
+      const tx = Math.min(Math.max(x - ctx.measureText(clockTime).width / 2, 4), size - 60);
+      ctx.fillText(clockTime, tx, y + 18);
+    }
   });
 }
 
@@ -607,16 +685,17 @@ function updateObjectList() {
     const ageStr = age < 10 ? 'just now' : age < 60 ? `${Math.round(age)}s ago` : age < 3600 ? `${Math.round(age/60)}m ago` : `${Math.round(age/3600)}h ago`;
     const h = obj.cx < 0.33 ? 'left' : obj.cx > 0.67 ? 'right' : 'center';
     const v = obj.cy < 0.4 ? 'back' : obj.cy > 0.7 ? 'front' : 'mid';
-    const age_color = age < 10 ? 'var(--accent)' : age < 60 ? 'var(--yellow)' : '#666';
+    const age_color = age < 10 ? 'var(--accent)' : age < 60 ? 'var(--yellow)' : 'var(--muted)';
+    const clockTime = obj.last_seen_time || formatClockTime(obj.timestamp_ms);
     return `<div class="obj-item${selectedObject === obj.label ? ' selected' : ''}"
       onclick="selectObject('${obj.label}')"
       role="button" tabindex="0"
-      aria-label="${obj.label}, ${ageStr}, ${h} ${v}"
+      aria-label="${obj.label}, ${ageStr} at ${clockTime}, ${h} ${v}"
       onkeydown="if(event.key==='Enter')selectObject('${obj.label}')">
       <div class="obj-dot" style="background:${age_color}"></div>
       <span class="obj-label">${obj.label}</span>
       <span class="obj-pos" style="color:var(--muted)">${h}·${v}</span>
-      <span class="obj-age">${ageStr}</span>
+      <span class="obj-age" title="Last seen at ${clockTime}">${ageStr} · ${clockTime}</span>
     </div>`;
   }).join('');
 }
@@ -644,11 +723,14 @@ async function loadHistory(label) {
       const age = o.age_seconds || 0;
       const ageStr = age < 60 ? `${Math.round(age)}s ago` : age < 3600 ? `${Math.round(age/60)}m ago` : `${Math.round(age/3600)}h ago`;
       const conf = Math.round((o.confidence || 1) * 100);
+      const clockTime = o.last_seen_time || formatClockTime(o.timestamp_ms);
+      const clockFull = o.last_seen_at || '';
       return `<div class="timeline-item">
         <div class="timeline-dot"></div>
         <div class="timeline-info">
           <span class="timeline-label">${label}</span>
-          ${h} ${v} · conf ${conf}% · <span style="color:var(--accent)">${ageStr}</span>
+          <span style="color:var(--accent);font-weight:500">${clockTime}</span> (${ageStr}) · ${h} ${v} · conf ${conf}%
+          ${clockFull ? `<br><span style="font-size:0.72rem;color:var(--muted);opacity:.7">${clockFull}</span>` : ''}
         </div>
       </div>`;
     }).join('');
@@ -791,7 +873,7 @@ function drawWaveform() {
   const barW = canvas.width / buf.length;
   buf.forEach((v, i) => {
     const h = (v / 255) * canvas.height;
-    ctx.fillStyle = `rgba(0,188,212,${0.3 + v/400})`;
+    ctx.fillStyle = `rgba(8,145,178,${0.3 + v/400})`;
     ctx.fillRect(i * barW, canvas.height - h, barW - 1, h);
   });
 }

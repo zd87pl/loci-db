@@ -94,6 +94,9 @@ class ObjectObservation:
         return (int(time.time() * 1000) - self.timestamp_ms) / 1000.0
 
     def to_dict(self) -> dict:
+        from datetime import datetime
+
+        dt = datetime.fromtimestamp(self.timestamp_ms / 1000)
         result = {
             "label": self.label,
             "cx": round(self.cx, 3),
@@ -101,11 +104,21 @@ class ObjectObservation:
             "confidence": round(self.confidence, 3),
             "timestamp_ms": self.timestamp_ms,
             "age_seconds": round(self.age_seconds, 1),
+            "last_seen_at": dt.strftime("%H:%M:%S"),
+            "last_seen_time": dt.strftime("%I:%M %p").lstrip("0"),
+            "position_description": self.position_description,
             "state_id": self.state_id,
         }
         if self.depth_m is not None:
             result["depth_m"] = round(self.depth_m, 3)
         return result
+
+    @property
+    def position_description(self) -> str:
+        """Human-readable spatial description from normalized coords."""
+        h = "on the left" if self.cx < 0.33 else ("on the right" if self.cx > 0.67 else "in the center")
+        v = "toward the back" if self.cy < 0.35 else ("near the front" if self.cy > 0.70 else "in the middle area")
+        return f"{h}, {v}"
 
 
 class SpatialMemory:

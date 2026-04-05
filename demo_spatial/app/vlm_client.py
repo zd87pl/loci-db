@@ -202,9 +202,12 @@ class VLMClient:
         system = (
             "You are a helpful assistant for a blind person. "
             "Answer location questions concisely using the spatial memory data provided. "
-            "Describe positions in natural terms (left/right/center, near/far). "
+            "ALWAYS include both WHEN and WHERE in your answer. "
+            "For WHEN: use the 'last_seen_time' field (e.g., '2:15 PM') and 'age_seconds' for relative time. "
+            "For WHERE: describe positions in natural terms (left/right/center, near the front/back). "
             "cx=0 is far left, cx=1 is far right, cy=0 is top/far, cy=1 is bottom/near. "
-            "Keep answers under 2 sentences. Speak naturally, as if to a person."
+            "If multiple objects are present, mention relative positions between them. "
+            "Keep answers under 3 sentences. Speak naturally, as if to a person."
         )
 
         user_content: list[dict] = [
@@ -277,33 +280,27 @@ def _fallback_location_answer(question: str, objects: list[dict]) -> str:
 
     obj = objects[0]
     label = obj.get("label", "object")
-    cx = obj.get("cx", 0.5)
-    cy = obj.get("cy", 0.5)
+    pos_desc = obj.get("position_description", "")
+    if not pos_desc:
+        cx = obj.get("cx", 0.5)
+        cy = obj.get("cy", 0.5)
+        h_pos = "on the left" if cx < 0.33 else ("on the right" if cx > 0.67 else "in the center")
+        v_pos = "toward the back" if cy < 0.35 else ("near the front" if cy > 0.70 else "in the middle area")
+        pos_desc = f"{h_pos}, {v_pos}"
+
     age = obj.get("age_seconds", 0)
-
-    # Describe horizontal position
-    if cx < 0.33:
-        h_pos = "on the left"
-    elif cx > 0.67:
-        h_pos = "on the right"
-    else:
-        h_pos = "in the center"
-
-    # Describe vertical/depth position
-    if cy < 0.4:
-        v_pos = "toward the back"
-    elif cy > 0.7:
-        v_pos = "near the front"
-    else:
-        v_pos = ""
-
-    pos_desc = h_pos + (f", {v_pos}" if v_pos else "")
-
-    if age < 60:
+    if age < 10:
+        time_desc = "just now"
+    elif age < 60:
         time_desc = f"{int(age)} seconds ago"
     elif age < 3600:
-        time_desc = f"{int(age / 60)} minutes ago"
+        mins = int(age / 60)
+        time_desc = f"{mins} minute{'s' if mins != 1 else ''} ago"
     else:
-        time_desc = f"{int(age / 3600)} hours ago"
+        hrs = int(age / 3600)
+        time_desc = f"{hrs} hour{'s' if hrs != 1 else ''} ago"
 
-    return f"Your {label} was last seen {pos_desc}, {time_desc}."
+    clock_time = obj.get("last_seen_time", "")
+    time_part = f"{time_desc}, at {clock_time}" if clock_time else time_desc
+
+    return f"Your {label} was last seen {pos_desc}. That was {time_part}."

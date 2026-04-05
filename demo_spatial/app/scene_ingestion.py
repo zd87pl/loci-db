@@ -4,8 +4,9 @@ Supports two modes:
   1. Frame push (default): frontend sends frames via HTTP/WebSocket
   2. Server-side capture: background thread reads from local webcam
 
-Detection is done with YOLOv8-nano (ultralytics). Falls back to the
-VLM client for low-confidence or ambiguous scenes.
+Detection uses YOLO-World (open-vocabulary) by default, falling back to
+YOLOv8-nano when YOLO_MODEL is overridden. The VLM client provides
+enrichment for low-confidence or ambiguous scenes.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import asyncio
 import base64
 import io
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -28,6 +30,20 @@ if TYPE_CHECKING:
 _YOLO_CONF_THRESHOLD = 0.45
 # If fewer than this many objects are detected, try VLM enrichment
 _MIN_DETECTIONS_FOR_NO_VLM = 1
+
+# YOLO-World model (open-vocabulary). Override with YOLO_MODEL env var.
+_YOLO_MODEL = os.environ.get("YOLO_MODEL", "yolov8l-worldv2.pt")
+
+# Default open-vocabulary class list for assistive use.
+# Users can update at runtime via PUT /api/detection/classes.
+DEFAULT_CLASSES: list[str] = [
+    "person", "keys", "wallet", "phone", "laptop", "cup", "bottle",
+    "bag", "backpack", "glasses", "remote control", "charger",
+    "headphones", "AirPods", "watch", "book", "pen", "medicine",
+    "cane", "shoe", "jacket", "umbrella", "food container",
+    "water bottle", "mug", "plate", "bowl", "fork", "knife", "spoon",
+    "chair", "table", "door", "cat", "dog",
+]
 
 
 @dataclass
@@ -72,27 +88,52 @@ class SceneIngestion:
         memory: "SpatialMemory",
         vlm_client: "VLMClient | None" = None,
         use_vlm_fallback: bool = True,
+        classes: list[str] | None = None,
     ) -> None:
         self._memory = memory
         self._vlm = vlm_client
         self._use_vlm_fallback = use_vlm_fallback
         self._model = None   # lazy-loaded YOLO model
+        self._classes: list[str] = list(classes or DEFAULT_CLASSES)
+        self._is_world_model = "world" in _YOLO_MODEL.lower()
         self._server_capture_task: asyncio.Task | None = None
         self._capturing = False
         self.last_detections: list[Detection] = []
         self.frame_count = 0
 
     def _load_yolo(self):
-        """Lazy-load YOLOv8 nano model (downloads ~6 MB on first run)."""
+        """Lazy-load YOLO model. Uses YOLO-World (open-vocab) by default."""
         if self._model is not None:
             return
         try:
             from ultralytics import YOLO
-            self._model = YOLO("yolo11n.pt")
-            logger.info("YOLO model loaded")
+            self._model = YOLO(_YOLO_MODEL)
+            if self._is_world_model:
+                self._model.set_classes(self._classes)
+                logger.info(
+                    "YOLO-World loaded (%s) with %d classes",
+                    _YOLO_MODEL, len(self._classes),
+                )
+            else:
+                logger.info("YOLO model loaded (%s)", _YOLO_MODEL)
         except ImportError:
             logger.warning("ultralytics not installed — YOLO detection disabled")
             self._model = None
+
+    @property
+    def classes(self) -> list[str]:
+        """Return the current open-vocabulary class list."""
+        return list(self._classes)
+
+    def set_classes(self, classes: list[str]) -> None:
+        """Update the open-vocabulary class list at runtime.
+
+        Only effective when using a YOLO-World model.
+        """
+        self._classes = list(classes)
+        if self._model is not None and self._is_world_model:
+            self._model.set_classes(self._classes)
+            logger.info("YOLO-World classes updated: %d classes", len(self._classes))
 
     def _run_yolo(self, image_bytes: bytes) -> list[Detection]:
         """Run YOLO inference on raw image bytes. Returns list of detections."""
@@ -308,5 +349,8 @@ class SceneIngestion:
             "capturing": self._capturing,
             "last_detections": [d.to_dict() for d in self.last_detections],
             "yolo_available": self._model is not None,
+            "yolo_model": _YOLO_MODEL,
+            "open_vocabulary": self._is_world_model,
+            "classes": self._classes if self._is_world_model else None,
             "vlm_available": self._vlm is not None,
         }

@@ -951,18 +951,29 @@ setInterval(() => {
 // ─────────────────────────────────────────────────────────────────────────────
 // iPhone Scanner Modal + QR Code (server-generated)
 // ─────────────────────────────────────────────────────────────────────────────
-function getScannerURL() {
-  const host = _hostname === 'localhost' ? window.location.hostname : _hostname;
+let _cachedLocalIP = null;
+
+async function getScannerURL() {
+  // Use server-detected local network IP so iPhones on the same WiFi can connect
+  if (!_cachedLocalIP) {
+    try {
+      const resp = await fetch(`${API_BASE}/api/local-ip`);
+      const data = await resp.json();
+      _cachedLocalIP = data.ip || 'localhost';
+    } catch { _cachedLocalIP = window.location.hostname || 'localhost'; }
+  }
+  const host = _cachedLocalIP;
   const port = window.location.port || '8001';
   return `http://${host}:${port}/scanner`;
 }
 
-function openScannerModal() {
+async function openScannerModal() {
   const modal = document.getElementById('scanner-modal');
-  const url = getScannerURL();
+  document.getElementById('scanner-url').textContent = 'Loading...';
+  modal.classList.add('open');
+  const url = await getScannerURL();
   document.getElementById('scanner-url').textContent = url;
   document.getElementById('scanner-qr-img').src = `/api/scanner-qr?url=${encodeURIComponent(url)}`;
-  modal.classList.add('open');
 }
 
 function closeScannerModal(e) {

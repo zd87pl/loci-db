@@ -25,6 +25,7 @@ import io
 import json
 import logging
 import os
+import socket
 from contextlib import asynccontextmanager
 
 import segno
@@ -115,6 +116,19 @@ async def scanner_qr(url: str = Query(..., description="Scanner URL to encode"))
     qr.save(buf, kind="png", scale=5, border=2)
     buf.seek(0)
     return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@app.get("/api/local-ip")
+async def local_ip():
+    """Return this machine's local network IP for cross-device access."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip = "localhost"
+    return {"ip": ip}
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .scene_ingestion import SceneIngestion
@@ -81,6 +82,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+
+@app.get("/")
+async def index():
+    idx = os.path.join(_static_dir, "index.html")
+    if os.path.exists(idx):
+        return FileResponse(idx)
+    return {"message": "LOCI Spatial Memory Assistant API", "docs": "/docs"}
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>LOCI 3D Scanner</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+:root{
+  --bg:#0a0e18;--panel:rgba(12,16,26,.92);--border:rgba(255,255,255,.08);
+  --text:#e0e0e0;--muted:#7a8899;--accent:#00bcd4;--accent-soft:rgba(0,188,212,.12);
+  --red:#ff5757;--green:#5ad17b;--yellow:#ffc857;
+  --font:-apple-system,BlinkMacSystemFont,'SF Pro Text','Courier New',monospace;
+}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--font)}
+
+/* Full-screen camera layer */
+#camera-layer{position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;background:#000}
+#camera-layer video{width:100%;height:100%;object-fit:cover}
+#camera-layer canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+
+/* 3D visualization overlay */
+#three-layer{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none;opacity:.7}
+
+/* HUD overlay */
+.hud{position:fixed;z-index:10;pointer-events:none}
+.hud *{pointer-events:auto}
+
+/* Top bar */
+.top-bar{top:0;left:0;right:0;padding:max(env(safe-area-inset-top),12px) 16px 10px;
+  background:linear-gradient(180deg,rgba(0,0,0,.7) 0%,transparent 100%);
+  display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.brand{font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+.title{font-size:1rem;font-weight:700;margin-top:2px}
+
+/* Status pills */
+.pill-row{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+.pill{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:999px;
+  font-size:.62rem;letter-spacing:.04em;border:1px solid rgba(255,255,255,.1);background:rgba(0,0,0,.4);backdrop-filter:blur(8px)}
+.pill .dot{width:6px;height:6px;border-radius:50%;flex:0 0 6px}
+.pill .dot.ok{background:var(--green)}.pill .dot.warn{background:var(--yellow)}.pill .dot.off{background:#555}
+
+/* Bottom controls */
+.bottom-bar{bottom:0;left:0;right:0;
+  padding:12px 16px max(env(safe-area-inset-bottom),16px);
+  background:linear-gradient(0deg,rgba(0,0,0,.8) 0%,transparent 100%);
+  display:flex;flex-direction:column;gap:10px}
+
+.scan-btn{width:72px;height:72px;border-radius:50%;border:3px solid var(--accent);
+  background:rgba(0,188,212,.1);color:var(--accent);font-size:.7rem;font-weight:700;
+  font-family:var(--font);display:flex;flex-direction:column;align-items:center;justify-content:center;
+  cursor:pointer;transition:all .2s;margin:0 auto;-webkit-appearance:none}
+.scan-btn:active{transform:scale(.95)}
+.scan-btn.active{background:var(--accent);color:#000;border-color:var(--accent);animation:pulse-scan 1.5s infinite}
+.scan-btn .icon{font-size:1.5rem;line-height:1}
+@keyframes pulse-scan{0%,100%{box-shadow:0 0 0 0 rgba(0,188,212,.3)}50%{box-shadow:0 0 0 14px rgba(0,188,212,0)}}
+
+.ctrl-row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+.ctrl-btn{padding:8px 14px;border-radius:20px;border:1px solid var(--border);
+  background:rgba(0,0,0,.5);backdrop-filter:blur(8px);color:var(--text);
+  font-family:var(--font);font-size:.72rem;cursor:pointer;transition:all .15s}
+.ctrl-btn:active{background:rgba(0,188,212,.15)}
+.ctrl-btn.active{background:var(--accent-soft);border-color:rgba(0,188,212,.3);color:var(--accent)}
+
+/* Detection overlay labels */
+.detection-label{position:absolute;padding:2px 6px;border-radius:4px;font-size:.65rem;
+  font-family:var(--font);white-space:nowrap;pointer-events:none;z-index:5;
+  background:rgba(0,188,212,.85);color:#000;font-weight:600}
+
+/* Side panel (3D map) */
+.side-panel{top:50%;right:8px;transform:translateY(-50%);width:140px;
+  border-radius:12px;border:1px solid var(--border);background:var(--panel);
+  backdrop-filter:blur(12px);overflow:hidden}
+.side-panel .panel-title{padding:8px;font-size:.6rem;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--accent);text-align:center;border-bottom:1px solid var(--border)}
+#mini-3d{width:140px;height:140px;pointer-events:auto}
+
+/* Stats strip */
+.stats-strip{display:flex;gap:12px;justify-content:center;padding:4px 0}
+.stat{text-align:center}
+.stat-val{font-size:1rem;font-weight:700;color:var(--accent)}
+.stat-lbl{font-size:.55rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+
+/* Object chips */
+.obj-chips{display:flex;gap:6px;overflow-x:auto;padding:2px 0;-webkit-overflow-scrolling:touch}
+.obj-chips::-webkit-scrollbar{display:none}
+.obj-chip{flex:0 0 auto;padding:5px 10px;border-radius:16px;font-size:.68rem;
+  border:1px solid var(--border);background:rgba(0,0,0,.4);backdrop-filter:blur(8px);
+  white-space:nowrap;color:var(--text)}
+.obj-chip .chip-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px}
+.obj-chip.recent .chip-dot{background:var(--accent)}.obj-chip.aged .chip-dot{background:var(--yellow)}
+
+/* Depth info overlay */
+.depth-info{top:auto;bottom:auto;left:8px;top:50%;transform:translateY(-50%);
+  width:56px;border-radius:12px;border:1px solid var(--border);background:var(--panel);
+  backdrop-filter:blur(12px);padding:8px 4px;text-align:center}
+.depth-bar{width:24px;height:100px;margin:4px auto;border-radius:4px;overflow:hidden;
+  background:rgba(255,255,255,.05);position:relative}
+.depth-fill{position:absolute;bottom:0;left:0;right:0;border-radius:4px;
+  background:linear-gradient(0deg,var(--accent),var(--yellow));transition:height .3s}
+.depth-label{font-size:.55rem;color:var(--muted);margin-top:4px}
+
+/* Fullscreen landscape optimization */
+@media (orientation:landscape){
+  .bottom-bar{flex-direction:row;align-items:center;justify-content:center}
+  .stats-strip{gap:20px}
+}
+
+/* Connection banner */
+.conn-banner{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100;
+  padding:20px 28px;border-radius:16px;border:1px solid var(--border);
+  background:var(--panel);backdrop-filter:blur(16px);text-align:center;max-width:320px}
+.conn-banner h2{font-size:1rem;margin-bottom:8px;color:var(--accent)}
+.conn-banner p{font-size:.78rem;color:var(--muted);line-height:1.5;margin-bottom:12px}
+.conn-banner .url-display{padding:8px;border-radius:8px;background:rgba(0,0,0,.3);
+  font-size:.72rem;color:var(--text);word-break:break-all;margin-bottom:8px;border:1px solid var(--border)}
+.conn-banner button{padding:10px 20px;border-radius:20px;border:none;
+  background:var(--accent);color:#000;font-weight:700;font-size:.82rem;
+  font-family:var(--font);cursor:pointer;width:100%}
+</style>
+</head>
+<body>
+
+<!-- Camera layer -->
+<div id="camera-layer">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="overlay-canvas"></canvas>
+</div>
+
+<!-- Three.js 3D overlay -->
+<div id="three-layer"></div>
+
+<!-- Top HUD -->
+<div class="hud top-bar">
+  <div>
+    <div class="brand">LOCI-DB 3D Scanner</div>
+    <div class="title" id="scan-title">Ready to scan</div>
+  </div>
+  <div class="pill-row">
+    <div class="pill"><div class="dot off" id="dot-camera"></div><span id="lbl-camera">Camera</span></div>
+    <div class="pill"><div class="dot off" id="dot-lidar"></div><span id="lbl-lidar">LiDAR</span></div>
+    <div class="pill"><div class="dot off" id="dot-server"></div><span id="lbl-server">Server</span></div>
+  </div>
+</div>
+
+<!-- Depth indicator (left side) -->
+<div class="hud depth-info" id="depth-panel" style="display:none">
+  <div style="font-size:.58rem;color:var(--accent);letter-spacing:.08em">DEPTH</div>
+  <div class="depth-bar"><div class="depth-fill" id="depth-fill" style="height:0%"></div></div>
+  <div class="depth-label" id="depth-val">--</div>
+</div>
+
+<!-- Mini 3D map (right side) -->
+<div class="hud side-panel">
+  <div class="panel-title">3D Map</div>
+  <canvas id="mini-3d" width="140" height="140"></canvas>
+</div>
+
+<!-- Bottom HUD -->
+<div class="hud bottom-bar">
+  <div class="obj-chips" id="obj-chips"></div>
+  <div class="stats-strip">
+    <div class="stat"><div class="stat-val" id="stat-objects">0</div><div class="stat-lbl">Objects</div></div>
+    <div class="stat"><div class="stat-val" id="stat-frames">0</div><div class="stat-lbl">Frames</div></div>
+    <div class="stat"><div class="stat-val" id="stat-fps">0</div><div class="stat-lbl">FPS</div></div>
+    <div class="stat"><div class="stat-val" id="stat-depth">--</div><div class="stat-lbl">Depth</div></div>
+  </div>
+  <div style="display:flex;align-items:center;gap:12px;justify-content:center">
+    <div class="ctrl-row">
+      <button class="ctrl-btn" id="btn-3d" onclick="toggle3DOverlay()">3D View</button>
+      <button class="ctrl-btn" id="btn-voice" onclick="toggleVoice()">Voice</button>
+    </div>
+    <button class="scan-btn" id="scan-btn" onclick="toggleScan()">
+      <span class="icon">&#9673;</span>
+      <span id="scan-label">SCAN</span>
+    </button>
+    <div class="ctrl-row">
+      <button class="ctrl-btn" id="btn-flip" onclick="flipCamera()">Flip</button>
+      <button class="ctrl-btn" id="btn-ar" onclick="toggleAR()">AR</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+const _hostname = (location.hostname === '0.0.0.0' || location.hostname === '') ? 'localhost' : location.hostname;
+const API_BASE = location.port
+  ? `${location.protocol}//${_hostname}:${location.port}`
+  : `${location.protocol}//${_hostname}`;
+const WS_URL = API_BASE.replace(/^http/, 'ws') + '/ws';
+const SCAN_FPS = 2;
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let cameraStream = null;
+let scanning = false;
+let scanTimer = null;
+let frameCount = 0;
+let facingMode = 'environment';  // rear camera
+let ws = null;
+let trackedObjects = {};
+let hasLiDAR = false;
+let xrSession = null;
+let xrDepthInfo = null;
+let depthSensingSupported = false;
+let show3D = true;
+let fpsCounter = 0;
+let lastFpsTime = Date.now();
+
+// Three.js mini-map state
+let miniScene, miniCamera, miniRenderer;
+let objectMeshes = {};
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+async function init() {
+  initMini3D();
+  await checkServer();
+  await startCamera();
+  await checkLiDAR();
+  connectWS();
+  setInterval(checkServer, 10000);
+  setInterval(updateAges, 2000);
+}
+
+// ---------------------------------------------------------------------------
+// Server connection
+// ---------------------------------------------------------------------------
+async function checkServer() {
+  try {
+    const r = await fetch(`${API_BASE}/health`);
+    const d = await r.json();
+    setPill('server', 'ok', `Server OK`);
+    return true;
+  } catch(e) {
+    setPill('server', 'off', 'Offline');
+    return false;
+  }
+}
+
+function setPill(key, state, text) {
+  document.getElementById(`dot-${key}`).className = `dot ${state}`;
+  document.getElementById(`lbl-${key}`).textContent = text;
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket
+// ---------------------------------------------------------------------------
+function connectWS() {
+  if (ws && ws.readyState < 2) return;
+  try {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => {};
+    ws.onclose = () => setTimeout(connectWS, 3000);
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'snapshot' && msg.objects) {
+        msg.objects.forEach(o => trackedObjects[o.label] = o);
+        updateUI();
+      }
+      if (msg.type === 'detections' && msg.detections) {
+        msg.detections.forEach(d => {
+          trackedObjects[d.label] = {
+            label: d.label, cx: d.cx, cy: d.cy,
+            confidence: d.confidence, age_seconds: 0,
+            timestamp_ms: Date.now(), depth: d.depth || null
+          };
+        });
+        updateUI();
+      }
+    };
+  } catch(e) {}
+}
+
+// ---------------------------------------------------------------------------
+// Camera
+// ---------------------------------------------------------------------------
+async function startCamera() {
+  try {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(t => t.stop());
+    }
+    const constraints = {
+      video: {
+        facingMode: { ideal: facingMode },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+      audio: false
+    };
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setPill('camera', 'off', 'No camera API');
+      document.getElementById('scan-title').textContent = 'Camera requires HTTPS';
+      return;
+    }
+    cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
+    document.getElementById('video').srcObject = cameraStream;
+    setPill('camera', 'ok', facingMode === 'environment' ? 'Rear' : 'Front');
+    document.getElementById('scan-title').textContent = 'Tap SCAN to begin';
+  } catch(e) {
+    setPill('camera', 'warn', 'Denied');
+    document.getElementById('scan-title').textContent = 'Camera access denied';
+  }
+}
+
+function flipCamera() {
+  facingMode = facingMode === 'environment' ? 'user' : 'environment';
+  startCamera();
+}
+
+// ---------------------------------------------------------------------------
+// LiDAR / WebXR Depth Sensing
+// ---------------------------------------------------------------------------
+async function checkLiDAR() {
+  if (!navigator.xr) {
+    setPill('lidar', 'off', 'No WebXR');
+    return;
+  }
+  try {
+    const supported = await navigator.xr.isSessionSupported('immersive-ar');
+    if (!supported) {
+      setPill('lidar', 'off', 'No AR');
+      return;
+    }
+    // Check if depth-sensing is available (indicates LiDAR hardware)
+    // We don't start a session yet -- just mark as available
+    depthSensingSupported = true;
+    setPill('lidar', 'warn', 'Available');
+    document.getElementById('btn-ar').classList.add('active');
+  } catch(e) {
+    setPill('lidar', 'off', 'Unavailable');
+  }
+}
+
+async function toggleAR() {
+  if (xrSession) {
+    await xrSession.end();
+    xrSession = null;
+    setPill('lidar', 'warn', 'Available');
+    document.getElementById('btn-ar').classList.remove('active');
+    document.getElementById('depth-panel').style.display = 'none';
+    return;
+  }
+  if (!depthSensingSupported) {
+    document.getElementById('scan-title').textContent = 'WebXR AR not available on this device';
+    return;
+  }
+  try {
+    xrSession = await navigator.xr.requestSession('immersive-ar', {
+      requiredFeatures: ['depth-sensing', 'dom-overlay'],
+      depthSensing: {
+        usagePreference: ['cpu-optimized'],
+        dataFormatPreference: ['luminance-alpha', 'float32'],
+      },
+      domOverlay: { root: document.body },
+    });
+    xrSession.addEventListener('end', () => {
+      xrSession = null;
+      hasLiDAR = false;
+      setPill('lidar', 'warn', 'Available');
+      document.getElementById('depth-panel').style.display = 'none';
+    });
+    hasLiDAR = true;
+    setPill('lidar', 'ok', 'LiDAR Active');
+    document.getElementById('depth-panel').style.display = '';
+    document.getElementById('btn-ar').classList.add('active');
+
+    // Start XR render loop for depth data
+    const refSpace = await xrSession.requestReferenceSpace('local');
+    xrSession.requestAnimationFrame(function onXRFrame(time, frame) {
+      if (!xrSession) return;
+      const pose = frame.getViewerPose(refSpace);
+      if (pose) {
+        for (const view of pose.views) {
+          const depthInfo = frame.getDepthInformation(view);
+          if (depthInfo) {
+            xrDepthInfo = depthInfo;
+            updateDepthDisplay(depthInfo);
+          }
+        }
+      }
+      xrSession.requestAnimationFrame(onXRFrame);
+    });
+  } catch(e) {
+    setPill('lidar', 'off', 'AR Failed');
+    document.getElementById('scan-title').textContent = 'AR session failed: ' + e.message;
+  }
+}
+
+function updateDepthDisplay(depthInfo) {
+  // Sample center depth
+  if (!depthInfo || !depthInfo.data) return;
+  try {
+    const w = depthInfo.width;
+    const h = depthInfo.height;
+    const cx = Math.floor(w / 2);
+    const cy = Math.floor(h / 2);
+    const depth = depthInfo.getDepthInMeters(cx / w, cy / h);
+    const maxDepth = 5.0; // meters
+    const pct = Math.min(depth / maxDepth, 1.0) * 100;
+    document.getElementById('depth-fill').style.height = pct + '%';
+    document.getElementById('depth-val').textContent = depth.toFixed(2) + 'm';
+    document.getElementById('stat-depth').textContent = depth.toFixed(1) + 'm';
+  } catch(e) {}
+}
+
+function getDepthAtPoint(normX, normY) {
+  if (!xrDepthInfo || !xrDepthInfo.data) return null;
+  try {
+    return xrDepthInfo.getDepthInMeters(normX, normY);
+  } catch(e) {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scanning
+// ---------------------------------------------------------------------------
+function toggleScan() {
+  const btn = document.getElementById('scan-btn');
+  if (scanning) {
+    scanning = false;
+    clearInterval(scanTimer);
+    scanTimer = null;
+    btn.classList.remove('active');
+    document.getElementById('scan-label').textContent = 'SCAN';
+    document.getElementById('scan-title').textContent = 'Scanning paused';
+  } else {
+    if (!cameraStream) {
+      document.getElementById('scan-title').textContent = 'Start camera first';
+      return;
+    }
+    scanning = true;
+    btn.classList.add('active');
+    document.getElementById('scan-label').textContent = 'STOP';
+    document.getElementById('scan-title').textContent = 'Scanning...';
+    scanTimer = setInterval(captureAndSend, 1000 / SCAN_FPS);
+    captureAndSend(); // first frame immediately
+  }
+}
+
+async function captureAndSend() {
+  const video = document.getElementById('video');
+  if (!video.videoWidth) return;
+
+  const offscreen = document.createElement('canvas');
+  offscreen.width = video.videoWidth;
+  offscreen.height = video.videoHeight;
+  offscreen.getContext('2d').drawImage(video, 0, 0);
+  const b64 = offscreen.toDataURL('image/jpeg', 0.75);
+
+  frameCount++;
+  fpsCounter++;
+  const now = Date.now();
+  if (now - lastFpsTime > 1000) {
+    document.getElementById('stat-fps').textContent = fpsCounter;
+    fpsCounter = 0;
+    lastFpsTime = now;
+  }
+
+  // Build request with optional depth data
+  const payload = { image_b64: b64 };
+
+  // If LiDAR depth is available, sample depth at detection points
+  // We'll include a depth_map_sample for the center and key regions
+  if (hasLiDAR && xrDepthInfo) {
+    const depthSamples = {};
+    const grid = [
+      ['tl', 0.25, 0.25], ['tc', 0.5, 0.25], ['tr', 0.75, 0.25],
+      ['ml', 0.25, 0.5],  ['mc', 0.5, 0.5],  ['mr', 0.75, 0.5],
+      ['bl', 0.25, 0.75], ['bc', 0.5, 0.75], ['br', 0.75, 0.75],
+    ];
+    for (const [key, nx, ny] of grid) {
+      const d = getDepthAtPoint(nx, ny);
+      if (d !== null) depthSamples[key] = Math.round(d * 1000) / 1000; // meters, 3 decimal
+    }
+    payload.depth_samples = depthSamples;
+    payload.has_lidar = true;
+  }
+
+  try {
+    const r = await fetch(`${API_BASE}/api/ingest/frame3d`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      // Fallback to standard endpoint
+      await fetch(`${API_BASE}/api/ingest/frame`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_b64: b64 }),
+      });
+      return;
+    }
+    const data = await r.json();
+    if (data.detections) {
+      drawOverlayBoxes(data.detections, video.videoWidth, video.videoHeight);
+      data.detections.forEach(d => {
+        trackedObjects[d.label] = {
+          label: d.label, cx: d.cx, cy: d.cy,
+          confidence: d.confidence, age_seconds: 0,
+          timestamp_ms: Date.now(), depth: d.depth_m || null
+        };
+      });
+      updateUI();
+    }
+    document.getElementById('stat-frames').textContent = data.frame_count || frameCount;
+  } catch(e) {
+    // Silently ignore network errors
+  }
+}
+
+function drawOverlayBoxes(detections, vw, vh) {
+  const canvas = document.getElementById('overlay-canvas');
+  const video = document.getElementById('video');
+  canvas.width = video.clientWidth;
+  canvas.height = video.clientHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  detections.forEach(d => {
+    const bw = d.width || 0.08;
+    const bh = d.height || 0.08;
+    const x = (d.cx - bw / 2) * canvas.width;
+    const y = (d.cy - bh / 2) * canvas.height;
+    const w = bw * canvas.width;
+    const h = bh * canvas.height;
+
+    // Color by depth if available
+    let color = '#00bcd4';
+    if (d.depth_m) {
+      const t = Math.min(d.depth_m / 5.0, 1.0);
+      color = `hsl(${180 - t * 120}, 80%, 55%)`;
+    }
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
+
+    // Label
+    const label = d.depth_m
+      ? `${d.label} ${Math.round(d.confidence * 100)}% · ${d.depth_m.toFixed(1)}m`
+      : `${d.label} ${Math.round(d.confidence * 100)}%`;
+    ctx.font = 'bold 11px -apple-system, sans-serif';
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y - 18, tw + 8, 18);
+    ctx.fillStyle = '#000';
+    ctx.fillText(label, x + 4, y - 5);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Mini 3D Map (Three.js)
+// ---------------------------------------------------------------------------
+function initMini3D() {
+  const canvas = document.getElementById('mini-3d');
+  miniRenderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+  miniRenderer.setSize(140, 140);
+  miniRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+  miniScene = new THREE.Scene();
+  miniCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 50);
+  miniCamera.position.set(0.5, 1.2, 1.5);
+  miniCamera.lookAt(0.5, 0, 0.5);
+
+  // Ambient light
+  miniScene.add(new THREE.AmbientLight(0x404060, 1.5));
+  const dir = new THREE.DirectionalLight(0x00bcd4, 0.8);
+  dir.position.set(1, 2, 1);
+  miniScene.add(dir);
+
+  // Ground plane
+  const groundGeo = new THREE.PlaneGeometry(1, 1);
+  const groundMat = new THREE.MeshStandardMaterial({
+    color: 0x0a0e1a, transparent: true, opacity: 0.6,
+    roughness: 0.8, metalness: 0.2
+  });
+  const ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.set(0.5, 0, 0.5);
+  miniScene.add(ground);
+
+  // Grid
+  const gridHelper = new THREE.GridHelper(1, 5, 0x1a2040, 0x1a2040);
+  gridHelper.position.set(0.5, 0.001, 0.5);
+  miniScene.add(gridHelper);
+
+  // Bounding wireframe
+  const boxGeo = new THREE.BoxGeometry(1, 0.5, 1);
+  const boxEdges = new THREE.EdgesGeometry(boxGeo);
+  const boxLine = new THREE.LineSegments(boxEdges, new THREE.LineBasicMaterial({
+    color: 0x00bcd4, transparent: true, opacity: 0.15
+  }));
+  boxLine.position.set(0.5, 0.25, 0.5);
+  miniScene.add(boxLine);
+
+  animateMini3D();
+}
+
+function animateMini3D() {
+  requestAnimationFrame(animateMini3D);
+  // Slowly rotate camera around the scene
+  const t = Date.now() * 0.0003;
+  miniCamera.position.x = 0.5 + Math.sin(t) * 1.4;
+  miniCamera.position.z = 0.5 + Math.cos(t) * 1.4;
+  miniCamera.lookAt(0.5, 0.15, 0.5);
+
+  // Update object positions
+  const objects = Object.values(trackedObjects);
+  const activeLabels = new Set(objects.map(o => o.label));
+
+  // Remove old meshes
+  for (const label of Object.keys(objectMeshes)) {
+    if (!activeLabels.has(label)) {
+      miniScene.remove(objectMeshes[label]);
+      delete objectMeshes[label];
+    }
+  }
+
+  // Add/update meshes
+  objects.forEach(obj => {
+    const age = obj.age_seconds || 0;
+    const depth = obj.depth ? Math.min(obj.depth / 5.0, 1.0) : 0;
+    const y = depth * 0.4; // height based on depth
+
+    if (!objectMeshes[obj.label]) {
+      // Create a small sphere for each object
+      const geo = new THREE.SphereGeometry(0.03, 8, 8);
+      const mat = new THREE.MeshStandardMaterial({
+        color: age < 10 ? 0x00bcd4 : age < 60 ? 0xffc857 : 0x555555,
+        emissive: age < 10 ? 0x003844 : 0x000000,
+        roughness: 0.4, metalness: 0.6,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      miniScene.add(mesh);
+      objectMeshes[obj.label] = mesh;
+    }
+
+    const mesh = objectMeshes[obj.label];
+    mesh.position.set(obj.cx, y, obj.cy);
+
+    // Update color based on age
+    const color = age < 10 ? 0x00bcd4 : age < 60 ? 0xffc857 : 0x555555;
+    mesh.material.color.setHex(color);
+    mesh.material.emissive.setHex(age < 10 ? 0x003844 : 0x000000);
+  });
+
+  miniRenderer.render(miniScene, miniCamera);
+}
+
+// ---------------------------------------------------------------------------
+// UI Updates
+// ---------------------------------------------------------------------------
+function updateUI() {
+  const objects = Object.values(trackedObjects);
+  document.getElementById('stat-objects').textContent = objects.length;
+
+  // Object chips
+  const container = document.getElementById('obj-chips');
+  if (objects.length === 0) {
+    container.innerHTML = '<div style="font-size:.65rem;color:var(--muted);padding:2px 4px">Point camera at objects and tap SCAN</div>';
+    return;
+  }
+  container.innerHTML = objects
+    .sort((a, b) => (a.age_seconds || 0) - (b.age_seconds || 0))
+    .map(obj => {
+      const age = obj.age_seconds || 0;
+      const cls = age < 15 ? 'recent' : 'aged';
+      const depthStr = obj.depth ? ` ${obj.depth.toFixed(1)}m` : '';
+      return `<div class="obj-chip ${cls}"><span class="chip-dot"></span>${obj.label}${depthStr}</div>`;
+    }).join('');
+}
+
+function updateAges() {
+  const now = Date.now();
+  Object.values(trackedObjects).forEach(o => {
+    o.age_seconds = (now - o.timestamp_ms) / 1000;
+  });
+  updateUI();
+}
+
+// ---------------------------------------------------------------------------
+// Toggle controls
+// ---------------------------------------------------------------------------
+function toggle3DOverlay() {
+  show3D = !show3D;
+  document.getElementById('three-layer').style.display = show3D ? '' : 'none';
+  document.getElementById('btn-3d').classList.toggle('active', show3D);
+}
+
+function toggleVoice() {
+  // Quick voice query via text prompt
+  const q = prompt('Ask a question (e.g. "Where are my keys?")');
+  if (!q) return;
+  fetch(`${API_BASE}/api/voice/text-query`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text: q }),
+  }).then(r => r.json()).then(data => {
+    document.getElementById('scan-title').textContent = data.answer || 'No answer';
+    // Auto-clear after 5s
+    setTimeout(() => {
+      if (scanning) document.getElementById('scan-title').textContent = 'Scanning...';
+      else document.getElementById('scan-title').textContent = 'Ready to scan';
+    }, 5000);
+  }).catch(() => {
+    document.getElementById('scan-title').textContent = 'Query failed';
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Touch gestures for mini-3D
+// ---------------------------------------------------------------------------
+let touchStartY = 0;
+document.getElementById('mini-3d').addEventListener('touchstart', (e) => {
+  touchStartY = e.touches[0].clientY;
+}, { passive: true });
+
+document.getElementById('mini-3d').addEventListener('touchmove', (e) => {
+  const dy = (e.touches[0].clientY - touchStartY) * 0.01;
+  miniCamera.position.y = Math.max(0.3, Math.min(2.5, miniCamera.position.y + dy));
+  touchStartY = e.touches[0].clientY;
+}, { passive: true });
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+init();
+</script>
+</body>
+</html>

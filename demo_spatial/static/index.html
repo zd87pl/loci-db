@@ -128,6 +128,21 @@ button.danger.active{background:var(--red);color:#fff}
 .metric-val{font-size:1.3rem;font-weight:700;color:var(--accent)}
 .metric-lbl{font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
 
+/* LiDAR upload panel */
+.lidar-panel{padding:14px 16px;border-bottom:1px solid var(--border)}
+.lidar-panel h2{margin-bottom:10px;font-size:0.9rem}
+.lidar-drop-zone{border:2px dashed var(--border);border-radius:10px;padding:18px 12px;text-align:center;cursor:pointer;transition:all .2s;background:var(--panel-alt)}
+.lidar-drop-zone:hover,.lidar-drop-zone.drag-over{border-color:var(--accent);background:var(--accent-soft)}
+.lidar-drop-zone .drop-icon{font-size:1.8rem;margin-bottom:6px}
+.lidar-drop-zone .drop-label{font-size:0.78rem;color:var(--muted)}
+.lidar-drop-zone .drop-label strong{color:var(--text)}
+.lidar-apps{margin-top:10px;font-size:0.72rem;color:var(--muted);line-height:1.5}
+.lidar-apps a{color:var(--accent);text-decoration:none}
+.lidar-status{margin-top:8px;font-size:0.72rem;padding:6px 10px;border-radius:6px;display:none}
+.lidar-status.ok{background:rgba(74,222,128,.12);color:var(--green);border:1px solid rgba(74,222,128,.2);display:block}
+.lidar-status.err{background:rgba(248,113,113,.12);color:var(--red);border:1px solid rgba(248,113,113,.2);display:block}
+#pc-legend{font-size:0.68rem;color:var(--muted);margin-top:6px;display:none}
+
 /* Accessibility overrides */
 @media (prefers-contrast: high){
   :root{--bg:#fff;--panel:#fff;--panel-alt:#f5f5f5;--border:#000;--text:#000;--muted:#333;--accent:#006d82;--accent-soft:#d0f0f8;--red:#c00;--green:#060;--yellow:#a60}
@@ -292,6 +307,29 @@ button.danger.active{background:var(--red);color:#fff}
       </div>
     </div>
 
+    <!-- LiDAR Point Cloud Upload -->
+    <div class="lidar-panel">
+      <h2>LiDAR Point Cloud <span style="font-size:0.65rem;color:var(--accent);font-weight:500">NEW</span></h2>
+      <div class="lidar-drop-zone" id="lidar-drop" onclick="document.getElementById('lidar-file-input').click()"
+           ondragover="event.preventDefault();this.classList.add('drag-over')"
+           ondragleave="this.classList.remove('drag-over')"
+           ondrop="onPCDrop(event)"
+           role="button" tabindex="0" aria-label="Upload PLY point cloud file">
+        <div class="drop-icon">🗂️</div>
+        <div class="drop-label"><strong>Drop .ply file here</strong><br>or click to browse</div>
+      </div>
+      <input type="file" id="lidar-file-input" accept=".ply,.PLY" style="display:none" onchange="onPCFileSelect(event)">
+      <div class="lidar-status" id="lidar-status"></div>
+      <div id="pc-legend">📡 Point cloud loaded — visible on map as small dots</div>
+      <div class="lidar-apps">
+        <strong>How to get a LiDAR scan from your iPhone:</strong><br>
+        1. Install <a href="https://apps.apple.com/app/scaniverse/id1541433223" target="_blank">Scaniverse</a> (free) or Polycam<br>
+        2. Scan your room / scene<br>
+        3. Export → <strong>PLY</strong> (point cloud)<br>
+        4. AirDrop to Mac → upload here
+      </div>
+    </div>
+
   </aside>
 </main>
 
@@ -362,6 +400,8 @@ let frameCount = 0;
 let ws = null;
 let trackedObjects = {};   // label → { label, cx, cy, confidence, age_seconds, timestamp_ms }
 let selectedObject = null;
+let _pcPoints = [];        // uploaded LiDAR point cloud — array of {x,y,z,r?,g?,b?}
+let _pcBounds = null;      // {xMin,xMax,zMin,zMax} for normalization
 let mediaRecorder = null;
 let audioChunks = [];
 let isRecording = false;
@@ -630,6 +670,25 @@ function drawMap() {
   ctx.strokeStyle = isDark ? 'rgba(34,211,238,0.15)' : 'rgba(8,145,178,0.2)';
   ctx.lineWidth = 1.5;
   ctx.strokeRect(padding, padding, inner, inner);
+
+  // LiDAR point cloud overlay (top-down XZ projection)
+  if (_pcPoints.length > 0 && _pcBounds) {
+    const {xMin, xMax, zMin, zMax} = _pcBounds;
+    const xRange = xMax - xMin || 1;
+    const zRange = zMax - zMin || 1;
+    for (const pt of _pcPoints) {
+      const nx = (pt.x - xMin) / xRange;          // 0–1 left–right
+      const nz = 1 - (pt.z - zMin) / zRange;      // 0–1 front–back (flip Z)
+      const px = padding + nx * inner;
+      const pz = padding + nz * inner;
+      if (pt.r !== undefined) {
+        ctx.fillStyle = `rgba(${pt.r},${pt.g},${pt.b},0.55)`;
+      } else {
+        ctx.fillStyle = isDark ? 'rgba(34,211,238,0.35)' : 'rgba(8,145,178,0.35)';
+      }
+      ctx.fillRect(px - 1, pz - 1, 2, 2);
+    }
+  }
 
   // Objects
   const accentColor = isDark ? '#22d3ee' : '#0891b2';
@@ -999,6 +1058,63 @@ checkBackend();
 setInterval(checkBackend, 10000);
 connectWS();
 drawMap();
+
+// ---------------------------------------------------------------------------
+// LiDAR point cloud upload
+// ---------------------------------------------------------------------------
+function _computePCBounds(pts) {
+  if (!pts.length) return null;
+  let xMin = Infinity, xMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+  for (const p of pts) {
+    if (p.x < xMin) xMin = p.x; if (p.x > xMax) xMax = p.x;
+    if (p.z < zMin) zMin = p.z; if (p.z > zMax) zMax = p.z;
+  }
+  return {xMin, xMax, zMin, zMax};
+}
+
+async function uploadPLY(file) {
+  const statusEl = document.getElementById('lidar-status');
+  statusEl.className = 'lidar-status';
+  statusEl.textContent = `Uploading ${file.name}…`;
+  statusEl.style.display = 'block';
+  statusEl.classList.add('ok');
+
+  const fd = new FormData();
+  fd.append('file', file);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/ingest/pointcloud`, { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Upload failed');
+
+    statusEl.textContent = `✓ Loaded ${data.count.toLocaleString()} points — fetching for map…`;
+
+    // Fetch downsampled points for visualization
+    const pcRes = await fetch(`${API_BASE}/api/pointcloud/latest?max_points=8000`);
+    const pcData = await pcRes.json();
+    _pcPoints = pcData.points || [];
+    _pcBounds = _computePCBounds(_pcPoints);
+    drawMap();
+
+    statusEl.textContent = `✓ ${data.count.toLocaleString()} pts · showing ${_pcPoints.length.toLocaleString()} on map`;
+    document.getElementById('pc-legend').style.display = 'block';
+  } catch (e) {
+    statusEl.className = 'lidar-status err';
+    statusEl.textContent = `✗ ${e.message}`;
+  }
+}
+
+function onPCFileSelect(e) {
+  const file = e.target.files[0];
+  if (file) uploadPLY(file);
+}
+
+function onPCDrop(e) {
+  e.preventDefault();
+  document.getElementById('lidar-drop').classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) uploadPLY(file);
+}
 </script>
 </body>
 </html>

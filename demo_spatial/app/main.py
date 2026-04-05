@@ -293,6 +293,48 @@ async def ingestion_status():
 
 
 # ---------------------------------------------------------------------------
+# Detection class configuration (YOLO-World open-vocabulary)
+# ---------------------------------------------------------------------------
+
+class DetectionClassesRequest(BaseModel):
+    classes: list[str] = Field(
+        ...,
+        description="List of object class names for open-vocabulary detection",
+        min_length=1,
+    )
+
+
+@app.get("/api/detection/classes")
+async def get_detection_classes():
+    """Return the current open-vocabulary detection class list."""
+    return {
+        "classes": ingestion.classes,
+        "count": len(ingestion.classes),
+        "open_vocabulary": ingestion._is_world_model,
+        "model": ingestion.status()["yolo_model"],
+    }
+
+
+@app.put("/api/detection/classes")
+async def set_detection_classes(req: DetectionClassesRequest):
+    """Update the open-vocabulary detection class list at runtime.
+
+    Allows users to add custom objects to track (e.g. "insulin pen", "AirPods case").
+    Only effective when using a YOLO-World model.
+    """
+    if not ingestion._is_world_model:
+        raise HTTPException(
+            status_code=400,
+            detail="Class configuration requires a YOLO-World model. Set YOLO_MODEL env var.",
+        )
+    ingestion.set_classes(req.classes)
+    return {
+        "classes": ingestion.classes,
+        "count": len(ingestion.classes),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Spatial query endpoints
 # ---------------------------------------------------------------------------
 

@@ -94,7 +94,7 @@ if os.path.isdir(_static_dir):
 async def index():
     idx = os.path.join(_static_dir, "index.html")
     if os.path.exists(idx):
-        return FileResponse(idx)
+        return FileResponse(idx, headers={"Cache-Control": "no-cache"})
     return {"message": "LOCI Spatial Memory Assistant API", "docs": "/docs"}
 
 
@@ -103,7 +103,7 @@ async def scanner():
     """Mobile-optimized 3D scanner page for iPhone (camera + LiDAR)."""
     scanner_path = os.path.join(_static_dir, "scanner.html")
     if os.path.exists(scanner_path):
-        return FileResponse(scanner_path)
+        return FileResponse(scanner_path, headers={"Cache-Control": "no-cache"})
     return {"error": "scanner.html not found"}
 
 

@@ -286,8 +286,9 @@ button.danger.active{background:var(--red);color:#fff}
 // ─────────────────────────────────────────────────────────────────────────────
 // Config
 // ─────────────────────────────────────────────────────────────────────────────
+const _hostname = (window.location.hostname === '0.0.0.0' || window.location.hostname === '') ? 'localhost' : window.location.hostname;
 const API_BASE = window.location.port === '8001'
-  ? `${window.location.protocol}//${window.location.hostname}:8001`
+  ? `${window.location.protocol}//${_hostname}:8001`
   : 'http://localhost:8001';
 const WS_URL = API_BASE.replace(/^http/, 'ws') + '/ws';
 const SCAN_FPS = 2;

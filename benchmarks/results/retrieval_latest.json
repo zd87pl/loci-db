@@ -1,0 +1,153 @@
+{
+  "config": {
+    "vector_dim": 128,
+    "queries_per_test": 300,
+    "warmup": 20,
+    "limit": 10,
+    "seed": 42,
+    "dataset_sizes": [
+      100,
+      500,
+      1000
+    ],
+    "platform": "arm64",
+    "python": "3.14.3"
+  },
+  "datasets": [
+    {
+      "n": 100,
+      "insert_s": 0.0018,
+      "insert_rate": 55550.0,
+      "vector_only": {
+        "p50_us": 224.1,
+        "p95_us": 229.2,
+        "p99_us": 243.2,
+        "mean_us": 224.9,
+        "min_us": 220.1,
+        "max_us": 273.6
+      },
+      "temporal": {
+        "p50_us": 140.5,
+        "p95_us": 143.7,
+        "p99_us": 145.7,
+        "mean_us": 141.0,
+        "min_us": 138.6,
+        "max_us": 147.0
+      },
+      "label_filter": {
+        "p50_us": 76.2,
+        "p95_us": 78.0,
+        "p99_us": 80.4,
+        "mean_us": 76.4,
+        "min_us": 75.5,
+        "max_us": 82.3
+      },
+      "spatial": {
+        "p50_us": 116374.2,
+        "p95_us": 122025.5,
+        "p99_us": 124333.5,
+        "mean_us": 116723.2,
+        "min_us": 110646.3,
+        "max_us": 130312.0
+      },
+      "spatial_temporal": {
+        "p50_us": 38544.6,
+        "p95_us": 41450.0,
+        "p99_us": 43051.3,
+        "mean_us": 38799.9,
+        "min_us": 35814.2,
+        "max_us": 52088.2
+      }
+    },
+    {
+      "n": 500,
+      "insert_s": 0.0091,
+      "insert_rate": 55024.0,
+      "vector_only": {
+        "p50_us": 970.1,
+        "p95_us": 999.1,
+        "p99_us": 1039.4,
+        "mean_us": 971.2,
+        "min_us": 931.0,
+        "max_us": 1069.8
+      },
+      "temporal": {
+        "p50_us": 537.5,
+        "p95_us": 589.3,
+        "p99_us": 598.1,
+        "mean_us": 542.2,
+        "min_us": 510.7,
+        "max_us": 635.4
+      },
+      "label_filter": {
+        "p50_us": 255.8,
+        "p95_us": 278.8,
+        "p99_us": 285.9,
+        "mean_us": 258.1,
+        "min_us": 242.0,
+        "max_us": 288.9
+      },
+      "spatial": {
+        "p50_us": 369407.4,
+        "p95_us": 383548.2,
+        "p99_us": 394228.9,
+        "mean_us": 369963.8,
+        "min_us": 353172.7,
+        "max_us": 404845.9
+      },
+      "spatial_temporal": {
+        "p50_us": 166156.7,
+        "p95_us": 170990.4,
+        "p99_us": 173454.3,
+        "mean_us": 166105.4,
+        "min_us": 157964.6,
+        "max_us": 176919.0
+      }
+    },
+    {
+      "n": 1000,
+      "insert_s": 0.0161,
+      "insert_rate": 62019.0,
+      "vector_only": {
+        "p50_us": 1865.3,
+        "p95_us": 1998.9,
+        "p99_us": 2093.5,
+        "mean_us": 1881.3,
+        "min_us": 1694.0,
+        "max_us": 2468.0
+      },
+      "temporal": {
+        "p50_us": 1058.7,
+        "p95_us": 1140.0,
+        "p99_us": 1181.3,
+        "mean_us": 1070.6,
+        "min_us": 971.0,
+        "max_us": 1191.4
+      },
+      "label_filter": {
+        "p50_us": 474.8,
+        "p95_us": 493.1,
+        "p99_us": 501.9,
+        "mean_us": 471.1,
+        "min_us": 421.0,
+        "max_us": 505.8
+      },
+      "spatial": {
+        "p50_us": 675232.9,
+        "p95_us": 691162.0,
+        "p99_us": 700408.9,
+        "mean_us": 676164.5,
+        "min_us": 654093.0,
+        "max_us": 760793.7
+      },
+      "spatial_temporal": {
+        "p50_us": 330586.6,
+        "p95_us": 340500.4,
+        "p99_us": 344304.5,
+        "mean_us": 330489.0,
+        "min_us": 314542.6,
+        "max_us": 346206.3
+      }
+    }
+  ]
+}

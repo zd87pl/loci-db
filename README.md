@@ -226,7 +226,26 @@ ws = adapter.from_numpy(embedding, position, ts, scene_id)
 
 ## Performance
 
-Run the publication benchmark to generate numbers for your hardware:
+**Raw spatiotemporal query latency: ~75µs p50** (label-filtered, 100 objects, 128-dim, Apple Silicon).
+
+| N objects | Query type | P50 | P99 |
+|--:|:--|--:|--:|
+| 100 | Label-filtered (demo path) | 75µs | 124µs |
+| 100 | Vector-only ANN | 212µs | 217µs |
+| 100 | Temporal shard pruning | 156µs | 188µs |
+| 500 | Label-filtered (demo path) | 259µs | 281µs |
+| 1,000 | Label-filtered (demo path) | 469µs | 514µs |
+| 1,000 | Vector-only ANN | 1.86ms | 2.08ms |
+
+Insert throughput: **~59,000 states/s** (in-memory backend, 128-dim vectors).
+
+Run the retrieval benchmark on your hardware:
+
+```bash
+python benchmarks/benchmark_retrieval.py
+```
+
+For a LOCI-vs-naive-Qdrant comparison benchmark:
 
 ```bash
 # In-memory (no Qdrant server needed):
@@ -236,11 +255,7 @@ python benchmarks/vs_naive_qdrant.py
 QDRANT_URL=http://localhost:6333 python benchmarks/vs_naive_qdrant.py
 ```
 
-Results are written to `benchmarks/results/latest.json` and printed as a markdown table.
-The benchmark includes both historical fixed-`r4` baselines and a `LOCI current`
-arm that mirrors the shipped query path more closely.
-
-For the local in-memory backend, run `python benchmarks/local_benchmark.py` for insert/query throughput.
+Results are written to `benchmarks/results/` and printed as markdown tables.
 
 ## Why not SpatCode?
 

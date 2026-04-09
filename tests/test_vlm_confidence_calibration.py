@@ -10,16 +10,14 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
-import sys
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+import sys
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "demo_spatial"))
 
 from app.scene_ingestion import Detection, SceneIngestion
 from app.vlm_client import _parse_vlm_response
-
 
 # ---------------------------------------------------------------------------
 # Stage 1: VLM confidence parsed from prompt response
@@ -50,10 +48,7 @@ def test_vlm_confidence_penalized_when_yolo_absent() -> None:
     raw_yolo: list[Detection] = []
 
     # Simulate the corroboration check directly
-    yolo_corroborated = any(
-        ing._iou(0.5, 0.5, d.cx, d.cy) > 0.3
-        for d in raw_yolo
-    )
+    yolo_corroborated = any(ing._iou(0.5, 0.5, d.cx, d.cy) > 0.3 for d in raw_yolo)
     final_conf = vlm_raw_conf * (1.0 if yolo_corroborated else 0.6)
     assert abs(final_conf - 0.48) < 1e-6
 
@@ -67,12 +62,11 @@ def test_vlm_confidence_unpenalized_when_yolo_corroborates() -> None:
     vlm_raw_conf = 0.8
     vlm_cx, vlm_cy = 0.5, 0.5
     # YOLO has a detection for this label at same position
-    yolo_det = Detection(label="cup", cx=0.5, cy=0.5, width=0.1, height=0.1, confidence=0.3, source="yolo")
-
-    yolo_corroborated = any(
-        ing._iou(vlm_cx, vlm_cy, d.cx, d.cy) > 0.3
-        for d in [yolo_det]
+    yolo_det = Detection(
+        label="cup", cx=0.5, cy=0.5, width=0.1, height=0.1, confidence=0.3, source="yolo"
     )
+
+    yolo_corroborated = any(ing._iou(vlm_cx, vlm_cy, d.cx, d.cy) > 0.3 for d in [yolo_det])
     final_conf = vlm_raw_conf * (1.0 if yolo_corroborated else 0.6)
     # YOLO corroborates → no penalty
     assert abs(final_conf - 0.8) < 1e-6
@@ -88,12 +82,13 @@ def test_vlm_confidence_penalized_when_yolo_has_different_label() -> None:
     vlm_cx, vlm_cy = 0.5, 0.5
     vlm_label = "cup"
     # YOLO detects "bottle" (different label) at same position — different label bucket
-    yolo_det = Detection(label="bottle", cx=0.5, cy=0.5, width=0.1, height=0.1, confidence=0.3, source="yolo")
+    yolo_det = Detection(
+        label="bottle", cx=0.5, cy=0.5, width=0.1, height=0.1, confidence=0.3, source="yolo"
+    )
     raw_by_label = {"bottle": [yolo_det]}  # label "cup" not present
 
     yolo_corroborated = any(
-        ing._iou(vlm_cx, vlm_cy, d.cx, d.cy) > 0.3
-        for d in raw_by_label.get(vlm_label, [])
+        ing._iou(vlm_cx, vlm_cy, d.cx, d.cy) > 0.3 for d in raw_by_label.get(vlm_label, [])
     )
     final_conf = vlm_raw_conf * (1.0 if yolo_corroborated else 0.6)
     assert abs(final_conf - 0.48) < 1e-6

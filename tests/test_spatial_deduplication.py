@@ -11,8 +11,8 @@ Covers:
 
 from __future__ import annotations
 
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "demo_spatial"))
 
@@ -35,7 +35,9 @@ def test_duplicate_high_iou_merges_into_existing_record() -> None:
     id1 = mem.observe("cup", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts, min_confidence=0.0)
     assert id1 is not None
 
-    id2 = mem.observe("cup", cx=0.51, cy=0.51, confidence=0.85, timestamp_ms=ts + 100, min_confidence=0.0)
+    id2 = mem.observe(
+        "cup", cx=0.51, cy=0.51, confidence=0.85, timestamp_ms=ts + 100, min_confidence=0.0
+    )
     assert id2 is not None
     # Should be the same record (merged), not a new one
     assert id2 == id1
@@ -50,7 +52,9 @@ def test_unique_low_iou_inserts_as_new_record() -> None:
     mem = _make_memory(dedup_iou_threshold=0.5, dedup_window_ms=5000)
     ts = 1000
     id1 = mem.observe("phone", cx=0.1, cy=0.1, confidence=0.8, timestamp_ms=ts, min_confidence=0.0)
-    id2 = mem.observe("phone", cx=0.9, cy=0.9, confidence=0.8, timestamp_ms=ts + 100, min_confidence=0.0)
+    id2 = mem.observe(
+        "phone", cx=0.9, cy=0.9, confidence=0.8, timestamp_ms=ts + 100, min_confidence=0.0
+    )
 
     assert id1 is not None
     assert id2 is not None
@@ -72,7 +76,9 @@ def test_merge_uses_confidence_weighted_position_average() -> None:
     # First observation: high confidence at 0.5
     mem.observe("bottle", cx=0.5, cy=0.5, confidence=0.9, timestamp_ms=ts, min_confidence=0.0)
     # Second observation: lower confidence very slightly offset (ensures IoU > 0.5)
-    mem.observe("bottle", cx=0.505, cy=0.505, confidence=0.3, timestamp_ms=ts + 50, min_confidence=0.0)
+    mem.observe(
+        "bottle", cx=0.505, cy=0.505, confidence=0.3, timestamp_ms=ts + 50, min_confidence=0.0
+    )
 
     obs = mem.where_is("bottle")
     assert len(obs) == 1
@@ -104,7 +110,9 @@ def test_dedup_ignores_records_outside_window() -> None:
     ts = 0
     id1 = mem.observe("wallet", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts, min_confidence=0.0)
     # Second detection is 2000ms later — first record is outside the window
-    id2 = mem.observe("wallet", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts + 2000, min_confidence=0.0)
+    id2 = mem.observe(
+        "wallet", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts + 2000, min_confidence=0.0
+    )
 
     assert id1 is not None
     assert id2 is not None
@@ -128,8 +136,12 @@ def test_legacy_records_default_to_nominal_dimensions() -> None:
     mem = _make_memory(dedup_iou_threshold=0.5, dedup_window_ms=5000)
     ts = 1000
     # Two identical positions — must merge regardless (uses 0.1x0.1 proxy)
-    id1 = mem.observe("glasses", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts, min_confidence=0.0)
-    id2 = mem.observe("glasses", cx=0.5, cy=0.5, confidence=0.9, timestamp_ms=ts + 100, min_confidence=0.0)
+    id1 = mem.observe(
+        "glasses", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts, min_confidence=0.0
+    )
+    id2 = mem.observe(
+        "glasses", cx=0.5, cy=0.5, confidence=0.9, timestamp_ms=ts + 100, min_confidence=0.0
+    )
 
     assert id1 is not None
     assert id2 == id1  # merged
@@ -149,7 +161,9 @@ def test_dedup_isolated_by_label() -> None:
     mem = _make_memory(dedup_iou_threshold=0.5, dedup_window_ms=5000)
     ts = 1000
     id_cup = mem.observe("cup", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts, min_confidence=0.0)
-    id_bottle = mem.observe("bottle", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts + 50, min_confidence=0.0)
+    id_bottle = mem.observe(
+        "bottle", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts + 50, min_confidence=0.0
+    )
 
     assert id_cup is not None
     assert id_bottle is not None

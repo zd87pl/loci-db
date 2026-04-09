@@ -60,7 +60,9 @@ def test_consensus_reached_triggers_storage() -> None:
     ing._update_consensus("cup", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts, depth_m=None)
     ing._memory.observe.assert_not_called()  # first detection buffered
 
-    ing._update_consensus("cup", cx=0.51, cy=0.51, confidence=0.9, timestamp_ms=ts + 100, depth_m=None)
+    ing._update_consensus(
+        "cup", cx=0.51, cy=0.51, confidence=0.9, timestamp_ms=ts + 100, depth_m=None
+    )
     ing._memory.observe.assert_called_once()
 
 
@@ -69,10 +71,14 @@ def test_consensus_with_min_count_three() -> None:
     ing = _make_ingestion(consensus_min_count=3)
     ts = 1000
     ing._update_consensus("chair", cx=0.5, cy=0.5, confidence=0.7, timestamp_ms=ts, depth_m=None)
-    ing._update_consensus("chair", cx=0.5, cy=0.5, confidence=0.75, timestamp_ms=ts + 100, depth_m=None)
+    ing._update_consensus(
+        "chair", cx=0.5, cy=0.5, confidence=0.75, timestamp_ms=ts + 100, depth_m=None
+    )
     ing._memory.observe.assert_not_called()  # 2 detections — not yet
 
-    ing._update_consensus("chair", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts + 200, depth_m=None)
+    ing._update_consensus(
+        "chair", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts + 200, depth_m=None
+    )
     ing._memory.observe.assert_called_once()
 
 
@@ -104,7 +110,9 @@ def test_consensus_uses_averaged_position_and_max_confidence() -> None:
     ts = 1000
     # Use nearby positions so IoU > threshold (box_size=0.1 default)
     ing._update_consensus("bottle", cx=0.50, cy=0.50, confidence=0.7, timestamp_ms=ts, depth_m=None)
-    ing._update_consensus("bottle", cx=0.52, cy=0.52, confidence=0.9, timestamp_ms=ts + 100, depth_m=None)
+    ing._update_consensus(
+        "bottle", cx=0.52, cy=0.52, confidence=0.9, timestamp_ms=ts + 100, depth_m=None
+    )
 
     ing._memory.observe.assert_called_once()
     call_kwargs = ing._memory.observe.call_args
@@ -125,7 +133,9 @@ def test_high_iou_overlap_counts_as_same_object() -> None:
     ts = 1000
     # Nearly identical positions → high IoU
     ing._update_consensus("phone", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts, depth_m=None)
-    ing._update_consensus("phone", cx=0.52, cy=0.52, confidence=0.85, timestamp_ms=ts + 50, depth_m=None)
+    ing._update_consensus(
+        "phone", cx=0.52, cy=0.52, confidence=0.85, timestamp_ms=ts + 50, depth_m=None
+    )
     ing._memory.observe.assert_called_once()
 
 
@@ -135,7 +145,9 @@ def test_low_iou_overlap_treated_as_different_object() -> None:
     ts = 1000
     # Far apart positions → near-zero IoU
     ing._update_consensus("phone", cx=0.1, cy=0.1, confidence=0.8, timestamp_ms=ts, depth_m=None)
-    ing._update_consensus("phone", cx=0.9, cy=0.9, confidence=0.85, timestamp_ms=ts + 50, depth_m=None)
+    ing._update_consensus(
+        "phone", cx=0.9, cy=0.9, confidence=0.85, timestamp_ms=ts + 50, depth_m=None
+    )
     # Both are buffered as different spatial positions, consensus not reached for either
     ing._memory.observe.assert_not_called()
 
@@ -171,6 +183,8 @@ def test_consensus_buffer_isolated_by_label() -> None:
     ing = _make_ingestion(consensus_min_count=2)
     ts = 1000
     ing._update_consensus("cup", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts, depth_m=None)
-    ing._update_consensus("bottle", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts + 50, depth_m=None)
+    ing._update_consensus(
+        "bottle", cx=0.5, cy=0.5, confidence=0.8, timestamp_ms=ts + 50, depth_m=None
+    )
     # Both are different labels — neither has 2 confirmations yet
     ing._memory.observe.assert_not_called()

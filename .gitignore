@@ -9,3 +9,9 @@ build/
 
 # Auto-generated SSL certs for demo
 demo_spatial/.certs/
+
+# Rust build artifacts
+loci-core/target/
+
+# Python virtual environments
+.venv/

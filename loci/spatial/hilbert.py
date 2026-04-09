@@ -11,6 +11,7 @@ import itertools
 import math
 from dataclasses import dataclass
 
+import numpy as np
 from hilbertcurve.hilbertcurve import HilbertCurve
 
 
@@ -66,9 +67,28 @@ class HilbertIndex:
     payload-level post-filtering and narrow point lookups.
     """
 
+    _LUT_MAX_SIDE = 16  # Precompute LUT for resolutions where 2^p <= this
+
     def __init__(self, resolutions: list[int] | None = None) -> None:
         self.resolutions = resolutions or [4, 8, 12]
         self._curves: dict[int, HilbertCurve] = {r: _make_curve(r) for r in self.resolutions}
+        self._luts: dict[int, np.ndarray] = {}
+        for r in self.resolutions:
+            side = 1 << r
+            if side <= self._LUT_MAX_SIDE:
+                self._luts[r] = self._build_lut(r)
+
+    def _build_lut(self, resolution: int) -> np.ndarray:
+        """Precompute the full (x, y, z, t) → hilbert_distance LUT for *resolution*."""
+        curve = self._curves[resolution]
+        side = 1 << resolution
+        lut = np.empty((side, side, side, side), dtype=np.uint32)
+        for ix in range(side):
+            for iy in range(side):
+                for iz in range(side):
+                    for it in range(side):
+                        lut[ix, iy, iz, it] = curve.distance_from_point([ix, iy, iz, it])
+        return lut
 
     def encode(
         self,
@@ -115,9 +135,19 @@ class HilbertIndex:
         Returns:
             Sorted list of unique Hilbert IDs.
         """
-        _, curve, ranges = self._expanded_index_ranges(bounds, resolution, overlap_factor)
+        res, curve, ranges = self._expanded_index_ranges(bounds, resolution, overlap_factor)
         (ix_lo, ix_hi), (iy_lo, iy_hi), (iz_lo, iz_hi), (it_lo, it_hi) = ranges
 
+        if res in self._luts:
+            sub = self._luts[res][
+                ix_lo : ix_hi + 1,
+                iy_lo : iy_hi + 1,
+                iz_lo : iz_hi + 1,
+                it_lo : it_hi + 1,
+            ]
+            return [int(x) for x in np.unique(sub)]
+
+        # Fallback for resolutions without a precomputed LUT
         ids: set[int] = set()
         for ix, iy, iz, it in itertools.product(
             range(ix_lo, ix_hi + 1),

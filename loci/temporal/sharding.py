@@ -62,9 +62,12 @@ def epochs_in_range(
         Sorted list of epoch IDs.
     """
     if _RUST_AVAILABLE:
-        return [int(x) for x in _rust.epochs_for_time_window(
-            start_ms=start_ms, end_ms=end_ms, epoch_size_ms=epoch_size_ms
-        )]
+        return [
+            int(x)
+            for x in _rust.epochs_for_time_window(
+                start_ms=start_ms, end_ms=end_ms, epoch_size_ms=epoch_size_ms
+            )
+        ]
     first = epoch_id(start_ms, epoch_size_ms)
     last = epoch_id(end_ms, epoch_size_ms)
     return list(range(first, last + 1))

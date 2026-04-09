@@ -10,7 +10,7 @@ using vectorised numpy similarity.  Designed for:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -183,11 +183,11 @@ def _batch_score(distance: str, query_vector: list[float], candidates: list[_Poi
             return np.zeros(len(candidates))
         norms = np.linalg.norm(mat, axis=1)
         norms[norms == 0] = 1.0
-        return (mat @ q) / (norms * q_norm)
+        return cast(np.ndarray, (mat @ q) / (norms * q_norm))
     elif distance == "dot":
         return mat @ q
     else:  # euclidean
-        return -np.linalg.norm(mat - q, axis=1)
+        return cast(np.ndarray, -np.linalg.norm(mat - q, axis=1))
 
 
 # ------------------------------------------------------------------

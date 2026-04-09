@@ -144,7 +144,7 @@ class SceneIngestion:
             self._model.set_classes(self._classes)
             logger.info("YOLO-World classes updated: %d classes", len(self._classes))
 
-    def _run_yolo(self, image_bytes: bytes) -> list[Detection]:
+    def _run_yolo(self, image_bytes: bytes, conf_threshold: float = _YOLO_CONF_THRESHOLD) -> list[Detection]:
         """Run YOLO inference on raw image bytes. Returns list of detections."""
         if self._model is None:
             return []
@@ -157,7 +157,7 @@ class SceneIngestion:
 
             results = self._model.predict(
                 source=np.array(img),
-                conf=_YOLO_CONF_THRESHOLD,
+                conf=conf_threshold,
                 verbose=False,
                 stream=False,
             )
@@ -322,14 +322,37 @@ class SceneIngestion:
         ):
             try:
                 vlm_results = await self._vlm.describe_scene(image_bytes)
+                # Stage 2 — run YOLO without threshold for corroboration
+                raw_yolo = await asyncio.get_event_loop().run_in_executor(
+                    None, self._run_yolo, image_bytes, 0.01
+                )
+                raw_by_label: dict[str, list[Detection]] = {}
+                for d in raw_yolo:
+                    raw_by_label.setdefault(d.label, []).append(d)
+
                 for obj in vlm_results:
+                    lbl = obj["label"]
+                    raw_conf = obj.get("confidence", 0.50)  # Stage 1/3: VLM-provided or fallback
+                    width = obj.get("width", 0.3)
+                    height = obj.get("height", 0.3)
+                    vlm_cx = obj.get("cx", 0.5)
+                    vlm_cy = obj.get("cy", 0.5)
+
+                    # Stage 2: apply skepticism multiplier when YOLO sees nothing for this label
+                    yolo_corroborated = any(
+                        self._iou(vlm_cx, vlm_cy, d.cx, d.cy) > 0.3
+                        for d in raw_by_label.get(lbl, [])
+                    )
+                    if not yolo_corroborated:
+                        raw_conf *= 0.6
+
                     vlm_detections.append(Detection(
-                        label=obj["label"],
-                        cx=obj.get("cx", 0.5),
-                        cy=obj.get("cy", 0.5),
-                        width=obj.get("width", 0.1),
-                        height=obj.get("height", 0.1),
-                        confidence=obj.get("confidence", 0.7),
+                        label=lbl,
+                        cx=vlm_cx,
+                        cy=vlm_cy,
+                        width=width,
+                        height=height,
+                        confidence=raw_conf,
                         source="vlm",
                     ))
             except Exception as e:

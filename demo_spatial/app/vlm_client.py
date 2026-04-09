@@ -262,9 +262,9 @@ def _parse_vlm_response(raw: str) -> list[dict]:
                 "label": str(obj.get("label", "object")).strip().lower(),
                 "cx": float(obj.get("cx", 0.5)),
                 "cy": float(obj.get("cy", 0.5)),
-                "width": float(obj.get("width", 0.1)),
-                "height": float(obj.get("height", 0.1)),
-                "confidence": float(obj.get("confidence", 0.7)),
+                "width": float(obj.get("width", 0.3)),
+                "height": float(obj.get("height", 0.3)),
+                "confidence": float(obj.get("confidence", 0.50)),
                 "description": str(obj.get("description", "")),
             })
         return validated

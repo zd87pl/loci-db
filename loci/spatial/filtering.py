@@ -11,8 +11,14 @@ def exact_payload_match(
     payload: dict[str, Any],
     spatial_bounds: SpatialBounds | dict | None = None,
     time_window_ms: tuple[int, int] | None = None,
+    min_confidence: float | None = None,
 ) -> bool:
     """Return True when a payload satisfies the exact requested bounds."""
+    if min_confidence is not None:
+        conf = payload.get("confidence")
+        if conf is None or conf < min_confidence:
+            return False
+
     if spatial_bounds is not None:
         bounds = (
             spatial_bounds

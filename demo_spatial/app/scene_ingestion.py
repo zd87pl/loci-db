@@ -17,6 +17,7 @@ import io
 import logging
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -89,6 +90,9 @@ class SceneIngestion:
         vlm_client: "VLMClient | None" = None,
         use_vlm_fallback: bool = True,
         classes: list[str] | None = None,
+        consensus_window_ms: int = 1000,
+        consensus_min_count: int = 2,
+        consensus_iou_threshold: float = 0.4,
     ) -> None:
         self._memory = memory
         self._vlm = vlm_client
@@ -100,6 +104,11 @@ class SceneIngestion:
         self._capturing = False
         self.last_detections: list[Detection] = []
         self.frame_count = 0
+        # Temporal consensus buffer: per-label deque of (cx, cy, confidence, timestamp_ms)
+        self._consensus_buffer: dict[str, deque[tuple[float, float, float, int]]] = {}
+        self.consensus_window_ms = consensus_window_ms
+        self.consensus_min_count = consensus_min_count
+        self.consensus_iou_threshold = consensus_iou_threshold
 
     def _load_yolo(self):
         """Lazy-load YOLO model. Uses YOLO-World (open-vocab) by default."""
@@ -174,6 +183,82 @@ class SceneIngestion:
         except Exception as e:
             logger.error("YOLO inference error: %s", e)
             return []
+
+    @staticmethod
+    def _iou(cx1: float, cy1: float, cx2: float, cy2: float, box_size: float = 0.1) -> float:
+        """Compute IoU between two boxes using a fixed-size proxy bbox (cx, cy, w, h)."""
+        half = box_size / 2
+        ax1, ay1, ax2, ay2 = cx1 - half, cy1 - half, cx1 + half, cy1 + half
+        bx1, by1, bx2, by2 = cx2 - half, cy2 - half, cx2 + half, cy2 + half
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+        inter_w = max(0.0, inter_x2 - inter_x1)
+        inter_h = max(0.0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+        box_area = box_size * box_size
+        union_area = 2 * box_area - inter_area
+        return inter_area / union_area if union_area > 0 else 0.0
+
+    def _update_consensus(
+        self,
+        label: str,
+        cx: float,
+        cy: float,
+        confidence: float,
+        timestamp_ms: int,
+        depth_m: float | None,
+    ) -> None:
+        """Buffer a detection and call observe() when temporal consensus is reached.
+
+        A detection is considered the same object as a buffered entry when:
+        - same label (keyed by label)
+        - IoU > consensus_iou_threshold (spatial overlap)
+        - within consensus_window_ms (temporal window)
+
+        On reaching consensus_min_count confirmations, observe() is called with
+        the averaged cx/cy and the maximum confidence of all matching entries.
+        """
+        if label not in self._consensus_buffer:
+            self._consensus_buffer[label] = deque()
+
+        buf = self._consensus_buffer[label]
+
+        # Evict entries outside the rolling window
+        cutoff = timestamp_ms - self.consensus_window_ms
+        while buf and buf[0][3] < cutoff:
+            buf.popleft()
+
+        # Find entries that spatially overlap with the new detection
+        matching_idxs = [
+            i for i, (bcx, bcy, _, _ts) in enumerate(buf)
+            if self._iou(cx, cy, bcx, bcy) > self.consensus_iou_threshold
+        ]
+
+        if len(matching_idxs) + 1 >= self.consensus_min_count:
+            # Consensus reached — compute averaged position and max confidence
+            matching_entries = [buf[i] for i in matching_idxs]
+            all_cx = [e[0] for e in matching_entries] + [cx]
+            all_cy = [e[1] for e in matching_entries] + [cy]
+            all_conf = [e[2] for e in matching_entries] + [confidence]
+            avg_cx = sum(all_cx) / len(all_cx)
+            avg_cy = sum(all_cy) / len(all_cy)
+            max_conf = max(all_conf)
+            try:
+                self._memory.observe(
+                    label=label,
+                    cx=avg_cx,
+                    cy=avg_cy,
+                    confidence=max_conf,
+                    timestamp_ms=timestamp_ms,
+                    depth_m=depth_m,
+                )
+            except Exception as e:
+                logger.error("Failed to store consensus detection %s: %s", label, e)
+        else:
+            # Not enough confirmations yet — buffer this detection
+            buf.append((cx, cy, confidence, timestamp_ms))
 
     @staticmethod
     def _lookup_depth(
@@ -257,19 +342,16 @@ class SceneIngestion:
             for det in all_detections:
                 det.depth_m = self._lookup_depth(det.cx, det.cy, depth_samples)
 
-        # Step 3: store each detection in spatial memory
+        # Step 3: run each detection through the temporal consensus buffer
         for det in all_detections:
-            try:
-                self._memory.observe(
-                    label=det.label,
-                    cx=det.cx,
-                    cy=det.cy,
-                    confidence=det.confidence,
-                    timestamp_ms=ts,
-                    depth_m=det.depth_m,
-                )
-            except Exception as e:
-                logger.error("Failed to store detection %s: %s", det.label, e)
+            self._update_consensus(
+                label=det.label,
+                cx=det.cx,
+                cy=det.cy,
+                confidence=det.confidence,
+                timestamp_ms=ts,
+                depth_m=det.depth_m,
+            )
 
         self.last_detections = all_detections
         self.frame_count += 1

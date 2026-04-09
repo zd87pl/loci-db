@@ -121,6 +121,19 @@ class ObjectObservation:
         return f"{h}, {v}"
 
 
+def _iou_proxy(cx1: float, cy1: float, cx2: float, cy2: float, box_size: float = 0.1) -> float:
+    """Compute IoU between two proxy bounding boxes of fixed size centered at (cx, cy)."""
+    half = box_size / 2
+    ax1, ay1, ax2, ay2 = cx1 - half, cy1 - half, cx1 + half, cy1 + half
+    bx1, by1, bx2, by2 = cx2 - half, cy2 - half, cx2 + half, cy2 + half
+    inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter_area = inter_w * inter_h
+    box_area = box_size * box_size
+    union_area = 2 * box_area - inter_area
+    return inter_area / union_area if union_area > 0 else 0.0
+
+
 class SpatialMemory:
     """Thread-compatible wrapper around LocalLociClient for object tracking.
 
@@ -134,6 +147,8 @@ class SpatialMemory:
         self,
         epoch_size_ms: int = 5000,
         label_confidence_overrides: dict[str, float] | None = None,
+        dedup_iou_threshold: float = 0.5,
+        dedup_window_ms: int = 5000,
     ) -> None:
         self._client = LocalLociClient(
             epoch_size_ms=epoch_size_ms,
@@ -145,6 +160,8 @@ class SpatialMemory:
         self._observation_count = 0
         # Per-label confidence threshold overrides (label -> min_confidence)
         self._label_confidence_overrides: dict[str, float] = label_confidence_overrides or {}
+        self.dedup_iou_threshold = dedup_iou_threshold
+        self.dedup_window_ms = dedup_window_ms
 
     # ------------------------------------------------------------------
     # Write
@@ -180,6 +197,18 @@ class SpatialMemory:
         # Normalize depth to [0, 1] range (0m = 0.0, 5m+ = 1.0)
         z_normalized = min(depth_m / 5.0, 1.0) if depth_m is not None else 0.0
 
+        # Cross-frame NMS: check for spatial duplicates within dedup_window_ms
+        merged_state_id = self._try_merge(normalized_label, cx, cy, confidence, ts, z_normalized)
+        if merged_state_id is not None:
+            obs = ObjectObservation(
+                label=label, cx=cx, cy=cy,
+                confidence=confidence, timestamp_ms=ts, state_id=merged_state_id,
+                depth_m=depth_m,
+            )
+            self._latest[normalized_label] = obs
+            self._observation_count += 1
+            return merged_state_id
+
         vector = _object_embedding(label, cx, cy)
         state = WorldState(
             x=cx,
@@ -199,6 +228,47 @@ class SpatialMemory:
         self._latest[label.strip().lower()] = obs
         self._observation_count += 1
         return state_id
+
+    def _try_merge(
+        self,
+        scene_id: str,
+        cx: float,
+        cy: float,
+        confidence: float,
+        ts: int,
+        z_normalized: float,
+    ) -> str | None:
+        """Find a recent high-IoU record for scene_id and merge if found.
+
+        Returns the existing state_id after updating it in-place, or None
+        if no suitable candidate was found (caller should insert a new record).
+        """
+        cutoff_ms = ts - self.dedup_window_ms
+        recent = self.where_is(scene_id, limit=20)
+        for obs in recent:
+            if obs.timestamp_ms < cutoff_ms:
+                continue
+            iou = _iou_proxy(cx, cy, obs.cx, obs.cy)
+            if iou <= self.dedup_iou_threshold:
+                continue
+            # Confidence-weighted position average
+            total_conf = obs.confidence + confidence
+            merged_cx = (obs.confidence * obs.cx + confidence * cx) / total_conf
+            merged_cy = (obs.confidence * obs.cy + confidence * cy) / total_conf
+            merged_conf = max(obs.confidence, confidence)
+            # Update the record in-place via the underlying store
+            for col in list(self._client._known_collections):
+                results = self._client._store.retrieve(col, [obs.state_id])
+                if results:
+                    self._client._store.set_payload(col, obs.state_id, {
+                        "x": merged_cx,
+                        "y": merged_cy,
+                        "z": z_normalized,
+                        "confidence": merged_conf,
+                        "timestamp_ms": ts,
+                    })
+                    return obs.state_id
+        return None
 
     # ------------------------------------------------------------------
     # Read
@@ -249,7 +319,6 @@ class SpatialMemory:
             )
             for r in results
         ]
-        # Sort newest-first, deduplicate by very close positions
         observations.sort(key=lambda o: o.timestamp_ms, reverse=True)
         return observations[:limit]
 

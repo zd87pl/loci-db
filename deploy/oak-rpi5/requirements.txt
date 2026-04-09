@@ -1,0 +1,26 @@
+# LOCI OAK-D Lite + Raspberry Pi 5 Demo Dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+numpy>=1.24.0
+pyyaml>=6.0
+
+# OAK-D Lite SDK
+depthai>=2.25.0
+
+# YOLO (host-side fallback when NN blob unavailable)
+ultralytics>=8.3.0
+
+# Voice: Speech-to-Text (local Whisper on ARM)
+faster-whisper>=1.0.0
+
+# Voice: Text-to-Speech
+piper-tts>=1.2.0          # local, zero cloud
+edge-tts>=6.1.9           # cloud fallback (free, no API key)
+
+# Audio I/O
+pyaudio>=0.2.14
+
+# Debug server (optional, for --server mode)
+fastapi[standard]>=0.100.0
+uvicorn[standard]>=0.20.0

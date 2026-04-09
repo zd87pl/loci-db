@@ -1,0 +1,28 @@
+[Unit]
+Description=LOCI OAK-D Lite Assistive Demo
+After=network.target bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/loci-db/deploy/oak-rpi5
+ExecStart=/home/pi/loci-db/deploy/oak-rpi5/scripts/run.sh
+Restart=on-failure
+RestartSec=5
+
+# Environment
+Environment=WHISPER_LOCAL=1
+Environment=WHISPER_LOCAL_MODEL=base
+Environment=TTS_ENGINE=piper
+Environment=PIPER_MODEL_PATH=/home/pi/loci-db/deploy/oak-rpi5/models/en_US-lessac-medium.onnx
+
+# Resource limits (RPi5 8GB)
+MemoryMax=4G
+CPUQuota=300%
+
+# Allow access to USB devices (OAK-D) and audio
+SupplementaryGroups=video audio bluetooth plugdev
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,70 @@
+# LOCI OAK-D Lite + Raspberry Pi 5 Demo Configuration
+# ---------------------------------------------------
+# Edit these values to tune the demo for your environment.
+
+oak:
+  # Path to the pre-converted YOLOv8-nano OpenVINO blob for Myriad X
+  blob_path: "models/yolov8n.blob"
+  # RGB camera FPS (higher = more detections but more CPU)
+  rgb_fps: 8.0
+
+detection:
+  # Minimum confidence for neural network detections
+  confidence: 0.5
+  # Object classes to detect (assistive vocabulary)
+  classes:
+    - person
+    - keys
+    - wallet
+    - phone
+    - laptop
+    - cup
+    - bottle
+    - bag
+    - backpack
+    - glasses
+    - remote control
+    - charger
+    - headphones
+    - watch
+    - book
+    - pen
+    - medicine
+    - cane
+    - shoe
+    - jacket
+    - umbrella
+    - water bottle
+    - mug
+    - plate
+    - bowl
+    - fork
+    - knife
+    - spoon
+    - chair
+    - table
+    - door
+    - cat
+    - dog
+
+loci:
+  # Temporal epoch size in milliseconds (how often LOCI rolls over to a new shard)
+  epoch_size_ms: 5000
+
+voice:
+  # Whisper model size: "tiny", "base", "small" (larger = more accurate, slower)
+  whisper_model: "base"
+  # TTS engine: "piper" (local) or "edge" (cloud fallback)
+  tts_engine: "piper"
+  # Piper model path (download from https://github.com/rhasspy/piper/releases)
+  piper_model_path: "models/en_US-lessac-medium.onnx"
+  # Edge TTS voice (fallback when Piper is unavailable)
+  edge_tts_voice: "en-US-AnaNeural"
+
+audio:
+  # Voice activity detection: silence RMS threshold
+  vad_silence_threshold: 500
+  # Seconds of silence before ending recording
+  vad_silence_duration: 1.5
+  # Max recording duration in seconds
+  vad_max_duration: 10.0

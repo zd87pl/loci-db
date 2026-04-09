@@ -9,3 +9,9 @@ build/
 
 # Auto-generated SSL certs for demo
 demo_spatial/.certs/
+
+# OAK-D deployment: models and venv (large binaries)
+deploy/oak-rpi5/models/*.blob
+deploy/oak-rpi5/models/*.onnx
+deploy/oak-rpi5/models/*.onnx.json
+deploy/oak-rpi5/.venv/

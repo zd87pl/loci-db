@@ -87,9 +87,7 @@ class HilbertIndex:
             for iy in range(side):
                 for iz in range(side):
                     for it in range(side):
-                        lut[ix, iy, iz, it] = curve.distance_from_point(
-                            [ix, iy, iz, it]
-                        )
+                        lut[ix, iy, iz, it] = curve.distance_from_point([ix, iy, iz, it])
         return lut
 
     def encode(
@@ -147,7 +145,7 @@ class HilbertIndex:
                 iz_lo : iz_hi + 1,
                 it_lo : it_hi + 1,
             ]
-            return np.unique(sub).tolist()
+            return [int(x) for x in np.unique(sub)]
 
         # Fallback for resolutions without a precomputed LUT
         ids: set[int] = set()

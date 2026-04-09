@@ -130,7 +130,11 @@ class SpatialMemory:
       - "What objects are in the left side of the room?" (spatial range query)
     """
 
-    def __init__(self, epoch_size_ms: int = 5000) -> None:
+    def __init__(
+        self,
+        epoch_size_ms: int = 5000,
+        label_confidence_overrides: dict[str, float] | None = None,
+    ) -> None:
         self._client = LocalLociClient(
             epoch_size_ms=epoch_size_ms,
             vector_size=EMBED_DIM,
@@ -139,6 +143,8 @@ class SpatialMemory:
         # Cache of the latest known observation per label
         self._latest: dict[str, ObjectObservation] = {}
         self._observation_count = 0
+        # Per-label confidence threshold overrides (label -> min_confidence)
+        self._label_confidence_overrides: dict[str, float] = label_confidence_overrides or {}
 
     # ------------------------------------------------------------------
     # Write
@@ -152,8 +158,19 @@ class SpatialMemory:
         confidence: float = 1.0,
         timestamp_ms: int | None = None,
         depth_m: float | None = None,
-    ) -> str:
-        """Record an object sighting in spatial memory. Returns the state_id."""
+        min_confidence: float = 0.55,
+    ) -> str | None:
+        """Record an object sighting in spatial memory. Returns the state_id.
+
+        Returns ``None`` without storing if ``confidence`` is below the effective
+        threshold for this label (``label_confidence_overrides`` takes precedence
+        over ``min_confidence``).
+        """
+        normalized_label = label.strip().lower()
+        effective_min = self._label_confidence_overrides.get(normalized_label, min_confidence)
+        if confidence < effective_min:
+            return None
+
         ts = timestamp_ms if timestamp_ms is not None else int(time.time() * 1000)
         # Clamp coords to [0, 1]
         cx = max(0.0, min(1.0, cx))
@@ -187,11 +204,20 @@ class SpatialMemory:
     # Read
     # ------------------------------------------------------------------
 
-    def where_is(self, label: str, limit: int = 5) -> list[ObjectObservation]:
+    def where_is(
+        self,
+        label: str,
+        limit: int = 5,
+        min_confidence: float | None = None,
+    ) -> list[ObjectObservation]:
         """Find recent observations of an object by semantic label match.
 
         Returns results sorted newest-first. Combines vector similarity
         (semantic label match) with a full-history time window for recall.
+
+        Args:
+            min_confidence: If provided, only return observations with
+                confidence >= this value.
         """
         query_vec = _label_embedding(label)
         normalized = label.strip().lower()
@@ -201,11 +227,16 @@ class SpatialMemory:
             vector=query_vec,
             limit=limit * 2,
             _extra_payload_filter={"scene_id": normalized},
+            min_confidence=min_confidence,
         )
 
         # Fallback: semantic similarity search without filter
         if not results:
-            results = self._client.query(vector=query_vec, limit=limit * 3)
+            results = self._client.query(
+                vector=query_vec,
+                limit=limit * 3,
+                min_confidence=min_confidence,
+            )
             results = [r for r in results if r.scene_id == normalized]
 
         observations = [

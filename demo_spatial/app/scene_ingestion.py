@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from .vlm_client import VLMClient
 
 # Minimum YOLO confidence to trust a detection without VLM fallback
-_YOLO_CONF_THRESHOLD = 0.45
+_YOLO_CONF_THRESHOLD = 0.65
 # If fewer than this many objects are detected, try VLM enrichment
 _MIN_DETECTIONS_FOR_NO_VLM = 1
 

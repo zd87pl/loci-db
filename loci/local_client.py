@@ -220,6 +220,7 @@ class LocalLociClient:
         *,
         _extra_payload_filter: dict | None = None,
         _epoch_ids: set[int] | None = None,
+        min_confidence: float | None = None,
     ) -> list[WorldState]:
         """Search with Hilbert pre-filtering, temporal sharding, and decay.
 
@@ -234,6 +235,7 @@ class LocalLociClient:
                 limit,
                 _extra_payload_filter=_extra_payload_filter,
                 _epoch_ids=_epoch_ids,
+                min_confidence=min_confidence,
             )
         ]
 
@@ -246,6 +248,7 @@ class LocalLociClient:
         *,
         _extra_payload_filter: dict | None = None,
         _epoch_ids: set[int] | None = None,
+        min_confidence: float | None = None,
     ) -> list[ScoredWorldState]:
         """Search and return scored results for downstream reranking."""
         t_start = time.perf_counter()
@@ -313,7 +316,7 @@ class LocalLociClient:
                     }
                 )
 
-        if spatial_bounds is not None or time_window_ms is not None:
+        if spatial_bounds is not None or time_window_ms is not None or min_confidence is not None:
             all_results = [
                 r
                 for r in all_results
@@ -321,6 +324,7 @@ class LocalLociClient:
                     r["payload"],
                     spatial_bounds=spatial_bounds,
                     time_window_ms=time_window_ms,
+                    min_confidence=min_confidence,
                 )
             ]
 

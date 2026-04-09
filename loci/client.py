@@ -304,6 +304,7 @@ class LociClient:
         _extra_payload_filter: dict | None = None,
         _epoch_ids: set[int] | None = None,
         overlap_factor: float = 1.2,
+        min_confidence: float | None = None,
     ) -> list[WorldState]:
         """Search for nearest neighbours with spatial and temporal filtering.
 
@@ -329,6 +330,7 @@ class LociClient:
                 _extra_payload_filter=_extra_payload_filter,
                 _epoch_ids=_epoch_ids,
                 overlap_factor=overlap_factor,
+                min_confidence=min_confidence,
             )
         ]
 
@@ -342,6 +344,7 @@ class LociClient:
         _extra_payload_filter: dict | None = None,
         _epoch_ids: set[int] | None = None,
         overlap_factor: float = 1.2,
+        min_confidence: float | None = None,
     ) -> list[ScoredWorldState]:
         """Search for nearest neighbours and return scores alongside states."""
         self._discover_collections()
@@ -416,7 +419,7 @@ class LociClient:
                     }
                 )
 
-        if spatial_bounds is not None or time_window_ms is not None:
+        if spatial_bounds is not None or time_window_ms is not None or min_confidence is not None:
             all_results = [
                 r
                 for r in all_results
@@ -424,6 +427,7 @@ class LociClient:
                     r["payload"],
                     spatial_bounds=spatial_bounds,
                     time_window_ms=time_window_ms,
+                    min_confidence=min_confidence,
                 )
             ]
 

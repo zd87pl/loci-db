@@ -1,7 +1,7 @@
-"""Pure-Python in-memory vector store — zero external dependencies.
+"""In-memory vector store backed by numpy.
 
 Implements the same operations as Qdrant (insert, search, filter, retrieve)
-using brute-force cosine/dot/euclidean similarity.  Designed for:
+using vectorised numpy similarity.  Designed for:
 - Unit and integration tests without Docker
 - Benchmarks that measure Loci's indexing overhead in isolation
 - Rapid prototyping and demos
@@ -9,9 +9,10 @@ using brute-force cosine/dot/euclidean similarity.  Designed for:
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
+
+import numpy as np
 
 
 @dataclass
@@ -119,14 +120,23 @@ class MemoryStore:
         if payload_filter:
             candidates = [p for p in candidates if _matches(p.payload, payload_filter)]
 
-        dist_fn = _DISTANCE_FNS[col.distance]
-        scored = []
-        for p in candidates:
-            score = dist_fn(query_vector, p.vector)
-            scored.append({"id": p.id, "vector": p.vector, "payload": p.payload, "score": score})
+        if not candidates:
+            return []
 
-        scored.sort(key=lambda x: float(x["score"]), reverse=True)  # type: ignore[arg-type]
-        return scored[:limit]
+        scores = _batch_score(col.distance, query_vector, candidates)
+        top_k = min(limit, len(candidates))
+        top_indices = np.argpartition(scores, -top_k)[-top_k:]
+        top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+
+        return [
+            {
+                "id": candidates[i].id,
+                "vector": candidates[i].vector,
+                "payload": candidates[i].payload,
+                "score": float(scores[i]),
+            }
+            for i in top_indices
+        ]
 
     def scroll(
         self,
@@ -162,29 +172,22 @@ class MemoryStore:
 # ------------------------------------------------------------------
 
 
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+def _batch_score(distance: str, query_vector: list[float], candidates: list[_Point]) -> np.ndarray:
+    """Compute similarity scores for all candidates at once using numpy."""
+    q = np.asarray(query_vector, dtype=np.float64)
+    mat = np.array([p.vector for p in candidates], dtype=np.float64)
 
-
-def _dot_product(a: list[float], b: list[float]) -> float:
-    return sum(x * y for x, y in zip(a, b))
-
-
-def _neg_euclidean(a: list[float], b: list[float]) -> float:
-    """Negative euclidean distance (higher = more similar)."""
-    return -math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
-
-
-_DISTANCE_FNS = {
-    "cosine": _cosine_similarity,
-    "dot": _dot_product,
-    "euclidean": _neg_euclidean,
-}
+    if distance == "cosine":
+        q_norm = np.linalg.norm(q)
+        if q_norm == 0:
+            return np.zeros(len(candidates))
+        norms = np.linalg.norm(mat, axis=1)
+        norms[norms == 0] = 1.0
+        return cast(np.ndarray, (mat @ q) / (norms * q_norm))
+    elif distance == "dot":
+        return mat @ q
+    else:  # euclidean
+        return cast(np.ndarray, -np.linalg.norm(mat - q, axis=1))
 
 
 # ------------------------------------------------------------------

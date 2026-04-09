@@ -47,8 +47,10 @@ _WHERE_PATTERNS = [
 ]
 
 _HISTORY_PATTERNS = [
-    r"(?:when|last time)\s+(?:was|did|have)\s+(?:i\s+)?(?:seen|used|placed|put|left)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
-    r"when\s+(?:did you|did i|have you)\s+(?:last\s+)?(?:see|seen|spot|notice)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
+    r"(?:when|last time)\s+(?:was|did|have)\s+(?:i\s+)?"
+    r"(?:seen|used|placed|put|left)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
+    r"when\s+(?:did you|did i|have you)\s+(?:last\s+)?"
+    r"(?:see|seen|spot|notice)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
     r"when\s+(?:was\s+)?(?:my\s+|the\s+)?(.+?)\s+(?:last\s+)?(?:seen|spotted|detected)",
     r"how\s+long\s+(?:ago|since)\s+(?:was|did|have)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$|seen|spotted)",
     r"history\s+(?:of\s+)?(?:my\s+)?(.+?)(?:\?|$)",
@@ -127,8 +129,18 @@ def _format_clock_time(timestamp_ms: int) -> str:
 
 def _describe_position(cx: float, cy: float) -> str:
     """Describe a normalized (cx, cy) position in natural spatial terms."""
-    h_pos = "on the left" if cx < 0.33 else ("on the right" if cx > 0.67 else "in the center")
-    v_pos = "toward the back" if cy < 0.35 else ("near the front" if cy > 0.70 else "in the middle area")
+    if cx < 0.33:
+        h_pos = "on the left"
+    elif cx > 0.67:
+        h_pos = "on the right"
+    else:
+        h_pos = "in the center"
+    if cy < 0.35:
+        v_pos = "toward the back"
+    elif cy > 0.70:
+        v_pos = "near the front"
+    else:
+        v_pos = "in the middle area"
     return f"{h_pos}, {v_pos}"
 
 
@@ -153,7 +165,7 @@ def _describe_position_relative(target, all_objects: list) -> str:
     return f"It's {direction} the {closest.label}."
 
 
-def build_response_text(intent: QueryIntent, memory: "SpatialMemory", vlm_answer: str = "") -> str:
+def build_response_text(intent: QueryIntent, memory: SpatialMemory, vlm_answer: str = "") -> str:
     """Build a natural language response from intent + LOCI-DB query results."""
     if vlm_answer:
         return vlm_answer
@@ -194,7 +206,10 @@ def build_response_text(intent: QueryIntent, memory: "SpatialMemory", vlm_answer
         clock_time = _format_clock_time(obj.timestamp_ms)
 
         # Build the main answer with both when and where
-        answer = f"Your {intent.object_name} was last seen {pos}. That was {age_str}, at {clock_time}."
+        answer = (
+            f"Your {intent.object_name} was last seen {pos}. "
+            f"That was {age_str}, at {clock_time}."
+        )
 
         # Add relative position to other objects if available
         all_objects = memory.current_objects()
@@ -313,7 +328,8 @@ class TTS:
     def __init__(self) -> None:
         self._engine = os.environ.get("TTS_ENGINE", "openai").lower()
         self._openai_key = os.environ.get("OPENAI_API_KEY", "")
-        self._openai_voice = os.environ.get("TTS_VOICE", "nova")     # nova, alloy, echo, fable, onyx, shimmer
+        # nova, alloy, echo, fable, onyx, shimmer
+        self._openai_voice = os.environ.get("TTS_VOICE", "nova")
         self._openai_model = os.environ.get("TTS_MODEL", "tts-1")
         self._piper_model = os.environ.get("PIPER_MODEL_PATH", "")
         self._edge_voice = os.environ.get("EDGE_TTS_VOICE", "en-US-AnaNeural")
@@ -434,8 +450,8 @@ class VoicePipeline:
 
     def __init__(
         self,
-        memory: "SpatialMemory",
-        vlm_client: "VLMClient | None" = None,
+        memory: SpatialMemory,
+        vlm_client: VLMClient | None = None,
     ) -> None:
         self._memory = memory
         self._vlm = vlm_client
@@ -455,7 +471,7 @@ class VoicePipeline:
         audio_bytes: bytes,
         language: str = "en",
         synthesize_response: bool = True,
-    ) -> "VoicePipeline.QueryResult":
+    ) -> VoicePipeline.QueryResult:
         """Full pipeline: audio → transcribe → understand → query → respond.
 
         Args:
@@ -500,7 +516,7 @@ class VoicePipeline:
             latency_ms=round(latency_ms, 1),
         )
 
-    async def handle_text_query(self, text: str) -> "VoicePipeline.QueryResult":
+    async def handle_text_query(self, text: str) -> VoicePipeline.QueryResult:
         """Text-only pipeline (skip STT, still generates TTS)."""
         import time
         t0 = time.perf_counter()

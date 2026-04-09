@@ -71,8 +71,10 @@ class VLMClient:
             try:
                 import openai
                 self._client = openai.AsyncOpenAI(api_key=self._openai_key)
-            except ImportError:
-                raise RuntimeError("openai package not installed. Run: pip install openai")
+            except ImportError as exc:
+                raise RuntimeError(
+                    "openai package not installed. Run: pip install openai"
+                ) from exc
         return self._client
 
     @property
@@ -147,8 +149,9 @@ class VLMClient:
             model_name = self._model or "gemini-2.5-flash-preview-04-17"
             model = genai.GenerativeModel(model_name)
 
-            from PIL import Image
             import io
+
+            from PIL import Image
             img = Image.open(io.BytesIO(image_bytes))
 
             response = await model.generate_content_async([_SCENE_PROMPT, img])
@@ -203,8 +206,10 @@ class VLMClient:
             "You are a helpful assistant for a blind person. "
             "Answer location questions concisely using the spatial memory data provided. "
             "ALWAYS include both WHEN and WHERE in your answer. "
-            "For WHEN: use the 'last_seen_time' field (e.g., '2:15 PM') and 'age_seconds' for relative time. "
-            "For WHERE: describe positions in natural terms (left/right/center, near the front/back). "
+            "For WHEN: use the 'last_seen_time' field (e.g., '2:15 PM') "
+            "and 'age_seconds' for relative time. "
+            "For WHERE: describe positions in natural terms "
+            "(left/right/center, near the front/back). "
             "cx=0 is far left, cx=1 is far right, cy=0 is top/far, cy=1 is bottom/near. "
             "If multiple objects are present, mention relative positions between them. "
             "Keep answers under 3 sentences. Speak naturally, as if to a person."
@@ -284,8 +289,18 @@ def _fallback_location_answer(question: str, objects: list[dict]) -> str:
     if not pos_desc:
         cx = obj.get("cx", 0.5)
         cy = obj.get("cy", 0.5)
-        h_pos = "on the left" if cx < 0.33 else ("on the right" if cx > 0.67 else "in the center")
-        v_pos = "toward the back" if cy < 0.35 else ("near the front" if cy > 0.70 else "in the middle area")
+        if cx < 0.33:
+            h_pos = "on the left"
+        elif cx > 0.67:
+            h_pos = "on the right"
+        else:
+            h_pos = "in the center"
+        if cy < 0.35:
+            v_pos = "toward the back"
+        elif cy > 0.70:
+            v_pos = "near the front"
+        else:
+            v_pos = "in the middle area"
         pos_desc = f"{h_pos}, {v_pos}"
 
     age = obj.get("age_seconds", 0)

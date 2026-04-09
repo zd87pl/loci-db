@@ -13,6 +13,7 @@ Use cases:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
@@ -531,10 +532,8 @@ class LocalLociClient:
         epochs: list[int] = []
         for col in self._known_collections:
             if col.startswith("loci_"):
-                try:
+                with contextlib.suppress(ValueError):
                     epochs.append(int(col.split("_", 1)[1]))
-                except ValueError:
-                    pass
         return sorted(epochs) if epochs else []
 
     def _predecessor_search_collections(self, before_ms: int) -> list[str]:

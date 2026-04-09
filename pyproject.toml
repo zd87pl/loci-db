@@ -63,6 +63,9 @@ ignore = ["S101", "S603", "S607"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S"]
+# Benchmarks and examples use random for data generation, not cryptography
+"benchmarks/**" = ["S311", "S112"]
+"examples/**" = ["S311"]
 
 [tool.bandit]
 skips = ["B101"]  # assert statements are fine in tests

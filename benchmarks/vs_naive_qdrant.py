@@ -590,11 +590,11 @@ def run_scenario(
             None,
         ),
     ]
-    for method_name, query_fn, id_map, overlap in methods:
+    for method_name, query_fn, id_map, _overlap in methods:
         all_latencies = []
         all_recalls = []
 
-        for run in range(N_RUNS):
+        for _run in range(N_RUNS):
             latencies = []
             recalls = []
             for i, q in enumerate(queries):

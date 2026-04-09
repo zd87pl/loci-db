@@ -24,9 +24,7 @@ def _is_transient(exc: Exception) -> bool:
         return True
     # Connection errors
     exc_name = type(exc).__name__
-    if any(keyword in exc_name for keyword in ("Connection", "Timeout", "Socket")):
-        return True
-    return False
+    return bool(any(keyword in exc_name for keyword in ("Connection", "Timeout", "Socket")))
 
 
 def with_retry(

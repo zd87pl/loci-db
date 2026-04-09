@@ -475,7 +475,9 @@ async def text_to_speech(req: TextQueryRequest):
     """
     audio = await voice._tts.synthesize(req.text)
     if not audio:
-        raise HTTPException(status_code=503, detail="TTS synthesis failed — check TTS_ENGINE config")
+        raise HTTPException(
+            status_code=503, detail="TTS synthesis failed — check TTS_ENGINE config"
+        )
     return Response(content=audio, media_type="audio/mpeg")
 
 
@@ -584,7 +586,7 @@ def _parse_ply(data: bytes) -> list[dict]:
 
         # Determine field indices
         prop_names = [p[0] for p in props]
-        prop_types = [p[1] for p in props]
+        [p[1] for p in props]
 
         def _idx(candidates):
             for c in candidates:

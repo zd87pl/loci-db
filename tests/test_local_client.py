@@ -88,7 +88,7 @@ class TestInsertBatch:
         states = [_make_state(ts=i * 100, scene=f"s{i}") for i in range(3)]
         ids = client.insert_batch(states)
         # Each ID corresponds to the input by index
-        for i, sid in enumerate(ids):
+        for _i, sid in enumerate(ids):
             assert isinstance(sid, str)
 
     def test_batch_causal_linking(self, client):

@@ -16,6 +16,8 @@ Environment variables:
   TTS_ENGINE       — "openai" (default) | "piper" | "edge"
   WHISPER_LOCAL    — "1" to use local faster-whisper instead of API
   PIPER_MODEL_PATH — path to .onnx Piper model file (if TTS_ENGINE=piper)
+  CORS_ORIGINS     — comma-separated allowed origins (default: "*" for local dev;
+                     set to your domain in production, e.g. "https://example.com")
 """
 
 from __future__ import annotations
@@ -83,10 +85,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors_origins_env = os.environ.get("CORS_ORIGINS", "*")
+_cors_origins: list[str] = (
+    [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+    if _cors_origins_env != "*"
+    else ["*"]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],    # tightened in production
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

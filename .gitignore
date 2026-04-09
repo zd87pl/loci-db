@@ -7,5 +7,28 @@ build/
 .pytest_cache/
 *.egg
 
+# Secrets & credentials
+.env
+.env.*
+.secrets
+.secrets.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Coverage / profiling artifacts
+.coverage
+coverage.xml
+htmlcov/
+*.prof
+
 # Auto-generated SSL certs for demo
 demo_spatial/.certs/

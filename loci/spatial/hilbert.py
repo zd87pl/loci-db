@@ -250,7 +250,7 @@ def encode(
     """
     order = resolution_order if resolution_order is not None else _DEFAULT_ORDER
     if _RUST_AVAILABLE:
-        return _rust.encode_hilbert_4d(x, y, z, t_norm, order=order)
+        return int(_rust.encode_hilbert_4d(x, y, z, t_norm, order=order))
     curve = _DEFAULT_CURVE if order == _DEFAULT_ORDER else _make_curve(order)
     side = (1 << order) - 1
 

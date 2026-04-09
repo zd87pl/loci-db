@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
 import logging
 import os
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
@@ -86,8 +87,8 @@ class SceneIngestion:
 
     def __init__(
         self,
-        memory: "SpatialMemory",
-        vlm_client: "VLMClient | None" = None,
+        memory: SpatialMemory,
+        vlm_client: VLMClient | None = None,
         use_vlm_fallback: bool = True,
         classes: list[str] | None = None,
         consensus_window_ms: int = 1000,
@@ -407,10 +408,8 @@ class SceneIngestion:
         self._capturing = False
         if self._server_capture_task and not self._server_capture_task.done():
             self._server_capture_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._server_capture_task
-            except asyncio.CancelledError:
-                pass
         self._server_capture_task = None
         logger.info("Server-side camera capture stopped")
 

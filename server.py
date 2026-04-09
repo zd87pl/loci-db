@@ -17,7 +17,7 @@ import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from loci import LociClient, WorldState
 
@@ -54,7 +54,10 @@ class InsertRequest(BaseModel):
     vector: list[float]
     scene_id: str
     scale_level: str = "patch"
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+_MAX_LIMIT = 1_000
 
 
 class QueryRequest(BaseModel):
@@ -67,8 +70,8 @@ class QueryRequest(BaseModel):
     z_max: float = 1.0
     time_start_ms: int | None = None
     time_end_ms: int | None = None
-    limit: int = 10
-    overlap_factor: float = 1.0
+    limit: int = Field(default=10, ge=1, le=_MAX_LIMIT)
+    overlap_factor: float = Field(default=1.0, ge=0.0, le=10.0)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
@@ -94,7 +97,6 @@ def insert(req: InsertRequest):
         vector=req.vector,
         scene_id=req.scene_id,
         scale_level=req.scale_level,
-        metadata=req.metadata,
     )
     state_id = get_client().insert(state)
     return {"id": state_id}
@@ -102,6 +104,11 @@ def insert(req: InsertRequest):
 
 @app.post("/query")
 def query(req: QueryRequest):
+    if len(req.vector) != VECTOR_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Vector must have {VECTOR_SIZE} dimensions, got {len(req.vector)}",
+        )
     time_window = None
     if req.time_start_ms is not None and req.time_end_ms is not None:
         time_window = (req.time_start_ms, req.time_end_ms)

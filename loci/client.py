@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
@@ -406,7 +407,7 @@ class LociClient:
                     with_vectors=True,
                 )
                 hits = resp.points
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across shards
                 continue
             for hit in hits:
                 all_results.append(
@@ -575,7 +576,7 @@ class LociClient:
                     if isinstance(vec, dict):
                         vec = list(vec.values())[0] if vec else []
                     all_states.append(self._payload_to_state(pt.payload, pt.id, vec))
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across epochs
                 continue
 
         # Sort by timestamp and find anchor position
@@ -644,7 +645,7 @@ class LociClient:
                     if isinstance(vec, dict):
                         vec = list(vec.values())[0] if vec else []
                     context.append(self._payload_to_state(pt.payload, pt.id, vec))
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across epochs
                 continue
 
         context.sort(key=lambda s: s.timestamp_ms)
@@ -710,7 +711,7 @@ class LociClient:
                     if isinstance(vec, dict):
                         vec = list(vec.values())[0] if vec else []
                     return self._payload_to_state(results[0].payload, results[0].id, vec)
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across epochs
                 continue
         return None
 
@@ -754,7 +755,7 @@ class LociClient:
                     points=[prev_id],
                 )
                 return
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across epochs
                 continue
 
     def _scroll_all(
@@ -795,8 +796,6 @@ class LociClient:
         epochs: list[int] = []
         for col in self._known_collections:
             if col.startswith("loci_"):
-                try:
+                with contextlib.suppress(ValueError):
                     epochs.append(int(col.split("_", 1)[1]))
-                except ValueError:
-                    pass
         return sorted(epochs) if epochs else []

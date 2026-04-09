@@ -18,9 +18,8 @@ def test_valid_distances():
 
 
 def test_invalid_distance_raises():
-    with pytest.raises(ValueError, match="distance"):
-        with patch("loci.client.QdrantClient"):
-            LociClient(qdrant_url="http://fake:6333", distance="hamming")
+    with pytest.raises(ValueError, match="distance"), patch("loci.client.QdrantClient"):
+        LociClient(qdrant_url="http://fake:6333", distance="hamming")
 
 
 def test_collection_uses_configured_distance():

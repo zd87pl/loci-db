@@ -70,7 +70,7 @@ def _object_embedding(label: str, cx: float, cy: float) -> list[float]:
     if p_norm > 1e-8:
         pos_vec = [v / p_norm for v in pos_vec]
 
-    blended = [0.8 * l + 0.2 * p for l, p in zip(label_vec, pos_vec)]
+    blended = [0.8 * lv + 0.2 * p for lv, p in zip(label_vec, pos_vec, strict=False)]
     b_norm = math.sqrt(sum(v * v for v in blended))
     if b_norm > 1e-8:
         blended = [v / b_norm for v in blended]
@@ -116,8 +116,18 @@ class ObjectObservation:
     @property
     def position_description(self) -> str:
         """Human-readable spatial description from normalized coords."""
-        h = "on the left" if self.cx < 0.33 else ("on the right" if self.cx > 0.67 else "in the center")
-        v = "toward the back" if self.cy < 0.35 else ("near the front" if self.cy > 0.70 else "in the middle area")
+        if self.cx < 0.33:
+            h = "on the left"
+        elif self.cx > 0.67:
+            h = "on the right"
+        else:
+            h = "in the center"
+        if self.cy < 0.35:
+            v = "toward the back"
+        elif self.cy > 0.70:
+            v = "near the front"
+        else:
+            v = "in the middle area"
         return f"{h}, {v}"
 
 
@@ -335,7 +345,6 @@ class SpatialMemory:
         limit: int = 20,
     ) -> list[ObjectObservation]:
         """Find all objects observed in a spatial region (normalized coords)."""
-        import numpy as np
 
         query_vec = [0.0] * EMBED_DIM  # neutral vector — let spatial filter dominate
         spatial_bounds = {

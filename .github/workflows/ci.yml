@@ -62,3 +62,22 @@ jobs:
 
       - name: Lint
         run: ruff check loci/ tests/
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install security scanners
+        run: pip install bandit[toml] pip-audit
+
+      - name: Run bandit (static security analysis)
+        run: bandit -r loci/ server.py -ll -ii
+
+      - name: Audit dependencies for known CVEs
+        run: pip-audit --requirement <(pip freeze) --skip-editable

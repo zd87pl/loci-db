@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -114,10 +114,8 @@ async def reset_simulation():
     sim.running = False
     if _sim_task and not _sim_task.done():
         _sim_task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await _sim_task
-        except asyncio.CancelledError:
-            pass
     _sim_task = None
     sim.reset()
     return {"status": "reset"}
@@ -174,11 +172,14 @@ async def query_spatial(req: SpatialQueryReq):
 
     query_logs.append({
         "ts": now_ms, "tag": "QUERY",
-        "msg": f"Spatial search: bbox ({req.x_min},{req.y_min})→({req.x_max},{req.y_max}), time {req.time_start_s}s–{req.time_end_s}s",
+        "msg": (
+            f"Spatial search: bbox ({req.x_min},{req.y_min})→({req.x_max},{req.y_max}), "
+            f"time {req.time_start_s}s–{req.time_end_s}s"
+        ),
     })
     query_logs.append({
         "ts": now_ms, "tag": "EMBED",
-        "msg": f"Query vector from center ({center_x},{center_y}) + {len(visible_keys)} visible obj",
+        "msg": f"Query vector from center ({center_x},{center_y}) + {len(visible_keys)} visible obj",  # noqa: E501
     })
 
     # Normalize grid coords to [0,1]
@@ -215,7 +216,7 @@ async def query_spatial(req: SpatialQueryReq):
         })
         query_logs.append({
             "ts": now_ms, "tag": "SHARD",
-            "msg": f"Scanned {stats.shards_searched} epoch shards, {stats.total_candidates} candidates",
+            "msg": f"Scanned {stats.shards_searched} epoch shards, {stats.total_candidates} candidates",  # noqa: E501
         })
         query_logs.append({
             "ts": now_ms, "tag": "RANK",
@@ -315,7 +316,10 @@ async def query_similar(req: SimilarQueryReq):
     if stats:
         query_logs.append({
             "ts": now_ms, "tag": "RANK",
-            "msg": f"Found {len(similar)} similar moments from {stats.total_candidates} candidates in {round(stats.elapsed_ms, 2)}ms",
+            "msg": (
+                f"Found {len(similar)} similar moments from {stats.total_candidates} "
+                f"candidates in {round(stats.elapsed_ms, 2)}ms"
+            ),
         })
 
     return {
@@ -402,14 +406,22 @@ async def query_predict(req: PredictQueryReq):
     })
     query_logs.append({
         "ts": now_ms, "tag": "SHARD",
-        "msg": f"Searched memory for matches within {req.steps_ahead * sim.tick_interval_ms}ms horizon",
+        "msg": f"Searched memory for matches within {req.steps_ahead * sim.tick_interval_ms}ms horizon",  # noqa: E501
     })
 
     novelty = round(result.prediction_novelty, 3)
-    novelty_label = "expected" if novelty < 0.3 else ("partly new" if novelty < 0.7 else "surprising!")
+    if novelty < 0.3:
+        novelty_label = "expected"
+    elif novelty < 0.7:
+        novelty_label = "partly new"
+    else:
+        novelty_label = "surprising!"
     query_logs.append({
         "ts": now_ms, "tag": "NOVELTY",
-        "msg": f"Score: {novelty} ({novelty_label}) — {len(result.results)} memory matches in {round(result.retrieval_latency_ms, 2)}ms",
+        "msg": (
+            f"Score: {novelty} ({novelty_label}) — {len(result.results)} memory matches "
+            f"in {round(result.retrieval_latency_ms, 2)}ms"
+        ),
     })
 
     # Calculate predicted position from patrol route

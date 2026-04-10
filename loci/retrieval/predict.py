@@ -57,7 +57,7 @@ def rerank_prediction_candidates(
     vector_scores = _normalize_prediction_scores([candidate.score for candidate in candidates])
     mid_ms = now_ms + future_horizon_ms // 2
     combined: list[tuple[float, float, WorldState]] = []
-    for candidate, vector_sim in zip(candidates, vector_scores):
+    for candidate, vector_sim in zip(candidates, vector_scores, strict=False):
         if future_horizon_ms > 0:
             t_dist = abs(candidate.state.timestamp_ms - mid_ms)
             temporal_prox = max(0.0, 1.0 - t_dist / (future_horizon_ms / 2))

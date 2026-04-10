@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LOCI Spatial Memory Assistant — For the Blind</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#f4f6fa;--panel:#ffffff;--panel-alt:#f9fafb;--border:#e0e4ed;
+  --text:#1e2330;--muted:#5f6b7a;--accent:#0891b2;--accent-soft:#e0f7fa;
+  --red:#ef4444;--green:#16a34a;--yellow:#ca8a04;--blue:#3b82f6;
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+  --shadow-sm:0 1px 3px rgba(0,0,0,.08);
+  --shadow-md:0 4px 12px rgba(0,0,0,.1);
+}
+body{font-family:var(--font);background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
+h1{font-size:1.35rem;font-weight:700;color:var(--text)}
+h2{font-size:0.92rem;font-weight:600;color:var(--text);margin-bottom:6px}
+h3{font-size:0.82rem;font-weight:600;color:var(--muted)}
+button{background:var(--panel);color:var(--text);border:1px solid var(--border);padding:7px 16px;border-radius:8px;cursor:pointer;font-family:var(--font);font-size:0.82rem;font-weight:500;transition:all .15s;box-shadow:var(--shadow-sm)}
+button:hover{background:#f0f2f5;border-color:#cdd3de}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.danger{border-color:var(--red);color:var(--red)}
+button.danger:hover{background:#fef2f2}
+button.danger.active{background:var(--red);color:#fff}
+
+/* Layout */
+.header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;justify-content:space-between;gap:20px;background:var(--panel);box-shadow:var(--shadow-sm)}
+.brand{display:grid;gap:4px}
+.kicker{font-size:0.7rem;letter-spacing:.15em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.subtitle{color:var(--muted);font-size:0.85rem}
+.narrative{max-width:680px;font-size:0.88rem;line-height:1.6;color:var(--muted)}
+.pill-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.pill{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;background:var(--accent-soft);border:1px solid rgba(8,145,178,.2);font-size:0.72rem;color:var(--accent);font-weight:500}
+
+.main{display:flex;flex:1;gap:0;overflow:hidden}
+
+/* Camera panel */
+.cam-panel{flex:0 0 400px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--panel)}
+.panel-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;justify-content:space-between}
+.panel-title{font-size:0.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.cam-wrap{position:relative;aspect-ratio:4/3;background:#1a1a2e;overflow:hidden}
+.cam-wrap video{width:100%;height:100%;object-fit:cover;display:block}
+.cam-wrap canvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
+.cam-status{padding:10px 16px;font-size:0.8rem;color:var(--muted);border-top:1px solid var(--border);background:var(--panel-alt)}
+.cam-controls{padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap}
+
+/* Map panel */
+.map-panel{flex:1;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--panel-alt)}
+.map-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:20px;position:relative}
+#map-canvas{border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow-md);background:#fff}
+.map-legend{position:absolute;top:28px;right:28px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.95);backdrop-filter:blur(8px);font-size:0.76rem;min-width:130px;box-shadow:var(--shadow-sm)}
+.legend-item{display:flex;align-items:center;gap:8px;margin:5px 0;color:var(--muted)}
+.legend-dot{width:10px;height:10px;border-radius:50%;flex:0 0 10px}
+
+/* Voice + sidebar */
+.sidebar{width:360px;min-width:360px;display:flex;flex-direction:column;overflow-y:auto;background:var(--panel);border-left:1px solid var(--border)}
+
+/* Voice card */
+.voice-card{padding:16px;border-bottom:1px solid var(--border)}
+.mic-btn{width:64px;height:64px;border-radius:50%;border:2px solid var(--accent);background:var(--accent-soft);color:var(--accent);font-size:1.6rem;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;margin:8px auto;box-shadow:var(--shadow-sm)}
+.mic-btn:hover{background:rgba(8,145,178,.15);box-shadow:0 2px 8px rgba(8,145,178,.25)}
+.mic-btn.recording{background:var(--red);border-color:var(--red);color:#fff;animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.4)}50%{box-shadow:0 0 0 12px rgba(239,68,68,0)}}
+.waveform{height:44px;background:var(--panel-alt);border-radius:8px;border:1px solid var(--border);margin:8px 0;overflow:hidden;position:relative}
+#waveform-canvas{width:100%;height:100%}
+.transcript-box{background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;padding:10px 12px;min-height:40px;font-size:0.85rem;color:var(--muted);margin:6px 0;line-height:1.5}
+.answer-box{background:var(--accent-soft);border:1px solid rgba(8,145,178,.2);border-radius:8px;padding:10px 12px;min-height:40px;font-size:0.88rem;color:var(--text);margin:6px 0;line-height:1.55;font-weight:500}
+.latency-row{font-size:0.74rem;color:var(--muted);text-align:right}
+
+/* Text query */
+.text-query{padding:0 16px 12px;border-bottom:1px solid var(--border)}
+.text-query input{width:100%;padding:9px 12px;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--font);font-size:0.85rem;outline:none;transition:border-color .15s}
+.text-query input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(8,145,178,.1)}
+
+/* Object list */
+.obj-list{padding:12px 16px;border-bottom:1px solid var(--border)}
+#obj-list-items{max-height:168px;overflow-y:auto;border-radius:6px;background:linear-gradient(var(--panel-bg,#f8fafc) 30%,transparent) center top,linear-gradient(transparent,var(--panel-bg,#f8fafc) 70%) center bottom,radial-gradient(farthest-side at 50% 0,rgba(0,0,0,.08),transparent) center top,radial-gradient(farthest-side at 50% 100%,rgba(0,0,0,.08),transparent) center bottom;background-repeat:no-repeat;background-size:100% 20px,100% 20px,100% 7px,100% 7px;background-attachment:local,local,scroll,scroll}
+.obj-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;margin:4px 0;background:var(--panel-alt);cursor:pointer;transition:all .15s;font-size:0.82rem;border:1px solid transparent}
+.obj-item:hover{background:#eef1f6;border-color:var(--border)}
+.obj-item.selected{background:var(--accent-soft);border:1px solid rgba(8,145,178,.3)}
+.obj-dot{width:10px;height:10px;border-radius:50%;flex:0 0 10px;background:var(--accent)}
+.obj-label{flex:1;color:var(--text);font-weight:500}
+.obj-age{color:var(--muted);font-size:0.74rem}
+.obj-pos{color:var(--muted);font-size:0.74rem}
+
+/* History timeline */
+.history-panel{padding:12px 16px;flex:1}
+.timeline-item{display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);font-size:0.8rem}
+.timeline-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:0 0 8px;margin-top:5px}
+.timeline-info{color:var(--muted);line-height:1.5}
+.timeline-label{color:var(--text);font-weight:500;margin-right:4px}
+
+/* Status bar */
+.status-bar{padding:8px 16px;border-top:1px solid var(--border);display:flex;align-items:center;gap:14px;font-size:0.74rem;color:var(--muted);background:var(--panel)}
+.status-dot{width:7px;height:7px;border-radius:50%;background:#bbb}
+.status-dot.ok{background:var(--green)}
+.status-dot.err{background:var(--red)}
+.status-dot.warn{background:var(--yellow)}
+
+/* Demo guide overlay */
+.guide-overlay{position:absolute;left:20px;top:20px;max-width:300px;padding:14px 16px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.96);backdrop-filter:blur(10px);z-index:5;font-size:0.82rem;box-shadow:var(--shadow-md)}
+.guide-step{font-size:0.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:4px;font-weight:600}
+.guide-title{color:var(--text);margin-bottom:6px;font-size:0.9rem;font-weight:600}
+.guide-body{color:var(--muted);line-height:1.55}
+.guide-next{margin-top:10px;padding:6px 10px;background:var(--accent-soft);border-radius:8px;color:var(--accent);font-size:0.74rem;font-weight:500}
+
+/* iPhone Scanner FAB */
+.scanner-fab{position:fixed;bottom:24px;right:24px;z-index:100;display:flex;align-items:center;gap:10px;padding:14px 22px;background:linear-gradient(135deg,#0e7490,#06b6d4);border:none;border-radius:50px;color:#fff;font-weight:700;font-size:0.92rem;cursor:pointer;box-shadow:0 4px 20px rgba(6,182,212,.45),0 2px 8px rgba(0,0,0,.2);transition:all .2s;letter-spacing:.02em;animation:fab-pulse 2s ease-in-out 3}
+.scanner-fab:hover{transform:translateY(-2px);box-shadow:0 6px 28px rgba(6,182,212,.55),0 4px 12px rgba(0,0,0,.2);background:linear-gradient(135deg,#0c6a84,#08b8d0)}
+@keyframes fab-pulse{0%,100%{box-shadow:0 4px 20px rgba(6,182,212,.45),0 2px 8px rgba(0,0,0,.2)}50%{box-shadow:0 4px 20px rgba(6,182,212,.45),0 2px 8px rgba(0,0,0,.2),0 0 0 8px rgba(6,182,212,.15)}}
+
+/* Scanner QR modal */
+.scanner-modal-backdrop{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center}
+.scanner-modal-backdrop.open{display:flex}
+.scanner-modal{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:28px;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,.3);text-align:center}
+.scanner-modal h2{font-size:1.1rem;margin-bottom:4px}
+.scanner-modal .qr-img{margin:16px auto;border-radius:8px;background:#fff;padding:8px;border:1px solid var(--border);display:block}
+.scanner-modal .scanner-url-box{font-size:0.78rem;color:var(--text);padding:8px 12px;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;word-break:break-all;cursor:pointer;margin:12px 0}
+.scanner-modal .scanner-url-box:hover{border-color:var(--accent)}
+.scanner-modal .close-btn{margin-top:12px;padding:8px 20px;background:var(--panel-alt);border:1px solid var(--border);border-radius:8px;color:var(--muted);font-size:0.82rem;cursor:pointer}
+.scanner-modal .close-btn:hover{background:#f0f2f5;border-color:#cdd3de}
+
+/* Metrics */
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border)}
+.metric{padding:10px 12px;background:var(--panel);border:1px solid var(--border);border-radius:10px;box-shadow:var(--shadow-sm)}
+.metric-val{font-size:1.3rem;font-weight:700;color:var(--accent)}
+.metric-lbl{font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
+
+/* LiDAR upload panel */
+.lidar-panel{padding:14px 16px;border-bottom:1px solid var(--border)}
+.lidar-panel h2{margin-bottom:10px;font-size:0.9rem}
+.lidar-drop-zone{border:2px dashed var(--border);border-radius:10px;padding:18px 12px;text-align:center;cursor:pointer;transition:all .2s;background:var(--panel-alt)}
+.lidar-drop-zone:hover,.lidar-drop-zone.drag-over{border-color:var(--accent);background:var(--accent-soft)}
+.lidar-drop-zone .drop-icon{font-size:1.8rem;margin-bottom:6px}
+.lidar-drop-zone .drop-label{font-size:0.78rem;color:var(--muted)}
+.lidar-drop-zone .drop-label strong{color:var(--text)}
+.lidar-apps{margin-top:10px;font-size:0.72rem;color:var(--muted);line-height:1.5}
+.lidar-apps a{color:var(--accent);text-decoration:none}
+.lidar-status{margin-top:8px;font-size:0.72rem;padding:6px 10px;border-radius:6px;display:none}
+.lidar-status.ok{background:rgba(74,222,128,.12);color:var(--green);border:1px solid rgba(74,222,128,.2);display:block}
+.lidar-status.err{background:rgba(248,113,113,.12);color:var(--red);border:1px solid rgba(248,113,113,.2);display:block}
+#pc-legend{font-size:0.68rem;color:var(--muted);margin-top:6px;display:none}
+
+/* Accessibility overrides */
+@media (prefers-contrast: high){
+  :root{--bg:#fff;--panel:#fff;--panel-alt:#f5f5f5;--border:#000;--text:#000;--muted:#333;--accent:#006d82;--accent-soft:#d0f0f8;--red:#c00;--green:#060;--yellow:#a60}
+  .cam-wrap video{filter:contrast(1.2)}
+}
+@media (prefers-color-scheme: dark){
+  :root{--bg:#0f1117;--panel:#1a1d28;--panel-alt:#1e2231;--border:#2d3348;--text:#e4e7ed;--muted:#8b93a7;--accent:#22d3ee;--accent-soft:#0c2d35;--red:#f87171;--green:#4ade80;--yellow:#facc15;--blue:#60a5fa;--shadow-sm:0 1px 3px rgba(0,0,0,.3);--shadow-md:0 4px 12px rgba(0,0,0,.4)}
+  .cam-wrap{background:#000}
+  #map-canvas{background:#141824}
+  .map-legend{background:rgba(26,29,40,.95)}
+  .guide-overlay{background:rgba(26,29,40,.96)}
+}
+@media (max-width:900px){.cam-panel{flex:0 0 300px}.sidebar{width:280px;min-width:280px}}
+@media (max-width:680px){.main{flex-direction:column}.cam-panel,.sidebar{flex:none;width:100%;border-right:none;border-bottom:1px solid var(--border)}}
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="header" role="banner">
+  <div class="brand">
+    <div class="kicker">LOCI-DB · Spatial Memory</div>
+    <h1>Where Did I Leave My Keys?</h1>
+    <div class="subtitle">Stateful AI assistant for the visually impaired</div>
+  </div>
+  <div class="narrative" aria-live="polite" id="narrative-text">
+    <strong>Phase A Demo:</strong> LOCI-DB watches the room, remembers every object and where it was seen,
+    and answers voice questions — even after objects have moved. This demonstrates the core "spatial episodic memory"
+    that enables an AI assistant to help blind users navigate their environment.
+    <div class="pill-row">
+      <span class="pill" aria-label="4D spatiotemporal indexing">4D Hilbert indexing</span>
+      <span class="pill" aria-label="YOLOv8 object detection">YOLOv8 detection</span>
+      <span class="pill" aria-label="Whisper voice recognition">Whisper STT</span>
+      <span class="pill" aria-label="Text to speech output">TTS output</span>
+      <span class="pill" aria-label="Zero latency local inference">LocalLociClient</span>
+      <span class="pill" aria-label="iPhone LiDAR 3D scanner" style="background:rgba(90,209,123,.15);border-color:rgba(90,209,123,.3);color:#b9ffcc">iPhone LiDAR 3D</span>
+    </div>
+  </div>
+</header>
+
+<!-- ── Main ── -->
+<main class="main" role="main">
+
+  <!-- Camera panel -->
+  <section class="cam-panel" aria-label="Camera feed with object detection">
+    <div class="panel-header">
+      <span class="panel-title">Camera Feed</span>
+      <span id="cam-fps" style="font-size:0.68rem;color:var(--muted)">● 0 fps</span>
+    </div>
+    <div class="cam-wrap">
+      <video id="video" autoplay muted playsinline aria-label="Webcam video feed"></video>
+      <canvas id="overlay-canvas" aria-hidden="true"></canvas>
+    </div>
+    <div class="cam-status" aria-live="polite" id="cam-status">Camera not started. Click "Start Camera" to begin.</div>
+    <div class="cam-controls">
+      <button id="btn-camera" onclick="toggleCamera()" aria-label="Toggle camera">Start Camera</button>
+      <button id="btn-scan" onclick="toggleScan()" disabled aria-label="Toggle object scanning">Start Scanning</button>
+      <button onclick="clearMemory()" class="danger" aria-label="Clear all spatial memory">Clear Memory</button>
+    </div>
+  </section>
+
+  <!-- Spatial map -->
+  <section class="map-panel" aria-label="Spatial object map">
+    <div class="panel-header">
+      <span class="panel-title">Spatial Memory Map</span>
+      <span style="font-size:0.68rem;color:var(--muted)" id="mem-count">0 observations</span>
+    </div>
+    <div class="map-wrap" style="position:relative">
+      <canvas id="map-canvas" width="440" height="440" aria-label="2D top-down map of tracked objects" role="img"></canvas>
+      <div class="map-legend" aria-label="Map legend">
+        <div style="font-size:0.68rem;color:var(--accent);margin-bottom:4px;letter-spacing:.06em;font-weight:600">SPATIAL ZONES (3x3)</div>
+        <div style="font-size:0.78rem;color:var(--text);margin-bottom:6px;font-weight:600">Legend</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>Recent (0–10s)</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--yellow)"></div>Seen (10–60s)</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#666"></div>Older (&gt;60s)</div>
+        <div class="legend-item"><div class="legend-dot" style="background:var(--red);opacity:.7"></div>Selected</div>
+      </div>
+      <div class="guide-overlay" id="demo-guide" role="complementary" aria-label="Demo guide">
+        <div class="guide-step" id="guide-step">Step 1 of 4</div>
+        <div class="guide-title" id="guide-title">Start the Camera</div>
+        <div class="guide-body" id="guide-body">Click "Start Camera" then "Start Scanning" to begin tracking objects in the room.</div>
+        <div class="guide-next" id="guide-next">→ Next: scan the room</div>
+      </div>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="metric-val" id="stat-objects">0</div><div class="metric-lbl">Objects Tracked</div></div>
+      <div class="metric"><div class="metric-val" id="stat-obs">0</div><div class="metric-lbl">Total Observations</div></div>
+      <div class="metric"><div class="metric-val" id="stat-frames">0</div><div class="metric-lbl">Frames Processed</div></div>
+      <div class="metric"><div class="metric-val" id="stat-latency">—</div><div class="metric-lbl">Voice Latency (ms)</div></div>
+    </div>
+  </section>
+
+  <!-- Voice + object list sidebar -->
+  <aside class="sidebar" aria-label="Voice interface and object list">
+
+    <!-- Voice control -->
+    <div class="voice-card">
+      <h2 style="margin-bottom:8px">Voice Query</h2>
+      <button
+        class="mic-btn"
+        id="mic-btn"
+        onclick="toggleMic()"
+        aria-label="Hold to record voice query"
+        aria-pressed="false"
+        role="button"
+      >🎤</button>
+      <div style="text-align:center;font-size:0.68rem;color:var(--muted);margin-bottom:6px" id="mic-hint">Click to record · release to ask</div>
+
+      <div class="waveform" aria-hidden="true">
+        <canvas id="waveform-canvas"></canvas>
+      </div>
+
+      <div class="transcript-box" aria-live="polite" aria-label="Transcription" id="transcript-box">
+        <span style="color:var(--muted);opacity:.6">Your question will appear here...</span>
+      </div>
+
+      <div class="answer-box" aria-live="assertive" role="alert" aria-label="Answer" id="answer-box">
+        <span style="color:var(--muted);opacity:.6">Answer will appear here and be spoken aloud...</span>
+      </div>
+
+      <div class="latency-row" id="latency-row"></div>
+    </div>
+
+    <!-- Text query (fallback / demo) -->
+    <div class="text-query">
+      <h3 style="margin-bottom:6px">Text Query (no mic needed)</h3>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <input
+          type="text"
+          id="text-input"
+          placeholder="Where are my keys?"
+          aria-label="Type a question"
+          onkeydown="if(event.key==='Enter')sendTextQuery()"
+        >
+        <button onclick="sendTextQuery()" aria-label="Send text query">Ask</button>
+      </div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px">
+        <button onclick="quickQuery('Where are my keys?')" style="font-size:0.65rem;padding:3px 7px">where keys?</button>
+        <button onclick="quickQuery('Where is my phone?')" style="font-size:0.65rem;padding:3px 7px">where phone?</button>
+        <button onclick="quickQuery('When was I last seen my keys?')" style="font-size:0.65rem;padding:3px 7px">when keys?</button>
+        <button onclick="quickQuery('What objects can you see?')" style="font-size:0.65rem;padding:3px 7px">all objects</button>
+        <button onclick="quickQuery('What changed recently?')" style="font-size:0.65rem;padding:3px 7px">changes</button>
+      </div>
+    </div>
+
+    <!-- Object list -->
+    <div class="obj-list">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">Tracked Objects</h2>
+        <span style="font-size:0.65rem;color:var(--muted)" id="obj-count">0 objects</span>
+      </div>
+      <div id="obj-list-items" aria-live="polite" aria-label="List of tracked objects">
+        <div style="color:var(--muted);font-size:0.75rem;padding:4px">No objects tracked yet.</div>
+      </div>
+    </div>
+
+    <!-- History -->
+    <div class="history-panel">
+      <h2 style="margin-bottom:8px" id="history-title">History</h2>
+      <div id="history-items" aria-live="polite" aria-label="Object history timeline">
+        <div style="color:var(--muted);font-size:0.75rem">Select an object to see its history.</div>
+      </div>
+    </div>
+
+    <!-- LiDAR Point Cloud Upload -->
+    <div class="lidar-panel">
+      <h2>LiDAR Point Cloud <span style="font-size:0.65rem;color:var(--accent);font-weight:500">NEW</span></h2>
+      <div class="lidar-drop-zone" id="lidar-drop" onclick="document.getElementById('lidar-file-input').click()"
+           ondragover="event.preventDefault();this.classList.add('drag-over')"
+           ondragleave="this.classList.remove('drag-over')"
+           ondrop="onPCDrop(event)"
+           role="button" tabindex="0" aria-label="Upload PLY point cloud file">
+        <div class="drop-icon">🗂️</div>
+        <div class="drop-label"><strong>Drop .ply file here</strong><br>or click to browse</div>
+      </div>
+      <input type="file" id="lidar-file-input" accept=".ply,.PLY" style="display:none" onchange="onPCFileSelect(event)">
+      <div class="lidar-status" id="lidar-status"></div>
+      <div id="pc-legend">📡 Point cloud loaded — visible on map as small dots</div>
+      <div class="lidar-apps">
+        <strong>How to get a LiDAR scan from your iPhone:</strong><br>
+        1. Install <a href="https://apps.apple.com/app/scaniverse/id1541433223" target="_blank">Scaniverse</a> (free) or Polycam<br>
+        2. Scan your room / scene<br>
+        3. Export → <strong>PLY</strong> (point cloud)<br>
+        4. AirDrop to Mac → upload here
+      </div>
+    </div>
+
+  </aside>
+</main>
+
+<!-- Status bar -->
+<footer class="status-bar" role="contentinfo" aria-label="System status">
+  <div style="display:flex;align-items:center;gap:4px">
+    <div class="status-dot" id="ws-dot"></div>
+    <span id="ws-status">WebSocket: disconnected</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:4px">
+    <div class="status-dot" id="backend-dot"></div>
+    <span id="backend-status">Backend: checking...</span>
+  </div>
+  <div id="status-extra" style="flex:1;text-align:right"></div>
+</footer>
+
+<!-- Audio element for TTS playback -->
+<audio id="tts-audio" aria-label="Text to speech output" style="display:none"></audio>
+
+<!-- iPhone 3D Scanner — floating action button (always visible) -->
+<button class="scanner-fab" onclick="openScannerModal()" aria-label="Open iPhone 3D Scanner QR code">
+  &#128241; iPhone 3D Scanner
+</button>
+
+<!-- Scanner QR code modal -->
+<div class="scanner-modal-backdrop" id="scanner-modal" onclick="closeScannerModal(event)">
+  <div class="scanner-modal" onclick="event.stopPropagation()">
+    <h2>iPhone 3D Scanner</h2>
+    <div style="font-size:0.82rem;color:var(--muted)">Scan this QR code with your iPhone camera</div>
+    <img id="scanner-qr-img" class="qr-img" width="180" height="180" alt="QR code for iPhone scanner">
+    <div class="scanner-url-box" id="scanner-url" onclick="copyScannerURL()" title="Click to copy URL">
+      Loading scanner URL...
+    </div>
+    <div style="font-size:0.72rem;color:var(--muted);margin-bottom:4px">Click URL to copy &middot; Both devices must be on same network</div>
+    <div style="font-size:0.72rem;color:var(--muted)">Uses rear camera + LiDAR for depth-aware 3D object detection</div>
+    <button class="close-btn" onclick="closeScannerModal()">Close</button>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// Config
+// ─────────────────────────────────────────────────────────────────────────────
+const _hostname = (window.location.hostname === '0.0.0.0' || window.location.hostname === '') ? 'localhost' : window.location.hostname;
+const API_BASE = window.location.port === '8001'
+  ? `${window.location.protocol}//${_hostname}:8001`
+  : 'http://localhost:8001';
+const WS_URL = API_BASE.replace(/^http/, 'ws') + '/ws';
+const SCAN_FPS = 2;
+const MAP_SIZE = 440;
+
+function formatClockTime(timestampMs) {
+  if (!timestampMs) return '';
+  const d = new Date(timestampMs);
+  let h = d.getHours(), m = d.getMinutes();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${m.toString().padStart(2, '0')} ${ampm}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────────
+let cameraStream = null;
+let scanning = false;
+let scanInterval = null;
+let frameCount = 0;
+let ws = null;
+let trackedObjects = {};   // label → { label, cx, cy, confidence, age_seconds, timestamp_ms }
+let selectedObject = null;
+let _pcPoints = [];        // uploaded LiDAR point cloud — array of {x,y,z,r?,g?,b?}
+let _pcBounds = null;      // {xMin,xMax,zMin,zMax} for normalization
+let mediaRecorder = null;
+let audioChunks = [];
+let isRecording = false;
+let audioCtx = null;
+let analyser = null;
+let waveAnimId = null;
+let lastFps = 0, fpsTimer = 0, fpsFrames = 0;
+
+// Demo guide steps
+const GUIDE_STEPS = [
+  { step: 'Step 1 of 4', title: 'Start the Camera', body: 'Click "Start Camera" below the feed to activate your webcam.', next: '→ Then start scanning' },
+  { step: 'Step 2 of 4', title: 'Scan the Room', body: 'Click "Start Scanning". Place objects in view — LOCI-DB will detect and remember each one with its position.', next: '→ Watch the map fill in' },
+  { step: 'Step 3 of 4', title: 'Move an Object', body: 'Move an object (keys, phone, cup) out of the camera frame — or to a different spot.', next: '→ Then ask where it is' },
+  { step: 'Step 4 of 4', title: 'Ask a Question', body: 'Click the 🎤 mic button and say "Where are my keys?" — LOCI answers from memory, even if the object is no longer visible.', next: '→ The AI remembers!' },
+];
+let guideStep = 0;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Backend health
+// ─────────────────────────────────────────────────────────────────────────────
+async function checkBackend() {
+  try {
+    const r = await fetch(`${API_BASE}/health`);
+    const d = await r.json();
+    setStatus('backend', 'ok', `Backend: ok · VLM:${d.vlm_available?'✓':'✗'} STT:${d.pipeline.stt_available?'✓':'✗'} TTS:${d.pipeline.tts_engine}`);
+    updateStats(d.observation_count, d.tracked_objects, d.frame_count);
+  } catch(e) {
+    setStatus('backend', 'err', 'Backend: offline — start demo_spatial/run_demo.sh');
+  }
+}
+
+function setStatus(key, state, text) {
+  const dot = document.getElementById(`${key}-dot`);
+  const lbl = document.getElementById(`${key}-status`);
+  dot.className = `status-dot ${state === 'ok' ? 'ok' : state === 'err' ? 'err' : 'warn'}`;
+  lbl.textContent = text;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WebSocket
+// ─────────────────────────────────────────────────────────────────────────────
+function connectWS() {
+  if (ws && ws.readyState < 2) return;
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => setStatus('ws', 'ok', 'WebSocket: connected');
+  ws.onclose = () => {
+    setStatus('ws', 'warn', 'WebSocket: reconnecting...');
+    setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => setStatus('ws', 'err', 'WebSocket: error');
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'snapshot') handleSnapshot(msg);
+    else if (msg.type === 'detections') handleDetections(msg);
+  };
+}
+
+function handleSnapshot(msg) {
+  if (msg.objects) {
+    msg.objects.forEach(o => trackedObjects[o.label] = o);
+    updateObjectList();
+    drawMap();
+  }
+  if (msg.observation_count !== undefined) updateStats(msg.observation_count, Object.keys(trackedObjects).length);
+}
+
+function handleDetections(msg) {
+  if (msg.detections) {
+    msg.detections.forEach(d => {
+      if (!trackedObjects[d.label]) trackedObjects[d.label] = { label: d.label, cx: d.cx, cy: d.cy, confidence: d.confidence, age_seconds: 0, timestamp_ms: Date.now() };
+      else { trackedObjects[d.label].cx = d.cx; trackedObjects[d.label].cy = d.cy; trackedObjects[d.label].confidence = d.confidence; trackedObjects[d.label].age_seconds = 0; trackedObjects[d.label].timestamp_ms = Date.now(); }
+    });
+    updateObjectList();
+    drawMap();
+  }
+  if (msg.observation_count !== undefined) updateStats(msg.observation_count, null, msg.frame_count);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Camera
+// ─────────────────────────────────────────────────────────────────────────────
+async function toggleCamera() {
+  const btn = document.getElementById('btn-camera');
+  const scanBtn = document.getElementById('btn-scan');
+  if (cameraStream) {
+    cameraStream.getTracks().forEach(t => t.stop());
+    cameraStream = null;
+    document.getElementById('video').srcObject = null;
+    btn.textContent = 'Start Camera';
+    btn.classList.remove('active');
+    scanBtn.disabled = true;
+    if (scanning) toggleScan();
+    setCamStatus('Camera stopped.');
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setCamStatus('Camera requires HTTPS or localhost. Please access the demo at https://… or http://localhost:8001');
+    setStatus('backend', 'warn', 'Camera unavailable (not a secure context)');
+    return;
+  }
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'environment' }, audio: false });
+    document.getElementById('video').srcObject = cameraStream;
+    btn.textContent = 'Stop Camera';
+    btn.classList.add('active');
+    scanBtn.disabled = false;
+    setCamStatus('Camera active. Click "Start Scanning" to detect objects.');
+    advanceGuide(1);
+  } catch(e) {
+    setCamStatus('Camera error: ' + e.message);
+    setStatus('backend', 'warn', 'Camera access denied');
+  }
+}
+
+function toggleScan() {
+  const btn = document.getElementById('btn-scan');
+  if (scanning) {
+    scanning = false;
+    clearInterval(scanInterval);
+    scanInterval = null;
+    btn.textContent = 'Start Scanning';
+    btn.classList.remove('active');
+    setCamStatus('Scanning stopped.');
+  } else {
+    if (!cameraStream) return;
+    scanning = true;
+    btn.textContent = 'Stop Scanning';
+    btn.classList.add('active');
+    setCamStatus('Scanning... ' + SCAN_FPS + ' fps object detection active.');
+    advanceGuide(2);
+    scanInterval = setInterval(captureAndSend, 1000 / SCAN_FPS);
+  }
+}
+
+async function captureAndSend() {
+  const video = document.getElementById('video');
+  if (!video.videoWidth) return;
+
+  // Draw video frame to offscreen canvas
+  const offscreen = document.createElement('canvas');
+  offscreen.width = video.videoWidth;
+  offscreen.height = video.videoHeight;
+  offscreen.getContext('2d').drawImage(video, 0, 0);
+  const b64 = offscreen.toDataURL('image/jpeg', 0.8);
+
+  frameCount++;
+  fpsFrames++;
+  const now = Date.now();
+  if (now - fpsTimer > 1000) {
+    lastFps = fpsFrames;
+    fpsFrames = 0;
+    fpsTimer = now;
+    document.getElementById('cam-fps').textContent = `● ${lastFps} fps`;
+  }
+
+  try {
+    const r = await fetch(`${API_BASE}/api/ingest/frame`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_b64: b64 }),
+    });
+    if (!r.ok) return;
+    const data = await r.json();
+    drawBoundingBoxes(data.detections || [], video.videoWidth, video.videoHeight);
+    updateStats(data.observation_count, null, data.frame_count);
+    if ((data.detections || []).length > 0 && guideStep === 2) advanceGuide(3);
+  } catch(e) {
+    // Backend not available, ignore silently
+  }
+}
+
+function drawBoundingBoxes(detections, vw, vh) {
+  const canvas = document.getElementById('overlay-canvas');
+  const video = document.getElementById('video');
+  canvas.width = video.clientWidth;
+  canvas.height = video.clientHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  detections.forEach(d => {
+    const x = (d.cx - d.width / 2) * canvas.width;
+    const y = (d.cy - d.height / 2) * canvas.height;
+    const w = d.width * canvas.width;
+    const h = d.height * canvas.height;
+    const color = d.source === 'vlm' ? '#ffc857' : '#00bcd4';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, w, h);
+    // Label
+    ctx.fillStyle = color;
+    ctx.font = '600 12px -apple-system, BlinkMacSystemFont, sans-serif';
+    const label = `${d.label} ${Math.round(d.confidence * 100)}%`;
+    const tw = ctx.measureText(label).width;
+    ctx.fillRect(x, y - 18, tw + 6, 18);
+    ctx.fillStyle = '#000';
+    ctx.fillText(label, x + 3, y - 4);
+  });
+}
+
+function setCamStatus(msg) { document.getElementById('cam-status').textContent = msg; }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Map rendering
+// ─────────────────────────────────────────────────────────────────────────────
+function drawMap() {
+  const canvas = document.getElementById('map-canvas');
+  const ctx = canvas.getContext('2d');
+  const size = MAP_SIZE;
+  const padding = 28;
+  const inner = size - padding * 2;
+
+  // Detect dark mode
+  const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+  // Background
+  ctx.fillStyle = isDark ? '#141824' : '#ffffff';
+  ctx.fillRect(0, 0, size, size);
+
+  // Zone fills — alternating subtle tint for readability
+  const zoneFills = isDark
+    ? [['#181d2e','#1c2236','#181d2e'],['#1c2236','#202740','#1c2236'],['#181d2e','#1c2236','#181d2e']]
+    : [['#f8f9fc','#f0f3f9','#f8f9fc'],['#f0f3f9','#e8ecf4','#f0f3f9'],['#f8f9fc','#f0f3f9','#f8f9fc']];
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      ctx.fillStyle = zoneFills[row][col];
+      ctx.fillRect(padding + col * (inner / 3), padding + row * (inner / 3), inner / 3, inner / 3);
+    }
+  }
+
+  // Grid lines
+  ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 2; i++) {
+    const x = padding + i * (inner / 3);
+    const y = padding + i * (inner / 3);
+    ctx.beginPath(); ctx.moveTo(x, padding); ctx.lineTo(x, size - padding); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(padding, y); ctx.lineTo(size - padding, y); ctx.stroke();
+  }
+
+  // Zone labels
+  const zoneLabels = [
+    ['L-Back', 'C-Back', 'R-Back'],
+    ['Left', 'Center', 'Right'],
+    ['L-Front', 'C-Front', 'R-Front'],
+  ];
+  ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillStyle = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)';
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      const zx = padding + col * (inner / 3) + inner / 6;
+      const zy = padding + row * (inner / 3) + inner / 6;
+      const lbl = zoneLabels[row][col];
+      ctx.fillText(lbl, zx - ctx.measureText(lbl).width / 2, zy + 4);
+    }
+  }
+
+  // Compass labels
+  ctx.font = '600 10px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillStyle = isDark ? 'rgba(34,211,238,0.5)' : 'rgba(8,145,178,0.5)';
+  ctx.fillText('LEFT', padding + 4, size - 8);
+  ctx.fillText('RIGHT', size - padding - ctx.measureText('RIGHT').width - 4, size - 8);
+  ctx.fillText('BACK (far)', padding + inner / 2 - ctx.measureText('BACK (far)').width / 2, padding - 8);
+  ctx.fillText('FRONT (near)', padding + inner / 2 - ctx.measureText('FRONT (near)').width / 2, size - 6);
+
+  // Border
+  ctx.strokeStyle = isDark ? 'rgba(34,211,238,0.15)' : 'rgba(8,145,178,0.2)';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(padding, padding, inner, inner);
+
+  // LiDAR point cloud overlay (top-down XZ projection)
+  if (_pcPoints.length > 0 && _pcBounds) {
+    const {xMin, xMax, zMin, zMax} = _pcBounds;
+    const xRange = xMax - xMin || 1;
+    const zRange = zMax - zMin || 1;
+    for (const pt of _pcPoints) {
+      const nx = (pt.x - xMin) / xRange;          // 0–1 left–right
+      const nz = 1 - (pt.z - zMin) / zRange;      // 0–1 front–back (flip Z)
+      const px = padding + nx * inner;
+      const pz = padding + nz * inner;
+      if (pt.r !== undefined) {
+        ctx.fillStyle = `rgba(${pt.r},${pt.g},${pt.b},0.55)`;
+      } else {
+        ctx.fillStyle = isDark ? 'rgba(34,211,238,0.35)' : 'rgba(8,145,178,0.35)';
+      }
+      ctx.fillRect(px - 1, pz - 1, 2, 2);
+    }
+  }
+
+  // Objects
+  const accentColor = isDark ? '#22d3ee' : '#0891b2';
+  const warnColor = isDark ? '#facc15' : '#ca8a04';
+  const selectedColor = isDark ? '#f87171' : '#ef4444';
+  const now = Date.now();
+  const objects = Object.values(trackedObjects);
+  objects.forEach(obj => {
+    const x = padding + obj.cx * inner;
+    const y = padding + obj.cy * inner;
+    const age = obj.age_seconds || (now - obj.timestamp_ms) / 1000;
+
+    let color;
+    if (age < 10) color = accentColor;
+    else if (age < 60) color = warnColor;
+    else color = isDark ? '#555' : '#9ca3af';
+
+    if (selectedObject === obj.label) color = selectedColor;
+
+    // Glow for recent objects
+    if (age < 10) {
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, 24);
+      grad.addColorStop(0, color + '30');
+      grad.addColorStop(1, 'transparent');
+      ctx.fillStyle = grad;
+      ctx.fillRect(x - 24, y - 24, 48, 48);
+    }
+
+    // Dot with outline for visibility
+    ctx.beginPath();
+    ctx.arc(x, y, selectedObject === obj.label ? 9 : 7, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = isDark ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.9)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Label
+    const isSelected = selectedObject === obj.label;
+    ctx.font = '600 11px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillStyle = isDark ? (isSelected ? '#fff' : '#ddd') : (isSelected ? '#1e2330' : '#374151');
+    const labelText = obj.label;
+    const lx = Math.min(Math.max(x - ctx.measureText(labelText).width / 2, 4), size - 70);
+    ctx.fillText(labelText, lx, y - 14);
+
+    // Time annotation below dot
+    const clockTime = obj.last_seen_time || formatClockTime(obj.timestamp_ms);
+    if (clockTime) {
+      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.35)';
+      ctx.font = '9px -apple-system, BlinkMacSystemFont, sans-serif';
+      const tx = Math.min(Math.max(x - ctx.measureText(clockTime).width / 2, 4), size - 60);
+      ctx.fillText(clockTime, tx, y + 18);
+    }
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Object list
+// ─────────────────────────────────────────────────────────────────────────────
+function updateObjectList() {
+  const container = document.getElementById('obj-list-items');
+  const objects = Object.values(trackedObjects).sort((a, b) => (a.age_seconds || 0) - (b.age_seconds || 0));
+  document.getElementById('obj-count').textContent = `${objects.length} object${objects.length !== 1 ? 's' : ''}`;
+  document.getElementById('stat-objects').textContent = objects.length;
+
+  if (objects.length === 0) {
+    container.innerHTML = '<div style="color:var(--muted);font-size:0.75rem;padding:4px">No objects tracked yet.</div>';
+    return;
+  }
+
+  container.innerHTML = objects.map(obj => {
+    const age = obj.age_seconds || 0;
+    const ageStr = age < 10 ? 'just now' : age < 60 ? `${Math.round(age)}s ago` : age < 3600 ? `${Math.round(age/60)}m ago` : `${Math.round(age/3600)}h ago`;
+    const h = obj.cx < 0.33 ? 'left' : obj.cx > 0.67 ? 'right' : 'center';
+    const v = obj.cy < 0.4 ? 'back' : obj.cy > 0.7 ? 'front' : 'mid';
+    const age_color = age < 10 ? 'var(--accent)' : age < 60 ? 'var(--yellow)' : 'var(--muted)';
+    const clockTime = obj.last_seen_time || formatClockTime(obj.timestamp_ms);
+    return `<div class="obj-item${selectedObject === obj.label ? ' selected' : ''}"
+      onclick="selectObject('${obj.label}')"
+      role="button" tabindex="0"
+      aria-label="${obj.label}, ${ageStr} at ${clockTime}, ${h} ${v}"
+      onkeydown="if(event.key==='Enter')selectObject('${obj.label}')">
+      <div class="obj-dot" style="background:${age_color}"></div>
+      <span class="obj-label">${obj.label}</span>
+      <span class="obj-pos" style="color:var(--muted)">${h}·${v}</span>
+      <span class="obj-age" title="Last seen at ${clockTime}">${ageStr} · ${clockTime}</span>
+    </div>`;
+  }).join('');
+}
+
+async function selectObject(label) {
+  selectedObject = label;
+  updateObjectList();
+  drawMap();
+  await loadHistory(label);
+}
+
+async function loadHistory(label) {
+  document.getElementById('history-title').textContent = `History: ${label}`;
+  try {
+    const r = await fetch(`${API_BASE}/api/objects/${encodeURIComponent(label)}/history?limit=15`);
+    const data = await r.json();
+    const items = data.observations || [];
+    if (items.length === 0) {
+      document.getElementById('history-items').innerHTML = '<div style="color:var(--muted);font-size:0.75rem">No history found.</div>';
+      return;
+    }
+    document.getElementById('history-items').innerHTML = items.map(o => {
+      const h = o.cx < 0.33 ? 'left' : o.cx > 0.67 ? 'right' : 'center';
+      const v = o.cy < 0.4 ? 'back' : o.cy > 0.7 ? 'front' : 'mid';
+      const age = o.age_seconds || 0;
+      const ageStr = age < 60 ? `${Math.round(age)}s ago` : age < 3600 ? `${Math.round(age/60)}m ago` : `${Math.round(age/3600)}h ago`;
+      const conf = Math.round((o.confidence || 1) * 100);
+      const clockTime = o.last_seen_time || formatClockTime(o.timestamp_ms);
+      const clockFull = o.last_seen_at || '';
+      return `<div class="timeline-item">
+        <div class="timeline-dot"></div>
+        <div class="timeline-info">
+          <span class="timeline-label">${label}</span>
+          <span style="color:var(--accent);font-weight:500">${clockTime}</span> (${ageStr}) · ${h} ${v} · conf ${conf}%
+          ${clockFull ? `<br><span style="font-size:0.72rem;color:var(--muted);opacity:.7">${clockFull}</span>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('history-items').innerHTML = '<div style="color:var(--muted);font-size:0.75rem">Error loading history.</div>';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Voice pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+async function toggleMic() {
+  const btn = document.getElementById('mic-btn');
+  if (isRecording) {
+    stopRecording();
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    document.getElementById('transcript-box').innerHTML = '<span style="color:var(--red)">Microphone requires HTTPS or localhost. Please access the demo at https://… or http://localhost:8001</span>';
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    startRecording(stream);
+    btn.setAttribute('aria-pressed', 'true');
+    btn.classList.add('recording');
+    document.getElementById('mic-hint').textContent = 'Recording... click again to stop';
+    document.getElementById('transcript-box').innerHTML = '<span style="color:var(--accent)">Listening...</span>';
+  } catch(e) {
+    document.getElementById('transcript-box').innerHTML = `<span style="color:var(--red)">Mic error: ${e.message}</span>`;
+  }
+}
+
+function startRecording(stream) {
+  isRecording = true;
+  audioChunks = [];
+  mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+  mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+  mediaRecorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    const blob = new Blob(audioChunks, { type: 'audio/webm' });
+    await sendVoiceQuery(blob);
+    stopWaveform();
+  };
+  mediaRecorder.start(100);
+  startWaveform(stream);
+}
+
+function stopRecording() {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  isRecording = false;
+  mediaRecorder.stop();
+  const btn = document.getElementById('mic-btn');
+  btn.setAttribute('aria-pressed', 'false');
+  btn.classList.remove('recording');
+  document.getElementById('mic-hint').textContent = 'Processing...';
+}
+
+async function sendVoiceQuery(audioBlob) {
+  const formData = new FormData();
+  formData.append('file', audioBlob, 'query.webm');
+  formData.append('audio_response', 'true');
+
+  try {
+    const r = await fetch(`${API_BASE}/api/voice/query`, { method: 'POST', body: formData });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    displayQueryResult(data);
+  } catch(e) {
+    document.getElementById('answer-box').innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`;
+    document.getElementById('mic-hint').textContent = 'Click to record · release to ask';
+  }
+}
+
+async function sendTextQuery(text) {
+  text = text || document.getElementById('text-input').value.trim();
+  if (!text) return;
+  document.getElementById('answer-box').innerHTML = '<span style="color:var(--accent)">Thinking...</span>';
+  try {
+    const r = await fetch(`${API_BASE}/api/voice/text-query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    const data = await r.json();
+    displayQueryResult(data);
+    if (guideStep === 3) advanceGuide(4);
+  } catch(e) {
+    document.getElementById('answer-box').innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`;
+  }
+}
+
+function quickQuery(q) {
+  document.getElementById('text-input').value = q;
+  sendTextQuery(q);
+}
+
+function displayQueryResult(data) {
+  document.getElementById('transcript-box').textContent = data.transcription || '(text query)';
+  document.getElementById('answer-box').textContent = data.answer || 'No answer.';
+  document.getElementById('mic-hint').textContent = 'Click to record · release to ask';
+  if (data.latency_ms) {
+    document.getElementById('latency-row').textContent = `Response time: ${data.latency_ms}ms`;
+    document.getElementById('stat-latency').textContent = Math.round(data.latency_ms);
+  }
+  // Play audio if available
+  if (data.audio_b64) {
+    const audio = document.getElementById('tts-audio');
+    audio.src = `data:audio/mpeg;base64,${data.audio_b64}`;
+    audio.play().catch(() => {});
+  }
+  // Highlight object in map if known
+  if (data.intent && data.intent.object_name) {
+    selectObject(data.intent.object_name);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Waveform
+// ─────────────────────────────────────────────────────────────────────────────
+function startWaveform(stream) {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = audioCtx.createMediaStreamSource(stream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  source.connect(analyser);
+  drawWaveform();
+}
+
+function drawWaveform() {
+  if (!analyser) return;
+  waveAnimId = requestAnimationFrame(drawWaveform);
+  const canvas = document.getElementById('waveform-canvas');
+  const ctx = canvas.getContext('2d');
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(buf);
+  canvas.width = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const barW = canvas.width / buf.length;
+  buf.forEach((v, i) => {
+    const h = (v / 255) * canvas.height;
+    ctx.fillStyle = `rgba(8,145,178,${0.3 + v/400})`;
+    ctx.fillRect(i * barW, canvas.height - h, barW - 1, h);
+  });
+}
+
+function stopWaveform() {
+  if (waveAnimId) cancelAnimationFrame(waveAnimId);
+  waveAnimId = null;
+  analyser = null;
+  const canvas = document.getElementById('waveform-canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Misc
+// ─────────────────────────────────────────────────────────────────────────────
+async function clearMemory() {
+  if (!confirm('Clear all spatial memory? This cannot be undone.')) return;
+  trackedObjects = {};
+  selectedObject = null;
+  updateObjectList();
+  drawMap();
+  document.getElementById('history-items').innerHTML = '<div style="color:var(--muted);font-size:0.75rem">Select an object to see its history.</div>';
+  document.getElementById('history-title').textContent = 'History';
+  // Note: no backend endpoint to clear memory yet; this just clears the UI state
+}
+
+function updateStats(obs, objects, frames) {
+  if (obs !== undefined && obs !== null) document.getElementById('stat-obs').textContent = obs;
+  if (objects !== undefined && objects !== null) document.getElementById('stat-objects').textContent = objects;
+  if (frames !== undefined && frames !== null) document.getElementById('stat-frames').textContent = frames;
+  if (obs !== undefined) document.getElementById('mem-count').textContent = `${obs} observations`;
+}
+
+function advanceGuide(step) {
+  if (step <= guideStep) return;
+  guideStep = Math.min(step, GUIDE_STEPS.length - 1);
+  const g = GUIDE_STEPS[guideStep];
+  document.getElementById('guide-step').textContent = g.step;
+  document.getElementById('guide-title').textContent = g.title;
+  document.getElementById('guide-body').textContent = g.body;
+  document.getElementById('guide-next').textContent = g.next;
+}
+
+// Age ticker — update displayed ages every second
+setInterval(() => {
+  const now = Date.now();
+  Object.values(trackedObjects).forEach(o => {
+    o.age_seconds = (now - o.timestamp_ms) / 1000;
+  });
+  updateObjectList();
+  drawMap();
+}, 2000);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// iPhone Scanner Modal + QR Code (server-generated)
+// ─────────────────────────────────────────────────────────────────────────────
+let _cachedLocalIP = null;
+
+async function getScannerURL() {
+  // Use server-detected local network IP so iPhones on the same WiFi can connect
+  if (!_cachedLocalIP) {
+    try {
+      const resp = await fetch(`${API_BASE}/api/local-ip`);
+      const data = await resp.json();
+      _cachedLocalIP = data.ip || 'localhost';
+    } catch { _cachedLocalIP = window.location.hostname || 'localhost'; }
+  }
+  const host = _cachedLocalIP;
+  const port = window.location.port || '8001';
+  const proto = window.location.protocol === 'https:' ? 'https' : 'http';
+  return `${proto}://${host}:${port}/scanner`;
+}
+
+async function openScannerModal() {
+  const modal = document.getElementById('scanner-modal');
+  document.getElementById('scanner-url').textContent = 'Loading...';
+  modal.classList.add('open');
+  const url = await getScannerURL();
+  document.getElementById('scanner-url').textContent = url;
+  document.getElementById('scanner-qr-img').src = `/api/scanner-qr?url=${encodeURIComponent(url)}`;
+}
+
+function closeScannerModal(e) {
+  if (e && e.target !== e.currentTarget) return;
+  document.getElementById('scanner-modal').classList.remove('open');
+}
+
+function copyScannerURL() {
+  const el = document.getElementById('scanner-url');
+  const url = el.textContent;
+  navigator.clipboard.writeText(url).then(() => {
+    el.style.color = 'var(--green)';
+    el.textContent = 'Copied!';
+    setTimeout(() => { el.style.color = ''; el.textContent = url; }, 1500);
+  }).catch(() => {});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────────────────────────────
+checkBackend();
+setInterval(checkBackend, 10000);
+connectWS();
+drawMap();
+
+// ---------------------------------------------------------------------------
+// LiDAR point cloud upload
+// ---------------------------------------------------------------------------
+function _computePCBounds(pts) {
+  if (!pts.length) return null;
+  let xMin = Infinity, xMax = -Infinity, zMin = Infinity, zMax = -Infinity;
+  for (const p of pts) {
+    if (p.x < xMin) xMin = p.x; if (p.x > xMax) xMax = p.x;
+    if (p.z < zMin) zMin = p.z; if (p.z > zMax) zMax = p.z;
+  }
+  return {xMin, xMax, zMin, zMax};
+}
+
+async function uploadPLY(file) {
+  const statusEl = document.getElementById('lidar-status');
+  statusEl.className = 'lidar-status';
+  statusEl.textContent = `Uploading ${file.name}…`;
+  statusEl.style.display = 'block';
+  statusEl.classList.add('ok');
+
+  const fd = new FormData();
+  fd.append('file', file);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/ingest/pointcloud`, { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Upload failed');
+
+    statusEl.textContent = `✓ Loaded ${data.count.toLocaleString()} points — fetching for map…`;
+
+    // Fetch downsampled points for visualization
+    const pcRes = await fetch(`${API_BASE}/api/pointcloud/latest?max_points=8000`);
+    const pcData = await pcRes.json();
+    _pcPoints = pcData.points || [];
+    _pcBounds = _computePCBounds(_pcPoints);
+    drawMap();
+
+    statusEl.textContent = `✓ ${data.count.toLocaleString()} pts · showing ${_pcPoints.length.toLocaleString()} on map`;
+    document.getElementById('pc-legend').style.display = 'block';
+  } catch (e) {
+    statusEl.className = 'lidar-status err';
+    statusEl.textContent = `✗ ${e.message}`;
+  }
+}
+
+function onPCFileSelect(e) {
+  const file = e.target.files[0];
+  if (file) uploadPLY(file);
+}
+
+function onPCDrop(e) {
+  e.preventDefault();
+  document.getElementById('lidar-drop').classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) uploadPLY(file);
+}
+</script>
+</body>
+</html>

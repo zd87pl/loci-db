@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 import uuid
@@ -304,6 +305,7 @@ class LociClient:
         _extra_payload_filter: dict | None = None,
         _epoch_ids: set[int] | None = None,
         overlap_factor: float = 1.2,
+        min_confidence: float | None = None,
     ) -> list[WorldState]:
         """Search for nearest neighbours with spatial and temporal filtering.
 
@@ -329,6 +331,7 @@ class LociClient:
                 _extra_payload_filter=_extra_payload_filter,
                 _epoch_ids=_epoch_ids,
                 overlap_factor=overlap_factor,
+                min_confidence=min_confidence,
             )
         ]
 
@@ -342,6 +345,7 @@ class LociClient:
         _extra_payload_filter: dict | None = None,
         _epoch_ids: set[int] | None = None,
         overlap_factor: float = 1.2,
+        min_confidence: float | None = None,
     ) -> list[ScoredWorldState]:
         """Search for nearest neighbours and return scores alongside states."""
         self._discover_collections()
@@ -403,7 +407,7 @@ class LociClient:
                     with_vectors=True,
                 )
                 hits = resp.points
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across shards
                 continue
             for hit in hits:
                 all_results.append(
@@ -416,7 +420,7 @@ class LociClient:
                     }
                 )
 
-        if spatial_bounds is not None or time_window_ms is not None:
+        if spatial_bounds is not None or time_window_ms is not None or min_confidence is not None:
             all_results = [
                 r
                 for r in all_results
@@ -424,6 +428,7 @@ class LociClient:
                     r["payload"],
                     spatial_bounds=spatial_bounds,
                     time_window_ms=time_window_ms,
+                    min_confidence=min_confidence,
                 )
             ]
 
@@ -571,7 +576,7 @@ class LociClient:
                     if isinstance(vec, dict):
                         vec = list(vec.values())[0] if vec else []
                     all_states.append(self._payload_to_state(pt.payload, pt.id, vec))
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across epochs
                 continue
 
         # Sort by timestamp and find anchor position
@@ -640,7 +645,7 @@ class LociClient:
                     if isinstance(vec, dict):
                         vec = list(vec.values())[0] if vec else []
                     context.append(self._payload_to_state(pt.payload, pt.id, vec))
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across epochs
                 continue
 
         context.sort(key=lambda s: s.timestamp_ms)
@@ -706,7 +711,7 @@ class LociClient:
                     if isinstance(vec, dict):
                         vec = list(vec.values())[0] if vec else []
                     return self._payload_to_state(results[0].payload, results[0].id, vec)
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across epochs
                 continue
         return None
 
@@ -750,7 +755,7 @@ class LociClient:
                     points=[prev_id],
                 )
                 return
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across epochs
                 continue
 
     def _scroll_all(
@@ -791,8 +796,6 @@ class LociClient:
         epochs: list[int] = []
         for col in self._known_collections:
             if col.startswith("loci_"):
-                try:
+                with contextlib.suppress(ValueError):
                     epochs.append(int(col.split("_", 1)[1]))
-                except ValueError:
-                    pass
         return sorted(epochs) if epochs else []

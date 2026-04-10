@@ -6,10 +6,7 @@ that intersect it so we can use a ``MatchAny`` filter in Qdrant.
 
 from __future__ import annotations
 
-import itertools
-import math
-
-from loci.spatial.hilbert import _DEFAULT_ORDER, _clamp, _make_curve
+from loci.spatial.hilbert import _DEFAULT_ORDER, HilbertIndex, SpatialBounds
 
 
 def compute_bucket_id(
@@ -41,9 +38,8 @@ def expand_bounding_box(
 ) -> list[int]:
     """Return the sorted list of Hilbert IDs that cover a bounding box.
 
-    We enumerate every grid cell that overlaps the box and return the
-    unique Hilbert indices.  Because resolution is deliberately kept low
-    (default 16 divisions per axis) the enumeration is cheap.
+    Delegates to :class:`HilbertIndex.query_buckets` which uses a
+    precomputed numpy LUT for small resolutions.
 
     Args:
         x_min, x_max: Normalised x bounds.
@@ -58,37 +54,15 @@ def expand_bounding_box(
         Sorted list of unique Hilbert indices.
     """
     order = resolution_order if resolution_order is not None else _DEFAULT_ORDER
-    curve = _make_curve(order)
-    side = (1 << order) - 1
-
-    def _expand(lo: float, hi: float) -> tuple[float, float]:
-        if overlap_factor <= 1.0:
-            return lo, hi
-        span = hi - lo
-        pad = span * (overlap_factor - 1.0) / 2.0
-        return max(0.0, lo - pad), min(1.0, hi + pad)
-
-    x_min, x_max = _expand(x_min, x_max)
-    y_min, y_max = _expand(y_min, y_max)
-    z_min, z_max = _expand(z_min, z_max)
-    t_min, t_max = _expand(t_min, t_max)
-
-    ix_lo = _clamp(math.floor(x_min * side), 0, side)
-    ix_hi = _clamp(math.ceil(x_max * side), 0, side)
-    iy_lo = _clamp(math.floor(y_min * side), 0, side)
-    iy_hi = _clamp(math.ceil(y_max * side), 0, side)
-    iz_lo = _clamp(math.floor(z_min * side), 0, side)
-    iz_hi = _clamp(math.ceil(z_max * side), 0, side)
-    it_lo = _clamp(math.floor(t_min * side), 0, side)
-    it_hi = _clamp(math.ceil(t_max * side), 0, side)
-
-    ids: set[int] = set()
-    for ix, iy, iz, it in itertools.product(
-        range(ix_lo, ix_hi + 1),
-        range(iy_lo, iy_hi + 1),
-        range(iz_lo, iz_hi + 1),
-        range(it_lo, it_hi + 1),
-    ):
-        ids.add(curve.distance_from_point([ix, iy, iz, it]))
-
-    return sorted(ids)
+    bounds = SpatialBounds(
+        x_min=x_min,
+        x_max=x_max,
+        y_min=y_min,
+        y_max=y_max,
+        z_min=z_min,
+        z_max=z_max,
+        t_min=t_min,
+        t_max=t_max,
+    )
+    index = HilbertIndex(resolutions=[order])
+    return index.query_buckets(bounds, resolution=order, overlap_factor=overlap_factor)

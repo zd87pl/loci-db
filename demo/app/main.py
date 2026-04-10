@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -113,10 +114,8 @@ async def reset_simulation():
     sim.running = False
     if _sim_task and not _sim_task.done():
         _sim_task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await _sim_task
-        except asyncio.CancelledError:
-            pass
     _sim_task = None
     sim.reset()
     return {"status": "reset"}
@@ -162,11 +161,26 @@ async def query_spatial(req: SpatialQueryReq):
 
     from .embeddings import generate_embedding
 
+    now_ms = int(time.time() * 1000)
+    query_logs = []
+
     # Generate embedding for the center of the bounding box
     center_x = (req.x_min + req.x_max) // 2
     center_y = (req.y_min + req.y_max) // 2
     visible_keys = sim.get_visible_object_keys(center_x, center_y)
     query_vec = generate_embedding(center_x, center_y, visible_keys)
+
+    query_logs.append({
+        "ts": now_ms, "tag": "QUERY",
+        "msg": (
+            f"Spatial search: bbox ({req.x_min},{req.y_min})→({req.x_max},{req.y_max}), "
+            f"time {req.time_start_s}s–{req.time_end_s}s"
+        ),
+    })
+    query_logs.append({
+        "ts": now_ms, "tag": "EMBED",
+        "msg": f"Query vector from center ({center_x},{center_y}) + {len(visible_keys)} visible obj",  # noqa: E501
+    })
 
     # Normalize grid coords to [0,1]
     spatial_bounds = {
@@ -195,6 +209,20 @@ async def query_spatial(req: SpatialQueryReq):
     stats = sim.client.last_query_stats
     total_points = sim.memory_count
 
+    if stats:
+        query_logs.append({
+            "ts": now_ms, "tag": "HILBERT",
+            "msg": f"Expanded bbox to {stats.hilbert_ids_in_filter} Hilbert buckets at r4",
+        })
+        query_logs.append({
+            "ts": now_ms, "tag": "SHARD",
+            "msg": f"Scanned {stats.shards_searched} epoch shards, {stats.total_candidates} candidates",  # noqa: E501
+        })
+        query_logs.append({
+            "ts": now_ms, "tag": "RANK",
+            "msg": f"Decay-ranked → {len(results)} results in {round(stats.elapsed_ms, 2)}ms",
+        })
+
     return {
         "results": [
             {
@@ -209,6 +237,7 @@ async def query_spatial(req: SpatialQueryReq):
             for r in results
         ],
         "guide": sim.get_demo_status(),
+        "inference_log": query_logs,
         "stats": {
             "shards_searched": stats.shards_searched if stats else 0,
             "total_candidates": stats.total_candidates if stats else 0,
@@ -226,8 +255,20 @@ async def query_similar(req: SimilarQueryReq):
 
     from .embeddings import generate_embedding
 
+    now_ms = int(time.time() * 1000)
+    query_logs = []
+
     visible_keys = sim.get_visible_object_keys(req.x, req.y)
     click_vec = generate_embedding(req.x, req.y, visible_keys)
+
+    query_logs.append({
+        "ts": now_ms, "tag": "QUERY",
+        "msg": f"Similarity search: anchor ({req.x},{req.y}), radius {req.radius} cells",
+    })
+    query_logs.append({
+        "ts": now_ms, "tag": "EMBED",
+        "msg": f"Query vector from ({req.x},{req.y}) + {len(visible_keys)} visible obj",
+    })
 
     # Find nearest memory to click point
     nx = req.x / 19.0
@@ -249,6 +290,11 @@ async def query_similar(req: SimilarQueryReq):
 
     anchor = anchor_results[0]
 
+    query_logs.append({
+        "ts": now_ms, "tag": "SHARD",
+        "msg": f"Anchor found: id={anchor.id[:8]}… at ({round(anchor.x*19)},{round(anchor.y*19)})",
+    })
+
     # Find similar memories within radius
     radius_norm = req.radius / 19.0
     wide_bounds = {
@@ -266,6 +312,15 @@ async def query_similar(req: SimilarQueryReq):
     similar = [r for r in similar if r.id != anchor.id][: req.limit]
 
     stats = sim.client.last_query_stats
+
+    if stats:
+        query_logs.append({
+            "ts": now_ms, "tag": "RANK",
+            "msg": (
+                f"Found {len(similar)} similar moments from {stats.total_candidates} "
+                f"candidates in {round(stats.elapsed_ms, 2)}ms"
+            ),
+        })
 
     return {
         "anchor": {
@@ -290,6 +345,7 @@ async def query_similar(req: SimilarQueryReq):
             for r in similar
         ],
         "guide": sim.get_demo_status(),
+        "inference_log": query_logs,
         "stats": {
             "shards_searched": stats.shards_searched if stats else 0,
             "total_candidates": stats.total_candidates if stats else 0,
@@ -318,12 +374,20 @@ async def query_predict(req: PredictQueryReq):
             "guide": demo,
         }
 
+    now_ms = int(time.time() * 1000)
+    query_logs = []
+
     context_vec = sim.recent_embeddings[-1]
     predictor_fn = sim.make_predictor(req.steps_ahead)
     route = sim.get_route_status()
 
     cx = sim.robot_x / 19.0
     cy = sim.robot_y / 19.0
+
+    query_logs.append({
+        "ts": now_ms, "tag": "PREDICT",
+        "msg": f"Linear extrapolation from last 3 embeddings, {req.steps_ahead} steps ahead",
+    })
 
     result = sim.client.predict_and_retrieve(
         context_vector=context_vec,
@@ -336,6 +400,30 @@ async def query_predict(req: PredictQueryReq):
         return_prediction=True,
     )
 
+    query_logs.append({
+        "ts": now_ms, "tag": "EMBED",
+        "msg": f"Predicted 128-d future vector in {round(result.predictor_call_ms, 2)}ms",
+    })
+    query_logs.append({
+        "ts": now_ms, "tag": "SHARD",
+        "msg": f"Searched memory for matches within {req.steps_ahead * sim.tick_interval_ms}ms horizon",  # noqa: E501
+    })
+
+    novelty = round(result.prediction_novelty, 3)
+    if novelty < 0.3:
+        novelty_label = "expected"
+    elif novelty < 0.7:
+        novelty_label = "partly new"
+    else:
+        novelty_label = "surprising!"
+    query_logs.append({
+        "ts": now_ms, "tag": "NOVELTY",
+        "msg": (
+            f"Score: {novelty} ({novelty_label}) — {len(result.results)} memory matches "
+            f"in {round(result.retrieval_latency_ms, 2)}ms"
+        ),
+    })
+
     # Calculate predicted position from patrol route
     route_idx = sim.route_idx
     predicted_x, predicted_y = sim.robot_x, sim.robot_y
@@ -347,12 +435,13 @@ async def query_predict(req: PredictQueryReq):
         predicted_path.append({"x": predicted_x, "y": predicted_y})
 
     return {
-        "novelty": round(result.prediction_novelty, 3),
+        "novelty": novelty,
         "predicted_position": {"x": predicted_x, "y": predicted_y},
         "predicted_path": predicted_path,
         "current_position": {"x": sim.robot_x, "y": sim.robot_y},
         "route": route,
         "guide": demo,
+        "inference_log": query_logs,
         "predictor_ms": round(result.predictor_call_ms, 2),
         "retrieval_ms": round(result.retrieval_latency_ms, 2),
         "results": [

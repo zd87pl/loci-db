@@ -1,171 +1,207 @@
 # LOCI
 
-**Spatiotemporal memory for AI agents.** LOCI stores world-model embeddings with a 4D address — position (x, y, z) + timestamp — so your robot can answer *"what did I see near here, and when?"* instead of just *"what is this similar to?"*
+**A 4D spatiotemporal vector database for AI world models.**
 
 [![CI](https://github.com/zd87pl/loci-db/actions/workflows/ci.yml/badge.svg)](https://github.com/zd87pl/loci-db/actions)
+[![PyPI version](https://img.shields.io/pypi/v/loci-stdb.svg)](https://pypi.org/project/loci-stdb/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![PyPI: planned v1.0](https://img.shields.io/badge/PyPI-planned%20v1.0-lightgray.svg)](ROADMAP.md)
-
-```python
-from loci import LocalLociClient, WorldState
-import time
-
-client = LocalLociClient(vector_size=512)  # zero infrastructure; install: pip install -e .
-
-# Every observation stores WHERE and WHEN, not just WHAT
-client.insert(WorldState(x=0.5, y=0.3, z=0.0,
-                         timestamp_ms=int(time.time() * 1000),
-                         vector=my_world_model_embedding,
-                         scene_id="warehouse"))
-
-# Query: what did the robot see near (0.5, 0.3) in the last 5 seconds?
-results = client.query(vector=query_vec,
-                       spatial_bounds={"x_min": 0.3, "x_max": 0.7,
-                                       "y_min": 0.1, "y_max": 0.5,
-                                       "z_min": 0.0, "z_max": 1.0},
-                       time_window_ms=(now_ms - 5000, now_ms))
-
-# Predict then retrieve: what does my world model predict, and have I seen it before?
-result = client.predict_and_retrieve(context_vector=obs,
-                                     predictor_fn=my_world_model,
-                                     current_position=(0.5, 0.3, 0.0))
-print(f"Novelty: {result.prediction_novelty:.2f}")  # 0.0 familiar → 1.0 new
-```
 
 ---
 
-## Start here
+## The Problem
 
-| Resource | Description |
-|----------|-------------|
-| [**Getting Started notebook**](notebooks/getting_started.ipynb) | 10-minute walkthrough — warehouse robot scenario, no Qdrant needed |
-| [**Docker Compose demo**](demo/README.md) | Interactive warehouse robot demo: `docker compose up` |
-| [**Benchmark results**](#performance) | LOCI vs naive Qdrant — when does spatiotemporal indexing help? |
-| [**Architecture deep-dive**](ARCHITECTURE.md) | Hilbert bucketing, temporal sharding, novelty detection internals |
-| [**World model integration guide**](docs/WORLD_MODEL_INTEGRATION.md) | V-JEPA 2, DreamerV3, and generic adapter examples |
+Modern world models — V-JEPA 2, DreamerV3, GAIA-1, UniSim — produce embeddings
+where every vector has an implicit **4D spatiotemporal address** `(x, y, z, t)`.
+Existing vector databases (Qdrant, Milvus, Weaviate) treat all embedding dimensions
+equally: a spatial query requires 3+ float-range payload filters evaluated
+independently, time-based retrieval has no native sharding, and there is no
+concept of "predict the future then find what's nearby."
 
----
+## The Solution
 
-## Why LOCI?
-
-Modern world models — V-JEPA 2, DreamerV3, GAIA-1, UniSim — produce embeddings where every vector has an **implicit 4D spatiotemporal address** `(x, y, z, t)`. Existing vector databases treat all embedding dimensions equally: spatial queries require 3+ independent float-range payload filters, there is no native time sharding, and there is no primitive for *"predict the future then find what's nearby."*
-
-LOCI makes spatiotemporal structure **first-class** through three primitives:
+LOCI is a middleware layer on top of [Qdrant](https://qdrant.tech) that makes
+spatiotemporal structure **first-class** through three novel primitives:
 
 ### 1. Multi-Resolution Hilbert Bucketing
 
-Encode `(x, y, z)` at multiple Hilbert resolutions (p=4, 8, 12). A bounding-box spatial query becomes a **single integer set-membership filter** instead of three independent float comparisons.
+Encode `(x, y, z, t)` at multiple Hilbert resolutions (p=4, 8, 12).
+Spatial bounding-box queries use a Hilbert integer pre-filter with overlap, then
+apply an exact payload post-filter as the authoritative geometric check. By
+default queries start at the coarsest indexed resolution; with `adaptive=True`,
+dense regions can be promoted to finer Hilbert resolutions at query time.
 
 ```
-      Naive Qdrant                     LOCI
-┌──────────────────────┐     ┌──────────────────────┐
-│ x_min ≤ x ≤ x_max    │     │                      │
-│ y_min ≤ y ≤ y_max    │ →   │  hilbert_r4 ∈ {…}    │
-│ z_min ≤ z ≤ z_max    │     │  (single set filter) │
-└──────────────────────┘     └──────────────────────┘
+         Naive Qdrant               LOCI
+    ┌──────────────────┐     ┌──────────────────┐
+    │ x_min ≤ x ≤ x_max│     │                  │
+    │ y_min ≤ y ≤ y_max│ →   │ hilbert_r4 ∈ {…} │
+    │ z_min ≤ z ≤ z_max│     │  (single filter)  │
+    └──────────────────┘     └──────────────────┘
 ```
 
-With `adaptive=True`, dense spatial regions are automatically promoted to finer Hilbert resolutions at query time.
+### 2. Temporal Sharding
 
-### 2. Temporal Epoch Sharding
-
-Vectors are automatically routed to **time-partitioned collections** (`loci_{epoch_id}`). Queries fan out only to epochs that overlap the requested time window — with the async client, all shards are searched **concurrently** via `asyncio.gather`. Temporal decay scoring penalises older results gently.
+Automatic routing of vectors to **time-partitioned Qdrant collections**
+(`loci_{epoch_id}`). Configurable epoch size. Queries fan out only to
+epochs that overlap the requested time window — with the async client,
+all shards are searched **concurrently** via `asyncio.gather`.
 
 ### 3. Predict-then-Retrieve with Novelty Detection
+
+An **atomic API call** that composes a user-supplied world model with
+vector search, returning both results and a **novelty score**:
 
 ```python
 result = client.predict_and_retrieve(
     context_vector=current_embedding,
-    predictor_fn=my_world_model,        # any callable: vector → vector
+    predictor_fn=my_world_model,
     future_horizon_ms=2000,
     current_position=(0.5, 0.3, 0.8),
 )
-# result.results        — stored states matching the prediction
-# result.prediction_novelty  — 0.0 familiar, 1.0 new territory
+print(f"Novelty: {result.prediction_novelty:.2f}")
+# 0.0 = "I've seen this before"
+# 1.0 = "This is new territory"
 ```
-
-This is LOCI's analogue to HyDE (ACL 2023) for spatiotemporal world models — the robot's hippocampus, not just a filing cabinet.
-
----
 
 ## Quick Start
 
-### In-memory (zero infrastructure)
+### Quick Start with Docker
 
-> **Note:** loci-db is not yet published to PyPI (planned for v1.0). Install from source:
+The fastest way to run LOCI with a persistent Qdrant backend:
 
 ```bash
-git clone https://github.com/zd87pl/loci-db.git
-cd loci-db
-pip install -e .
+docker compose up
+```
+
+This starts two services:
+- **loci** — the LOCI REST API on `http://localhost:8000`
+- **qdrant** — the Qdrant vector store on `http://localhost:6333`
+
+Qdrant data is persisted in a named volume so it survives restarts.
+
+Once running, insert and query world states via the HTTP API:
+
+```bash
+# Health check
+curl http://localhost:8000/health
+
+# Insert a world state (512-dim vector)
+curl -X POST http://localhost:8000/insert \
+  -H 'Content-Type: application/json' \
+  -d '{"x":0.5,"y":0.3,"z":0.8,"timestamp_ms":1700000000000,"vector":[0.1],"scene_id":"s1"}'
+
+# Query (spatial + time window)
+curl -X POST http://localhost:8000/query \
+  -H 'Content-Type: application/json' \
+  -d '{"vector":[0.1],"x_min":0.0,"x_max":1.0,"limit":10}'
+```
+
+Interactive API docs: `http://localhost:8000/docs`
+
+---
+
+### No Docker? No problem — in-memory mode
+
+Try LOCI instantly with zero infrastructure using `LocalLociClient`:
+
+```bash
+pip install loci-stdb          # or: pip install -e ".[dev]"
 ```
 
 ```python
 from loci import LocalLociClient, WorldState
-import time
 
 client = LocalLociClient(vector_size=512)
 
+# Insert a world state
 state = WorldState(
     x=0.5, y=0.3, z=0.8,
-    timestamp_ms=int(time.time() * 1000),
+    timestamp_ms=1000,
     vector=[0.1] * 512,
     scene_id="my_scene",
-    scale_level="patch",   # "patch" | "frame" | "sequence"
-    confidence=0.95,
 )
 state_id = client.insert(state)
 
-# Spatiotemporal query
+# Query by vector similarity + spatial bounds + time window
 results = client.query(
     vector=[0.1] * 512,
     spatial_bounds={"x_min": 0.0, "x_max": 1.0,
                     "y_min": 0.0, "y_max": 1.0,
                     "z_min": 0.0, "z_max": 1.0},
-    time_window_ms=(int(time.time() * 1000) - 5000,
-                    int(time.time() * 1000)),
+    time_window_ms=(0, 5000),
     limit=10,
 )
-
-# Walk causal chain
-trajectory = client.get_trajectory(state_id, steps_back=10, steps_forward=10)
 ```
-
-> See [notebooks/getting_started.ipynb](notebooks/getting_started.ipynb) for a full walkthrough.
 
 ### With Qdrant (production)
 
 ```bash
-# Install from source (see above)
+pip install loci-stdb
 docker run -p 6333:6333 qdrant/qdrant
 ```
 
 ```python
-from loci import LociClient
+from loci import LociClient, WorldState
 
-client = LociClient("http://localhost:6333", vector_size=512, epoch_size_ms=5000)
-# Same API as LocalLociClient — swap without changing application code
+client = LociClient(
+    "http://localhost:6333",
+    vector_size=512,
+    epoch_size_ms=5000,
+    distance="cosine",
+)
+
+# Insert world states
+state = WorldState(
+    x=0.5, y=0.3, z=0.8,
+    timestamp_ms=1700000000000,
+    vector=[0.1] * 512,
+    scene_id="warehouse_sim",
+    scale_level="patch",
+)
+state_id = client.insert(state)
+
+# Batch insert (truly batched — one Qdrant call per epoch)
+ids = client.insert_batch(states)
+
+# Spatiotemporal query with overlap factor
+results = client.query(
+    vector=query_embedding,
+    spatial_bounds={"x_min": 0.2, "x_max": 0.8,
+                    "y_min": 0.0, "y_max": 1.0,
+                    "z_min": 0.0, "z_max": 1.0},
+    time_window_ms=(start_ms, end_ms),
+    limit=10,
+    overlap_factor=1.2,  # 20% expanded search for boundary recall
+)
+
+# Predict-then-retrieve with novelty scoring
+result = client.predict_and_retrieve(
+    context_vector=current_embedding,
+    predictor_fn=my_world_model,
+    future_horizon_ms=2000,
+    current_position=(0.5, 0.3, 0.8),
+)
+
+# Trajectory reconstruction via scroll API
+trajectory = client.get_trajectory(state_id, steps_back=20, steps_forward=20)
+
+# Episodic context window
+context = client.get_causal_context(state_id, window_ms=5000)
 ```
-
-### One-command demo (Docker Compose)
-
-```bash
-git clone https://github.com/zd87pl/loci-db.git
-cd loci-db
-docker compose up
-```
-
-Open **http://localhost:8000** — interactive warehouse robot demo with live novelty detection.
 
 ### Async API (parallel shard fan-out)
 
 ```python
 from loci import AsyncLociClient
 
-async with AsyncLociClient("http://localhost:6333", vector_size=512) as client:
+async with AsyncLociClient(
+    "http://localhost:6333",
+    vector_size=512,
+    distance="cosine",
+) as client:
     await client.insert(state)
-    results = await client.query(vector=query_vec, limit=10)
+    results = await client.query(vector=query_embedding, limit=10)
 ```
 
 ### World Model Adapters
@@ -183,65 +219,33 @@ states = adapter.batch_clip_to_states(clip_output, ts, scene_id)
 adapter = DreamerV3Adapter()
 ws = adapter.rssm_to_world_state(h_t, z_t, position, ts, scene_id)
 
-# Generic numpy / torch
+# Generic numpy/torch
 adapter = GenericAdapter(expected_dim=512)
-ws = adapter.from_numpy(embedding, position=(0.5, 0.3, 0.8), timestamp_ms=ts, scene_id="env")
+ws = adapter.from_numpy(embedding, position, ts, scene_id)
 ```
-
----
 
 ## Performance
 
-### Benchmark Results
+**Raw spatiotemporal query latency: ~75µs p50** (label-filtered, 100 objects, 128-dim, Apple Silicon).
 
-Benchmark: LOCI vs naive Qdrant (single collection, 3 independent float-range payload filters).  
-Backend: Qdrant in-memory client. Results from `benchmarks/results/latest.json`.  
-Config: 512-dim vectors, 50 queries (5 warmup, 3 runs), `epoch_size_ms=5000`. Seed: 42.  
-To reproduce on your hardware: `python benchmarks/vs_naive_qdrant.py` (see [instructions below](#reproduce-on-your-hardware)).
+| N objects | Query type | P50 | P99 |
+|--:|:--|--:|--:|
+| 100 | Label-filtered (demo path) | 75µs | 124µs |
+| 100 | Vector-only ANN | 212µs | 217µs |
+| 100 | Temporal shard pruning | 156µs | 188µs |
+| 500 | Label-filtered (demo path) | 259µs | 281µs |
+| 1,000 | Label-filtered (demo path) | 469µs | 514µs |
+| 1,000 | Vector-only ANN | 1.86ms | 2.08ms |
 
-**Query scenarios:**
+Insert throughput: **~59,000 states/s** (in-memory backend, 128-dim vectors).
 
-| ID | Description | Spatial radius | Time window |
-|----|-------------|---------------|-------------|
-| A  | Tight spatial query | 0.05 (narrow box) | Full dataset |
-| B  | Wide spatial query | 0.50 (half the space) | Full dataset |
-| C  | Tight spatial + temporal | 0.05 | 10% of dataset span |
-| D  | Broader spatial, short window | 0.30 | 10% of dataset span |
+Run the retrieval benchmark on your hardware:
 
-**N = 1,000 vectors** (in-memory Qdrant):
+```bash
+python benchmarks/benchmark_retrieval.py
+```
 
-| Scenario | Method | p50 (ms) | p99 (ms) | QPS | Recall@10 |
-|----------|--------|----------|----------|-----|-----------|
-| A (tight spatial) | Naive Qdrant | 4.2 | 5.0 | 232 | 1.000 |
-| A | LOCI r4 | 20.5 | 27.0 | 50 | 0.990 |
-| B (wide spatial) | Naive Qdrant | 8.0 | 27.2 | 118 | 1.000 |
-| B | LOCI r4 | 187.5 | 279.3 | 5 | 1.000 |
-| C (spatial+temporal) | Naive Qdrant | 4.3 | 5.2 | 227 | 1.000 |
-| C | LOCI r4 | 9.2 | 14.0 | 109 | 1.000 |
-| D (stress test) | Naive Qdrant | 6.3 | 7.5 | 156 | 1.000 |
-| D | LOCI r4 | 49.4 | 85.4 | 19 | 0.982 |
-
-**N = 10,000 vectors** (in-memory Qdrant):
-
-| Scenario | Method | p50 (ms) | p99 (ms) | QPS | Recall@10 |
-|----------|--------|----------|----------|-----|-----------|
-| A (tight spatial) | Naive Qdrant | 43.6 | 112.0 | 22 | 1.000 |
-| A | LOCI r4 | 162.3 | 270.3 | 6 | 1.000 |
-| B (wide spatial) | Naive Qdrant | 75.1 | 99.7 | 13 | 1.000 |
-| B | LOCI r4 | 1,182.0 | 1,558.1 | 0.9 | 1.000 |
-| **C (spatial+temporal)** | **Naive Qdrant** | **44.9** | **75.2** | **22** | **1.000** |
-| **C** | **LOCI r4** | **22.6** | **30.3** | **44** | **0.990** |
-| D (stress test) | Naive Qdrant | 63.2 | 115.5 | 14 | 1.000 |
-| D | LOCI r4 | 116.1 | 217.4 | 8 | 1.000 |
-
-**When LOCI wins:** Scenario C at N=10,000 — tight spatial bounds combined with a narrow time window. LOCI returns results **2× faster** because epoch sharding eliminates 90% of data before the Hilbert filter runs, and the Hilbert pre-filter then reduces candidates to a single integer comparison. The advantage grows with N.
-
-**When naive Qdrant wins:** Wide spatial queries (Scenario B) and small datasets (N ≤ 1,000) — the Hilbert encoding overhead is not amortised when filtering removes few candidates.
-
-> Full per-run data: `benchmarks/results/latest.json`.  
-> Methodology: [docs/BENCHMARK_METHODOLOGY.md](docs/BENCHMARK_METHODOLOGY.md).
-
-### Reproduce on your hardware
+For a LOCI-vs-naive-Qdrant comparison benchmark:
 
 ```bash
 # In-memory (no Qdrant server needed):
@@ -249,72 +253,66 @@ python benchmarks/vs_naive_qdrant.py
 
 # Against a live Qdrant server:
 QDRANT_URL=http://localhost:6333 python benchmarks/vs_naive_qdrant.py
-
-# Local in-memory backend (insert throughput + query latency):
-python benchmarks/local_benchmark.py
 ```
 
----
+Results are written to `benchmarks/results/` and printed as markdown tables.
+
+## Why not SpatCode?
+
+SpatCode (WWW 2026, arXiv 2601.09530) encodes coordinates into the embedding
+space for soft/fuzzy retrieval via RoPE-style positional encoding. LOCI uses
+Hilbert bucketing for **exact geometric range queries** with deterministic behavior.
+
+**Use SpatCode** when semantic proximity matters (e.g., "find images taken
+near this location").
+
+**Use LOCI** when physical boundaries matter (e.g., "find all observations
+within this 3D bounding box in the last 5 seconds").
+
+## Why not TANNS?
+
+TANNS (ICDE 2025) builds a single graph managing all timestamps internally
+with a Timestamp Graph structure. LOCI uses collection-level sharding with
+storage tiering.
+
+**Use TANNS** for single-session temporal ANN where all data fits in one graph.
+
+**Use LOCI** when you need cross-session persistence, multi-agent memory sharing,
+hot/warm/cold storage tiering, or predict-then-retrieve.
 
 ## Architecture
 
 ```
-┌───────────────────────────────────────────────────────────┐
-│                      Application Layer                    │
-│  LociClient / AsyncLociClient / LocalLociClient           │
-│  insert · insert_batch · query · predict_and_retrieve     │
-│  get_trajectory · get_causal_context · funnel_query       │
-├───────────────────────────────────────────────────────────┤
-│                      Retrieval Layer                      │
-│  predict.py  — predict-then-retrieve + novelty scoring    │
-│  funnel.py   — multi-scale coarse→fine search             │
-├───────────────────────────────────────────────────────────┤
-│                  Indexing & Routing Layer                 │
-│  spatial/    — multi-res Hilbert bucketing + overlap      │
-│  temporal/   — epoch sharding + decay re-ranking          │
-├───────────────────────────────────────────────────────────┤
-│                      Adapters Layer                       │
-│  V-JEPA 2 · DreamerV3 · Generic numpy/torch              │
-├───────────────────────────────────────────────────────────┤
-│                      Storage Layer                        │
-│  Qdrant (one collection per temporal epoch)               │
-│  MemoryStore (in-process, no infrastructure required)     │
-└───────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────┐
+│              Application Layer                │
+│  LociClient / AsyncLociClient / LocalLociClient│
+│  insert · query · predict_and_retrieve        │
+├───────────────────────────────────────────────┤
+│              Retrieval Layer                  │
+│  predict.py — predict-then-retrieve + novelty │
+│  funnel.py  — multi-scale coarse→fine search  │
+├───────────────────────────────────────────────┤
+│           Indexing & Routing Layer            │
+│  spatial/  — multi-res Hilbert + overlap      │
+│  temporal/ — epoch sharding + decay scoring   │
+├───────────────────────────────────────────────┤
+│              Adapters Layer                   │
+│  V-JEPA 2 · DreamerV3 · Generic numpy/torch  │
+├───────────────────────────────────────────────┤
+│              Storage Layer                    │
+│  Qdrant (one collection per temporal epoch)   │
+│  MemoryStore (in-process, no infra needed)    │
+└───────────────────────────────────────────────┘
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design document with internals.
-
----
-
-## Comparison
-
-### vs SpatCode (WWW 2026)
-
-SpatCode encodes coordinates into embedding space for soft/fuzzy retrieval via RoPE-style positional encoding. LOCI uses Hilbert bucketing for **exact geometric range queries**.
-
-- **Use SpatCode** when semantic proximity matters (*"find images taken near this location"*).
-- **Use LOCI** when physical boundaries matter (*"find all observations within this 3D bounding box in the last 5 seconds"*).
-
-### vs TANNS (ICDE 2025)
-
-TANNS builds a single graph managing timestamps with a Timestamp Graph structure. LOCI uses collection-level sharding with storage tiering.
-
-- **Use TANNS** for single-session temporal ANN where all data fits in one graph.
-- **Use LOCI** when you need cross-session persistence, multi-agent memory sharing, or predict-then-retrieve.
-
----
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design document.
 
 ## Documentation
 
-| Document | Audience |
-|----------|----------|
-| [notebooks/getting_started.ipynb](notebooks/getting_started.ipynb) | Researchers — first contact |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Contributors — system internals |
-| [docs/NOVELTY.md](docs/NOVELTY.md) | Reviewers — novelty claims vs prior art |
-| [docs/BENCHMARK_METHODOLOGY.md](docs/BENCHMARK_METHODOLOGY.md) | Researchers — benchmark replication |
-| [docs/WORLD_MODEL_INTEGRATION.md](docs/WORLD_MODEL_INTEGRATION.md) | Practitioners — integration guides |
-
----
+- [ARCHITECTURE.md](ARCHITECTURE.md) — System design
+- [docs/NOVELTY.md](docs/NOVELTY.md) — Novelty claims vs prior art
+- [docs/BENCHMARK_METHODOLOGY.md](docs/BENCHMARK_METHODOLOGY.md) — Benchmark replication guide
+- [docs/WORLD_MODEL_INTEGRATION.md](docs/WORLD_MODEL_INTEGRATION.md) — Integration guides
 
 ## Development
 
@@ -332,15 +330,7 @@ mypy loci/
 
 ## Roadmap
 
-Current version: **v0.3** (performance). Full detail in [ROADMAP.md](ROADMAP.md).
-
-| Version | Status | Focus |
-|---------|--------|-------|
-| v0.1 | ✅ Done | Core primitives: WorldState, Hilbert encoding, temporal sharding, predict-then-retrieve |
-| v0.2 | ✅ Done | Async client, causal chain linking, configurable distances, 70+ tests |
-| v0.3 | 🚧 Current | Adaptive Hilbert resolution, funnel search, in-progress: result caching, cross-system benchmarks |
-| v0.4 | Planned | Cross-scale causal linking, scale-aware temporal decay |
-| v1.0 | Planned | PyPI release, gRPC transport, authentication, Kubernetes Helm chart, OpenTelemetry |
+See [ROADMAP.md](ROADMAP.md) for the v0.1 → v1.0 plan.
 
 ## Citation
 

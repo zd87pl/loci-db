@@ -22,7 +22,7 @@ Usage:
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 
 from loci.spatial.hilbert import encode as hilbert_encode
@@ -63,29 +63,38 @@ class AdaptiveResolution:
         base_order: Default Hilbert resolution (p value).
         max_order: Maximum resolution to escalate to.
         density_threshold: Point count per cell that triggers escalation.
+        max_cache_size: Maximum number of entries in the resolution LRU cache.
+            Older entries are evicted when the limit is reached.  Defaults to
+            4096, which bounds memory to roughly 100 KB for typical workloads.
     """
+
+    _DEFAULT_MAX_CACHE_SIZE = 4096
 
     def __init__(
         self,
         base_order: int = 4,
         max_order: int = 6,
         density_threshold: int = 50,
+        max_cache_size: int = _DEFAULT_MAX_CACHE_SIZE,
     ) -> None:
         if max_order < base_order:
             raise ValueError(f"max_order ({max_order}) must be >= base_order ({base_order})")
         if density_threshold < 1:
             raise ValueError("density_threshold must be >= 1")
+        if max_cache_size < 1:
+            raise ValueError("max_cache_size must be >= 1")
 
         self._base_order = base_order
         self._max_order = max_order
         self._density_threshold = density_threshold
+        self._max_cache_size = max_cache_size
 
         # Density counters at base resolution
         self._cell_counts: Counter[int] = Counter()
         self._total_points = 0
 
-        # Cache: base cell_id → escalated resolution
-        self._resolution_cache: dict[int, int] = {}
+        # LRU cache: base cell_id → escalated resolution (bounded by max_cache_size)
+        self._resolution_cache: OrderedDict[int, int] = OrderedDict()
 
     @property
     def base_order(self) -> int:
@@ -99,6 +108,14 @@ class AdaptiveResolution:
     def density_threshold(self) -> int:
         return self._density_threshold
 
+    def _cache_set(self, cell_id: int, resolution: int) -> None:
+        """Insert or update *cell_id* in the LRU cache, evicting the oldest entry if full."""
+        if cell_id in self._resolution_cache:
+            self._resolution_cache.move_to_end(cell_id)
+        self._resolution_cache[cell_id] = resolution
+        if len(self._resolution_cache) > self._max_cache_size:
+            self._resolution_cache.popitem(last=False)
+
     def record(self, x: float, y: float, z: float, t_norm: float) -> None:
         """Record a point insertion for density tracking.
 
@@ -108,23 +125,14 @@ class AdaptiveResolution:
         self._cell_counts[cell_id] += 1
         self._total_points += 1
 
-        # Check if this cell just crossed the threshold
+        # Check if this cell crossed or re-evaluated the threshold
         count = self._cell_counts[cell_id]
-        if count >= self._density_threshold and cell_id not in self._resolution_cache:
-            # Escalate resolution for this cell
-            # Each threshold multiple bumps resolution by 1
+        if count >= self._density_threshold:
             escalation = min(
                 self._max_order - self._base_order,
                 count // self._density_threshold,
             )
-            self._resolution_cache[cell_id] = self._base_order + escalation
-        elif cell_id in self._resolution_cache:
-            # Re-evaluate escalation level
-            escalation = min(
-                self._max_order - self._base_order,
-                count // self._density_threshold,
-            )
-            self._resolution_cache[cell_id] = self._base_order + escalation
+            self._cache_set(cell_id, self._base_order + escalation)
 
     def resolution_for(self, x: float, y: float, z: float, t_norm: float) -> int:
         """Return the recommended Hilbert resolution for a coordinate.
@@ -133,7 +141,10 @@ class AdaptiveResolution:
         case it returns an escalated resolution.
         """
         cell_id = hilbert_encode(x, y, z, t_norm, resolution_order=self._base_order)
-        return self._resolution_cache.get(cell_id, self._base_order)
+        if cell_id in self._resolution_cache:
+            self._resolution_cache.move_to_end(cell_id)
+            return self._resolution_cache[cell_id]
+        return self._base_order
 
     def cell_density(self, x: float, y: float, z: float, t_norm: float) -> int:
         """Return the current point count for the cell containing the coordinate."""
@@ -152,7 +163,7 @@ class AdaptiveResolution:
             max_density=max(counts),
             mean_density=sum(counts) / len(counts),
             hot_cells=len(self._resolution_cache),
-            resolution_map=dict(self._resolution_cache),
+            resolution_map=dict(self._resolution_cache),  # snapshot (not LRU-ordered)
         )
 
     def reset(self) -> None:

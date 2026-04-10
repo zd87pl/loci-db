@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -726,7 +727,7 @@ class AsyncLociClient:
                     if isinstance(vec, dict):
                         vec = list(vec.values())[0] if vec else []
                     return _payload_to_state(results[0].payload, results[0].id, vec)
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across epochs
                 continue
         return None
 
@@ -770,7 +771,7 @@ class AsyncLociClient:
                     points=[prev_id],
                 )
                 return
-            except Exception:
+            except Exception:  # noqa: S112  # retry loop across epochs
                 continue
 
     async def _scroll_all(
@@ -810,10 +811,8 @@ class AsyncLociClient:
         epochs: list[int] = []
         for col in self._known_collections:
             if col.startswith("loci_"):
-                try:
+                with contextlib.suppress(ValueError):
                     epochs.append(int(col.split("_", 1)[1]))
-                except ValueError:
-                    pass
         return sorted(epochs) if epochs else []
 
 

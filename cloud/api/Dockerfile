@@ -14,7 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install loci package from repo root
 COPY loci/ ./loci/
 COPY pyproject.toml ./pyproject.toml
-RUN pip install --no-cache-dir -e .
+COPY README.md ./README.md
+RUN pip install --no-cache-dir .
 
 # Copy API source
 COPY cloud/api/auth.py ./auth.py

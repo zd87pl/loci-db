@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -92,7 +91,7 @@ class InsertRequest(BaseModel):
     vector: list[float]
     scene_id: str
     scale_level: str = "patch"
-    metadata: dict[str, Any] = {}
+    confidence: float = 1.0
 
 
 class QueryRequest(BaseModel):
@@ -137,7 +136,7 @@ async def insert(
         vector=req.vector,
         scene_id=req.scene_id,
         scale_level=req.scale_level,
-        metadata=req.metadata,
+        confidence=req.confidence,
     )
     state_id = _get_client().insert(state)
     return {"id": state_id}
@@ -177,7 +176,6 @@ async def query(
                 "z": r.z,
                 "timestamp_ms": r.timestamp_ms,
                 "scene_id": r.scene_id,
-                "score": r.score,
             }
             for r in results
         ]

@@ -74,8 +74,9 @@ class LociClient:
         max_retries: int = 3,
         retry_backoff: float = 0.5,
         resolutions: list[int] | None = None,
+        api_key: str | None = None,
     ) -> None:
-        self._qdrant = QdrantClient(url=qdrant_url)
+        self._qdrant = QdrantClient(url=qdrant_url, api_key=api_key)
         self._epoch_size_ms = epoch_size_ms
         self._spatial_resolution = spatial_resolution
         self._vector_size = vector_size

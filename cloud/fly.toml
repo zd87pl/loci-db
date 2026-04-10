@@ -1,0 +1,32 @@
+# Fly.io deployment config for LOCI Cloud API PoC
+# Secrets (never stored here): DATABASE_URL, QDRANT_URL, QDRANT_API_KEY
+# Set with: flyctl secrets set KEY=value
+
+app = "loci-api"
+primary_region = "iad"
+
+[build]
+  dockerfile = "cloud/api/Dockerfile"
+  # Build context is repo root so we can COPY loci/ and pyproject.toml
+
+[env]
+  LOCI_VECTOR_SIZE    = "512"
+  LOCI_EPOCH_SIZE_MS  = "5000"
+  LOCI_DISTANCE       = "cosine"
+
+[http_service]
+  internal_port        = 8000
+  force_https          = true
+  auto_stop_machines   = true
+  auto_start_machines  = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type       = "connections"
+    hard_limit = 25
+    soft_limit = 20
+
+[[vm]]
+  cpu_kind  = "shared"
+  cpus      = 1
+  memory_mb = 512

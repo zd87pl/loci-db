@@ -76,6 +76,7 @@ class LociClient:
         retry_backoff: float = 0.5,
         resolutions: list[int] | None = None,
         api_key: str | None = None,
+        collection_prefix: str = "",
     ) -> None:
         self._qdrant = QdrantClient(url=qdrant_url, api_key=api_key)
         self._epoch_size_ms = epoch_size_ms
@@ -87,6 +88,7 @@ class LociClient:
         self._distance = _DISTANCE_MAP[distance]
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
+        self._collection_prefix = collection_prefix
         self._known_collections: set[str] = set()
         self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
@@ -98,6 +100,11 @@ class LociClient:
             if adaptive
             else None
         )
+
+    def _col_name(self, ep: int) -> str:
+        """Return the Qdrant collection name for an epoch, applying the tenant namespace prefix."""
+        base = collection_name(ep)
+        return f"{self._collection_prefix}{base}" if self._collection_prefix else base
 
     def _retry(self, fn, *args, **kwargs):
         """Execute fn with retry logic."""
@@ -192,7 +199,7 @@ class LociClient:
         point_id = uuid.uuid4().hex
 
         ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
-        col = collection_name(ep)
+        col = self._col_name(ep)
         self._ensure_collection(col)
 
         t_norm = self._normalise_time(state.timestamp_ms, ep)
@@ -244,7 +251,7 @@ class LociClient:
             id_by_index[orig_idx] = point_id
 
             ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
-            col = collection_name(ep)
+            col = self._col_name(ep)
             self._ensure_collection(col)
 
             t_norm = self._normalise_time(state.timestamp_ms, ep)
@@ -362,7 +369,7 @@ class LociClient:
         shard_limit = limit * _EXACT_FILTER_OVERFETCH if spatial_bounds is not None else limit
         all_results: list[dict] = []
         for ep in epochs:
-            col = collection_name(ep)
+            col = self._col_name(ep)
             if col not in self._known_collections:
                 continue
 
@@ -790,13 +797,14 @@ class LociClient:
     def _predecessor_search_collections(self, before_ms: int) -> list[str]:
         target_epoch = epoch_id(before_ms, self._epoch_size_ms)
         epochs = [ep for ep in self._list_active_epochs() if ep <= target_epoch]
-        return [collection_name(ep) for ep in sorted(epochs, reverse=True)]
+        return [self._col_name(ep) for ep in sorted(epochs, reverse=True)]
 
     def _list_active_epochs(self) -> list[int]:
         """Return epoch IDs for all known collections."""
+        prefix = f"{self._collection_prefix}loci_" if self._collection_prefix else "loci_"
         epochs: list[int] = []
         for col in self._known_collections:
-            if col.startswith("loci_"):
+            if col.startswith(prefix):
                 with contextlib.suppress(ValueError):
-                    epochs.append(int(col.split("_", 1)[1]))
+                    epochs.append(int(col[len(prefix):]))
         return sorted(epochs) if epochs else []

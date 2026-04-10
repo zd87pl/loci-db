@@ -1,9 +1,12 @@
-"""Cloud LOCI API — authenticated FastAPI server for Fly.io deployment.
+"""Cloud LOCI API — Phase 1 hardened FastAPI server for Fly.io deployment.
 
 Endpoints:
     GET  /health          — unauthenticated liveness probe
-    POST /insert          — insert a world-state vector (auth required)
-    POST /query           — spatiotemporal vector search (auth required)
+    GET  /ready           — readiness probe (checks Qdrant + Supabase)
+    GET  /openapi.json    — OpenAPI schema (always available)
+    GET  /docs            — Swagger UI (dev mode only, LOCI_DEV_MODE=true)
+    POST /insert          — insert a world-state vector (auth + rate-limited)
+    POST /query           — spatiotemporal vector search (auth + rate-limited)
 
 Environment variables (set as Fly.io secrets — never committed to git):
     DATABASE_URL          Supabase Postgres connection string
@@ -12,19 +15,42 @@ Environment variables (set as Fly.io secrets — never committed to git):
     LOCI_VECTOR_SIZE      Embedding dimension (default: 512)
     LOCI_EPOCH_SIZE_MS    Temporal epoch length in ms (default: 5000)
     LOCI_DISTANCE         Qdrant distance metric (default: cosine)
+    LOCI_CORS_ORIGINS     Comma-separated allowed origins (default: none)
+    LOCI_DEV_MODE         Enable Swagger/ReDoc UI when "true" (default: false)
+    LOCI_MAX_METADATA_BYTES  Max metadata payload size in bytes (default: 4096)
+    LOCI_MAX_BODY_BYTES   Max request body size in bytes (default: 5MB)
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
+from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException
+import asyncpg
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator, model_validator
+from pythonjsonlogger import jsonlogger
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
-from auth import close_pool, require_api_key
+from auth import close_pool, get_pool, require_api_key
 from loci import LociClient, WorldState
+
+# ── Structured JSON logging ────────────────────────────────────────────────
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(jsonlogger.JsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+logging.root.addHandler(_handler)
+logging.root.setLevel(logging.INFO)
+
+logger = logging.getLogger("loci.api")
 
 # ── Config ────────────────────────────────────────────────────────────────
 
@@ -33,6 +59,42 @@ QDRANT_API_KEY: str = os.environ["QDRANT_API_KEY"]
 VECTOR_SIZE: int = int(os.environ.get("LOCI_VECTOR_SIZE", "512"))
 EPOCH_SIZE_MS: int = int(os.environ.get("LOCI_EPOCH_SIZE_MS", "5000"))
 DISTANCE: str = os.environ.get("LOCI_DISTANCE", "cosine")
+DEV_MODE: bool = os.environ.get("LOCI_DEV_MODE", "").lower() == "true"
+MAX_METADATA_BYTES: int = int(os.environ.get("LOCI_MAX_METADATA_BYTES", "4096"))
+MAX_BODY_BYTES: int = int(os.environ.get("LOCI_MAX_BODY_BYTES", str(5 * 1024 * 1024)))
+
+_raw_origins = os.environ.get("LOCI_CORS_ORIGINS", "")
+CORS_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
+# ── Rate limiting ─────────────────────────────────────────────────────────
+# Key function: use the authenticated tenant's namespace (set in request.state by auth).
+# Falls back to remote IP for unauthenticated paths.
+
+
+def _rate_key(request: Request) -> str:
+    ns = getattr(request.state, "namespace", None)
+    return ns if ns else get_remote_address(request)
+
+
+limiter = Limiter(key_func=_rate_key)
+
+# ── Per-namespace LociClient cache ────────────────────────────────────────
+
+_clients: dict[str, LociClient] = {}
+
+
+def _get_client(namespace: str) -> LociClient:
+    if namespace not in _clients:
+        _clients[namespace] = LociClient(
+            QDRANT_URL,
+            api_key=QDRANT_API_KEY,
+            vector_size=VECTOR_SIZE,
+            epoch_size_ms=EPOCH_SIZE_MS,
+            distance=DISTANCE,
+            collection_prefix=f"{namespace}_",
+        )
+    return _clients[namespace]
+
 
 # ── App lifecycle ─────────────────────────────────────────────────────────
 
@@ -41,93 +103,212 @@ DISTANCE: str = os.environ.get("LOCI_DISTANCE", "cosine")
 async def lifespan(app: FastAPI):  # noqa: ANN001
     yield
     await close_pool()
+    _clients.clear()
 
 
 app = FastAPI(
     title="LOCI Cloud API",
-    description="Authenticated 4D spatiotemporal vector database — private PoC",
-    version="0.1.0",
-    docs_url=None,   # disable public Swagger UI
-    redoc_url=None,  # disable public ReDoc
+    description="Authenticated 4D spatiotemporal vector database API",
+    version="0.2.0",
+    docs_url="/docs" if DEV_MODE else None,
+    redoc_url="/redoc" if DEV_MODE else None,
     lifespan=lifespan,
 )
 
-# CORS: no wildcard — only explicitly listed origins may call this API.
-# For the PoC there are no browser clients, so we allow nothing by default.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS: read strictly from env var, no wildcards.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
-# ── LOCI client ───────────────────────────────────────────────────────────
 
-_client: LociClient | None = None
+# ── Request ID middleware ──────────────────────────────────────────────────
 
 
-def _get_client() -> LociClient:
-    global _client
-    if _client is None:
-        _client = LociClient(
-            QDRANT_URL,
-            api_key=QDRANT_API_KEY,
-            vector_size=VECTOR_SIZE,
-            epoch_size_ms=EPOCH_SIZE_MS,
-            distance=DISTANCE,
-        )
-    return _client
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):  # noqa: ANN001
+    rid = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+    request.state.request_id = rid
+    start = time.monotonic()
+    response = await call_next(request)
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    response.headers["X-Request-Id"] = rid
+    logger.info(
+        "request",
+        extra={
+            "request_id": rid,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "latency_ms": elapsed_ms,
+        },
+    )
+    return response
 
 
 # ── Request / response models ──────────────────────────────────────────────
 
 
 class InsertRequest(BaseModel):
+    x: float = Field(..., ge=-1e9, le=1e9, description="X spatial coordinate")
+    y: float = Field(..., ge=-1e9, le=1e9, description="Y spatial coordinate")
+    z: float = Field(..., ge=-1e9, le=1e9, description="Z spatial coordinate")
+    timestamp_ms: int = Field(..., ge=0, description="Unix timestamp in milliseconds")
+    vector: list[float] = Field(..., description=f"Embedding vector ({VECTOR_SIZE} dims)")
+    scene_id: str = Field(..., min_length=1, max_length=256, description="Scene identifier")
+    scale_level: str = Field("patch", max_length=64, description="Spatial scale level")
+    confidence: float = Field(1.0, ge=0.0, le=1.0, description="Detection confidence")
+
+    @field_validator("vector")
+    @classmethod
+    def check_vector_dims(cls, v: list[float]) -> list[float]:
+        if len(v) != VECTOR_SIZE:
+            raise ValueError(f"vector must have {VECTOR_SIZE} dimensions, got {len(v)}")
+        return v
+
+    @model_validator(mode="after")
+    def check_metadata_size(self) -> "InsertRequest":
+        import json
+        meta = json.dumps({"scene_id": self.scene_id, "scale_level": self.scale_level})
+        if len(meta.encode()) > MAX_METADATA_BYTES:
+            raise ValueError(f"metadata exceeds {MAX_METADATA_BYTES} bytes")
+        return self
+
+
+class QueryRequest(BaseModel):
+    vector: list[float] = Field(..., description=f"Query vector ({VECTOR_SIZE} dims)")
+    x_min: float = Field(0.0, ge=-1e9, le=1e9)
+    x_max: float = Field(1.0, ge=-1e9, le=1e9)
+    y_min: float = Field(0.0, ge=-1e9, le=1e9)
+    y_max: float = Field(1.0, ge=-1e9, le=1e9)
+    z_min: float = Field(0.0, ge=-1e9, le=1e9)
+    z_max: float = Field(1.0, ge=-1e9, le=1e9)
+    time_start_ms: int | None = Field(None, ge=0)
+    time_end_ms: int | None = Field(None, ge=0)
+    limit: int = Field(10, ge=1, le=1000)
+    overlap_factor: float = Field(1.0, ge=0.1, le=10.0)
+
+    @field_validator("vector")
+    @classmethod
+    def check_vector_dims(cls, v: list[float]) -> list[float]:
+        if len(v) != VECTOR_SIZE:
+            raise ValueError(f"vector must have {VECTOR_SIZE} dimensions, got {len(v)}")
+        return v
+
+    @model_validator(mode="after")
+    def check_spatial_bounds(self) -> "QueryRequest":
+        if self.x_min > self.x_max:
+            raise ValueError("x_min must be <= x_max")
+        if self.y_min > self.y_max:
+            raise ValueError("y_min must be <= y_max")
+        if self.z_min > self.z_max:
+            raise ValueError("z_min must be <= z_max")
+        if self.time_start_ms is not None and self.time_end_ms is not None:
+            if self.time_start_ms > self.time_end_ms:
+                raise ValueError("time_start_ms must be <= time_end_ms")
+        return self
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+
+
+class ReadyResponse(BaseModel):
+    status: str
+    qdrant: str
+    supabase: str
+
+
+class InsertResponse(BaseModel):
+    id: str
+
+
+class QueryResult(BaseModel):
+    id: str
     x: float
     y: float
     z: float
     timestamp_ms: int
-    vector: list[float]
     scene_id: str
-    scale_level: str = "patch"
-    confidence: float = 1.0
 
 
-class QueryRequest(BaseModel):
-    vector: list[float]
-    x_min: float = 0.0
-    x_max: float = 1.0
-    y_min: float = 0.0
-    y_max: float = 1.0
-    z_min: float = 0.0
-    z_max: float = 1.0
-    time_start_ms: int | None = None
-    time_end_ms: int | None = None
-    limit: int = 10
-    overlap_factor: float = 1.0
+class QueryResponse(BaseModel):
+    results: list[QueryResult]
+
+
+# ── Auth dependency that also stamps namespace on request.state ───────────
+
+
+async def _auth_with_state(
+    request: Request,
+    key_row: Annotated[dict[str, Any], Depends(require_api_key)],
+) -> dict[str, Any]:
+    request.state.namespace = key_row["namespace"]
+    request.state.rate_limit_rpm = key_row.get("rate_limit_rpm") or 60
+    return key_row
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse, tags=["ops"])
 def health():
     """Liveness probe — no auth required."""
-    return {"status": "ok", "version": app.version}
+    return HealthResponse(status="ok", version=app.version)
 
 
-@app.post("/insert")
+@app.get("/ready", response_model=ReadyResponse, tags=["ops"])
+async def ready():
+    """Readiness probe — checks Qdrant and Supabase connectivity."""
+    qdrant_ok = False
+    supabase_ok = False
+
+    # Check Qdrant
+    try:
+        from qdrant_client import QdrantClient as _QC
+        _qc = _QC(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+        _qc.get_collections()
+        qdrant_ok = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("qdrant_not_ready", extra={"error": str(exc)})
+
+    # Check Supabase (Postgres)
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        supabase_ok = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("supabase_not_ready", extra={"error": str(exc)})
+
+    overall = "ok" if (qdrant_ok and supabase_ok) else "degraded"
+    status_code = 200 if overall == "ok" else 503
+    return JSONResponse(
+        status_code=status_code,
+        content=ReadyResponse(
+            status=overall,
+            qdrant="ok" if qdrant_ok else "error",
+            supabase="ok" if supabase_ok else "error",
+        ).model_dump(),
+    )
+
+
+@app.post("/insert", response_model=InsertResponse, tags=["data"])
+@limiter.limit(lambda request: f"{getattr(request.state, 'rate_limit_rpm', 60)}/minute")
 async def insert(
+    request: Request,
     req: InsertRequest,
-    _key: dict = Depends(require_api_key),
+    key_row: Annotated[dict[str, Any], Depends(_auth_with_state)],
 ):
     """Insert a world-state vector. Requires valid API key."""
-    if len(req.vector) != VECTOR_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Vector must have {VECTOR_SIZE} dimensions, got {len(req.vector)}",
-        )
+    namespace = key_row["namespace"]
     state = WorldState(
         x=req.x,
         y=req.y,
@@ -138,21 +319,24 @@ async def insert(
         scale_level=req.scale_level,
         confidence=req.confidence,
     )
-    state_id = _get_client().insert(state)
-    return {"id": state_id}
+    state_id = _get_client(namespace).insert(state)
+    return InsertResponse(id=state_id)
 
 
-@app.post("/query")
+@app.post("/query", response_model=QueryResponse, tags=["data"])
+@limiter.limit(lambda request: f"{getattr(request.state, 'rate_limit_rpm', 60)}/minute")
 async def query(
+    request: Request,
     req: QueryRequest,
-    _key: dict = Depends(require_api_key),
+    key_row: Annotated[dict[str, Any], Depends(_auth_with_state)],
 ):
     """Spatiotemporal vector search. Requires valid API key."""
+    namespace = key_row["namespace"]
     time_window = None
     if req.time_start_ms is not None and req.time_end_ms is not None:
         time_window = (req.time_start_ms, req.time_end_ms)
 
-    results = _get_client().query(
+    results = _get_client(namespace).query(
         vector=req.vector,
         spatial_bounds={
             "x_min": req.x_min,
@@ -167,16 +351,16 @@ async def query(
         overlap_factor=req.overlap_factor,
     )
 
-    return {
-        "results": [
-            {
-                "id": r.id,
-                "x": r.x,
-                "y": r.y,
-                "z": r.z,
-                "timestamp_ms": r.timestamp_ms,
-                "scene_id": r.scene_id,
-            }
+    return QueryResponse(
+        results=[
+            QueryResult(
+                id=r.id,
+                x=r.x,
+                y=r.y,
+                z=r.z,
+                timestamp_ms=r.timestamp_ms,
+                scene_id=r.scene_id,
+            )
             for r in results
         ]
-    }
+    )

@@ -39,7 +39,7 @@ def sample_variants() -> list[Variant]:
     return [
         Variant(
             id=1,
-            content="def add(a: int, b: int) -> int:\n    \"\"\"Return sum of a and b.\"\"\"\n    return a + b",
+            content='def add(a: int, b: int) -> int:\n    """Return sum of a and b."""\n    return a + b',
             rationale="Added type hints and docstring",
             changes_summary="- Added int type hints\n- Added docstring",
         ),
@@ -55,8 +55,12 @@ def sample_variants() -> list[Variant]:
 @pytest.fixture
 def sample_eval_results() -> list[EvalResult]:
     return [
-        EvalResult(variant_id=1, score=0.9, metrics={"readability": 0.9, "type_safety": 0.9}, passed=True),
-        EvalResult(variant_id=2, score=0.75, metrics={"readability": 0.7, "type_safety": 0.8}, passed=True),
+        EvalResult(
+            variant_id=1, score=0.9, metrics={"readability": 0.9, "type_safety": 0.9}, passed=True
+        ),
+        EvalResult(
+            variant_id=2, score=0.75, metrics={"readability": 0.7, "type_safety": 0.8}, passed=True
+        ),
     ]
 
 
@@ -106,7 +110,9 @@ def test_metric_runner_basic() -> None:
         return min(1.0, words / 50.0)
 
     runner = MetricRunner(metrics={"word_count": word_count_score})
-    variant = Variant(id=1, content="Hello world this is a test", rationale="test", changes_summary="")
+    variant = Variant(
+        id=1, content="Hello world this is a test", rationale="test", changes_summary=""
+    )
     thesis = Thesis(
         concept_summary="test",
         hypothesis="more words",
@@ -124,8 +130,15 @@ def test_metric_runner_constraint_fail() -> None:
         metrics={"length": lambda t: len(t) / 100.0},
         constraints=[lambda t: len(t) < 10],  # Must be short
     )
-    variant = Variant(id=1, content="This is a long piece of text that fails the constraint", rationale="", changes_summary="")
-    thesis = Thesis(concept_summary="t", hypothesis="h", improvement_dimensions=[], test_strategy="s")
+    variant = Variant(
+        id=1,
+        content="This is a long piece of text that fails the constraint",
+        rationale="",
+        changes_summary="",
+    )
+    thesis = Thesis(
+        concept_summary="t", hypothesis="h", improvement_dimensions=[], test_strategy="s"
+    )
     result = runner.evaluate(variant, thesis)
     assert result.passed is False
 
@@ -190,7 +203,9 @@ def test_pipeline_result_no_winner(
     sample_variants: list[Variant],
     sample_eval_results: list[EvalResult],
 ) -> None:
-    verdict = Verdict(winner_id=-1, reasoning="None improved.", scores={}, recommendation="keep original")
+    verdict = Verdict(
+        winner_id=-1, reasoning="None improved.", scores={}, recommendation="keep original"
+    )
     result = PipelineResult(
         thesis=sample_thesis,
         variants=sample_variants,
@@ -217,52 +232,70 @@ def _make_mock_message(text: str) -> MagicMock:
 @patch("research.agents.optimizer.Anthropic")
 @patch("research.agents.judge.Anthropic")
 @patch("research.runners.llm.Anthropic")
-def test_pipeline_run_mocked(mock_llm_anthropic, mock_judge_anthropic, mock_optimizer_anthropic, mock_analyzer_anthropic) -> None:
+def test_pipeline_run_mocked(
+    mock_llm_anthropic, mock_judge_anthropic, mock_optimizer_anthropic, mock_analyzer_anthropic
+) -> None:
     """Full pipeline run with all API calls mocked."""
     # Analyzer response
-    analyzer_response = json.dumps({
-        "concept_summary": "Simple Python function",
-        "hypothesis": "Type hints will improve readability",
-        "improvement_dimensions": ["readability", "maintainability"],
-        "test_strategy": "Check for type annotations",
-        "constraints": ["must be pure function"],
-    })
-    mock_analyzer_anthropic.return_value.messages.create.return_value = _make_mock_message(analyzer_response)
+    analyzer_response = json.dumps(
+        {
+            "concept_summary": "Simple Python function",
+            "hypothesis": "Type hints will improve readability",
+            "improvement_dimensions": ["readability", "maintainability"],
+            "test_strategy": "Check for type annotations",
+            "constraints": ["must be pure function"],
+        }
+    )
+    mock_analyzer_anthropic.return_value.messages.create.return_value = _make_mock_message(
+        analyzer_response
+    )
 
     # Optimizer response
-    optimizer_response = json.dumps([
-        {
-            "id": 1,
-            "content": "def add(a: int, b: int) -> int:\n    return a + b",
-            "rationale": "Added type hints",
-            "changes_summary": "Added int type hints",
-        },
-        {
-            "id": 2,
-            "content": "def add(a: float, b: float) -> float:\n    return a + b",
-            "rationale": "Used floats",
-            "changes_summary": "Added float type hints",
-        },
-    ])
-    mock_optimizer_anthropic.return_value.messages.create.return_value = _make_mock_message(optimizer_response)
+    optimizer_response = json.dumps(
+        [
+            {
+                "id": 1,
+                "content": "def add(a: int, b: int) -> int:\n    return a + b",
+                "rationale": "Added type hints",
+                "changes_summary": "Added int type hints",
+            },
+            {
+                "id": 2,
+                "content": "def add(a: float, b: float) -> float:\n    return a + b",
+                "rationale": "Used floats",
+                "changes_summary": "Added float type hints",
+            },
+        ]
+    )
+    mock_optimizer_anthropic.return_value.messages.create.return_value = _make_mock_message(
+        optimizer_response
+    )
 
     # LLM runner response
-    llm_runner_response = json.dumps({
-        "dimension_scores": {"readability": 0.9, "maintainability": 0.85},
-        "overall_score": 0.875,
-        "constraints_satisfied": True,
-        "details": "Good improvement",
-    })
-    mock_llm_anthropic.return_value.messages.create.return_value = _make_mock_message(llm_runner_response)
+    llm_runner_response = json.dumps(
+        {
+            "dimension_scores": {"readability": 0.9, "maintainability": 0.85},
+            "overall_score": 0.875,
+            "constraints_satisfied": True,
+            "details": "Good improvement",
+        }
+    )
+    mock_llm_anthropic.return_value.messages.create.return_value = _make_mock_message(
+        llm_runner_response
+    )
 
     # Judge response
-    judge_response = json.dumps({
-        "winner_id": 1,
-        "reasoning": "Variant 1 best addresses the hypothesis.",
-        "scores": {"1": 0.875, "2": 0.8},
-        "recommendation": "Use variant 1",
-    })
-    mock_judge_anthropic.return_value.messages.create.return_value = _make_mock_message(judge_response)
+    judge_response = json.dumps(
+        {
+            "winner_id": 1,
+            "reasoning": "Variant 1 best addresses the hypothesis.",
+            "scores": {"1": 0.875, "2": 0.8},
+            "recommendation": "Use variant 1",
+        }
+    )
+    mock_judge_anthropic.return_value.messages.create.return_value = _make_mock_message(
+        judge_response
+    )
 
     pipeline = ResearchPipeline(n_variants=2)
     result = pipeline.run(concept="def add(a, b): return a+b", context="Python function")

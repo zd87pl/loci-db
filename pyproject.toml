@@ -33,6 +33,10 @@ Repository = "https://github.com/zd87pl/loci-db"
 Issues = "https://github.com/zd87pl/loci-db/issues"
 
 [project.optional-dependencies]
+research = [
+    "anthropic>=0.94.0",
+    "click>=8.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
@@ -44,6 +48,7 @@ dev = [
     "httpx>=0.24.0",
     "bandit[toml]>=1.7",
     "pip-audit>=2.7",
+    "anthropic>=0.94.0",
 ]
 
 [tool.hatch.build.targets.wheel]

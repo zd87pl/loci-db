@@ -806,5 +806,5 @@ class LociClient:
         for col in self._known_collections:
             if col.startswith(prefix):
                 with contextlib.suppress(ValueError):
-                    epochs.append(int(col[len(prefix):]))
+                    epochs.append(int(col[len(prefix) :]))
         return sorted(epochs) if epochs else []

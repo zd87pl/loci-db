@@ -62,6 +62,8 @@ DISTANCE: str = os.environ.get("LOCI_DISTANCE", "cosine")
 DEV_MODE: bool = os.environ.get("LOCI_DEV_MODE", "").lower() == "true"
 MAX_METADATA_BYTES: int = int(os.environ.get("LOCI_MAX_METADATA_BYTES", "4096"))
 MAX_BODY_BYTES: int = int(os.environ.get("LOCI_MAX_BODY_BYTES", str(5 * 1024 * 1024)))
+DEFAULT_RPM: int = int(os.environ.get("LOCI_DEFAULT_RPM", "600"))
+_DEFAULT_RATE_LIMIT: str = f"{DEFAULT_RPM}/minute"
 
 _raw_origins = os.environ.get("LOCI_CORS_ORIGINS", "")
 CORS_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
@@ -301,7 +303,7 @@ async def ready():
 
 
 @app.post("/insert", response_model=InsertResponse, tags=["data"])
-@limiter.limit(lambda request: f"{getattr(request.state, 'rate_limit_rpm', 60)}/minute")
+@limiter.limit(_DEFAULT_RATE_LIMIT)
 async def insert(
     request: Request,
     req: InsertRequest,
@@ -324,7 +326,7 @@ async def insert(
 
 
 @app.post("/query", response_model=QueryResponse, tags=["data"])
-@limiter.limit(lambda request: f"{getattr(request.state, 'rate_limit_rpm', 60)}/minute")
+@limiter.limit(_DEFAULT_RATE_LIMIT)
 async def query(
     request: Request,
     req: QueryRequest,

@@ -56,18 +56,31 @@ def test_swagger_ui_in_dev_mode(client):
 # ── Auth ───────────────────────────────────────────────────────────────────
 
 
-def test_insert_requires_auth(app):
+@pytest.fixture(scope="module")
+def client_no_auth():
+    """TestClient with no dependency overrides — auth is enforced normally."""
+    import server as srv
     from fastapi.testclient import TestClient
-    with TestClient(app) as c:
-        resp = c.post("/insert", json={"x": 0, "y": 0, "z": 0, "timestamp_ms": 0, "vector": VEC, "scene_id": "s"})
-    # Without mocked auth dependency, missing bearer token → 403
+
+    saved = dict(srv.app.dependency_overrides)
+    srv.app.dependency_overrides.clear()
+    with TestClient(srv.app) as c:
+        yield c
+    srv.app.dependency_overrides.update(saved)
+
+
+def test_insert_requires_auth(client_no_auth):
+    """Missing Bearer token must be rejected by real auth dependency."""
+    resp = client_no_auth.post(
+        "/insert",
+        json={"x": 0, "y": 0, "z": 0, "timestamp_ms": 0, "vector": VEC, "scene_id": "s"},
+    )
     assert resp.status_code in (401, 403)
 
 
-def test_query_requires_auth(app):
-    from fastapi.testclient import TestClient
-    with TestClient(app) as c:
-        resp = c.post("/query", json={"vector": VEC})
+def test_query_requires_auth(client_no_auth):
+    """Missing Bearer token must be rejected by real auth dependency."""
+    resp = client_no_auth.post("/query", json={"vector": VEC})
     assert resp.status_code in (401, 403)
 
 

@@ -53,7 +53,7 @@ async def require_api_key(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT ak.id, ak.tenant_id, ak.namespace, ak.label, t.email
+            SELECT ak.id, ak.tenant_id, ak.namespace, ak.label, ak.rate_limit_rpm, t.email
             FROM api_keys ak
             JOIN tenants t ON t.id = ak.tenant_id
             WHERE ak.key_hash = $1 AND ak.revoked = false

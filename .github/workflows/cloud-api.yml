@@ -1,0 +1,47 @@
+name: Cloud API Tests
+
+on:
+  push:
+    paths:
+      - "cloud/**"
+      - "loci/client.py"
+      - "loci/temporal/sharding.py"
+      - ".github/workflows/cloud-api.yml"
+  pull_request:
+    paths:
+      - "cloud/**"
+      - "loci/client.py"
+      - "loci/temporal/sharding.py"
+      - ".github/workflows/cloud-api.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud/api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install cloud API dependencies
+        run: pip install -r requirements.txt httpx pytest pytest-asyncio
+
+      - name: Install loci library (for imports)
+        run: pip install -e ../../
+
+      - name: Run cloud API tests
+        env:
+          QDRANT_URL: "http://localhost:6333"
+          QDRANT_API_KEY: "ci-dummy"
+          DATABASE_URL: "postgresql://dummy:dummy@localhost/dummy"
+          LOCI_VECTOR_SIZE: "4"
+          LOCI_DEV_MODE: "true"
+          PYTHONPATH: "${{ github.workspace }}/cloud/api"
+        run: pytest ../../cloud/tests -v --tb=short

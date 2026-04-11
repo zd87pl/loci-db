@@ -56,9 +56,12 @@ def test_swagger_ui_in_dev_mode(client):
 # ── Auth ───────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def client_no_auth():
-    """TestClient with no dependency overrides — auth is enforced normally."""
+    """TestClient with no dependency overrides — auth is enforced normally.
+
+    Uses function scope so overrides are restored before the next test.
+    """
     import server as srv
     from fastapi.testclient import TestClient
 

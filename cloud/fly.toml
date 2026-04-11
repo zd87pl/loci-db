@@ -1,5 +1,5 @@
-# Fly.io deployment config for LOCI Cloud API PoC
-# Secrets (never stored here): DATABASE_URL, QDRANT_URL, QDRANT_API_KEY
+# Fly.io deployment config for LOCI Cloud API
+# Secrets (never stored here): DATABASE_URL, QDRANT_URL, QDRANT_API_KEY, LOGTAIL_TOKEN
 # Set with: flyctl secrets set KEY=value
 
 app = "loci-api"
@@ -26,7 +26,32 @@ primary_region = "iad"
     hard_limit = 25
     soft_limit = 20
 
+  # Health check — Fly.io will restart the machine if /health fails 3x
+  [[http_service.checks]]
+    grace_period  = "5s"
+    interval      = "15s"
+    method        = "GET"
+    path          = "/health"
+    timeout       = "5s"
+
 [[vm]]
   cpu_kind  = "shared"
   cpus      = 1
   memory_mb = 512
+
+# ── Metrics (Fly.io built-in Prometheus endpoint) ─────────────────────────
+# Access via: flyctl metrics dashboard
+# Alerts are configured in the Fly.io dashboard under Monitoring > Alerts.
+# Recommended alerts:
+#   - Error rate (5xx responses) > 1% over 5 min  → PagerDuty / email
+#   - p99 response latency > 2000ms over 5 min     → PagerDuty / email
+#   - Machine restart count > 3 in 10 min          → PagerDuty / email
+[metrics]
+  port = 9091
+  path = "/metrics"
+
+# ── Log drain (Logtail / Better Stack free tier) ──────────────────────────
+# Set up: flyctl log-drains create --type logtail --token $LOGTAIL_TOKEN
+# The drain ships structured JSON logs from the API to Logtail for search
+# and alerting. LOGTAIL_TOKEN is stored as a Fly.io secret.
+# See: cloud/docs/runbooks/secrets-rotation.md for token rotation steps.

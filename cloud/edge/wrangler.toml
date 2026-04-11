@@ -1,0 +1,23 @@
+name = "loci-api-edge"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Secrets (set via: wrangler secret put UPSTREAM_URL)
+# UPSTREAM_URL = "https://loci-api.fly.dev"
+
+[vars]
+# Non-secret config can go here; secrets use `wrangler secret put`
+
+# Rate limiting — Cloudflare free tier allows 1 rule with 10k req/10s granularity.
+# This protects Fly.io cold starts from burst traffic.
+# Pairs with the Cloudflare dashboard "Rate Limiting" rule:
+#   - Threshold: 600 requests per minute per IP
+#   - Action: Block for 60 seconds
+# (Configured in CF dashboard, not in this file, since the free-tier
+#  rate limiting API is dashboard-only for Workers free plan.)
+
+[env.production]
+name = "loci-api-edge"
+
+[env.staging]
+name = "loci-api-edge-staging"

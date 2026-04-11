@@ -6,7 +6,8 @@ app = "loci-api"
 primary_region = "iad"
 
 [build]
-  dockerfile = "cloud/api/Dockerfile"
+  dockerfile = "api/Dockerfile"
+  build-context = ".."
   # Build context is repo root so we can COPY loci/ and pyproject.toml
 
 [env]

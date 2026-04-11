@@ -57,18 +57,18 @@ def test_swagger_ui_in_dev_mode(client):
 
 
 @pytest.fixture()
-def client_no_auth():
-    """TestClient with no dependency overrides — auth is enforced normally.
+def client_no_auth(client):
+    """Reuse the session client but with dependency overrides cleared.
 
-    Uses function scope so overrides are restored before the next test.
+    Does NOT start a new ASGI lifespan — that would trigger _clients.clear()
+    and destroy the mock injected by the app fixture.
+    Function-scoped so overrides are restored after each individual test.
     """
     import server as srv
-    from fastapi.testclient import TestClient
 
     saved = dict(srv.app.dependency_overrides)
     srv.app.dependency_overrides.clear()
-    with TestClient(srv.app) as c:
-        yield c
+    yield client
     srv.app.dependency_overrides.update(saved)
 
 

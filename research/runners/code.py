@@ -10,9 +10,7 @@ Use this runner when the concept being optimized is executable code.
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 from research.models import EvalResult, Thesis, Variant
@@ -83,7 +81,7 @@ class CodeRunner(BaseRunner):
         try:
             self.target_path.write_text(variant.content, encoding="utf-8")
 
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S602
                 self.test_cmd,
                 shell=True,
                 capture_output=True,

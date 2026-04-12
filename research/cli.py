@@ -68,14 +68,11 @@ def run(
 ) -> None:
     """Run the auto-research pipeline on a concept."""
     from research.pipeline import ResearchPipeline
-    from research.runners.llm import LLMRunner
     from research.runners.code import CodeRunner
+    from research.runners.llm import LLMRunner
 
     # Read concept
-    if input_path:
-        concept = Path(input_path).read_text(encoding="utf-8")
-    else:
-        concept = sys.stdin.read()
+    concept = Path(input_path).read_text(encoding="utf-8") if input_path else sys.stdin.read()
 
     if not concept.strip():
         click.echo("Error: no concept provided (empty input).", err=True)
@@ -94,7 +91,9 @@ def run(
             work_dir=work_dir or str(Path(input_path).parent),
         )
     else:
-        click.echo(f"Runner '{runner}' requires custom setup — falling back to LLM runner.", err=True)
+        click.echo(
+            f"Runner '{runner}' requires custom setup — falling back to LLM runner.", err=True
+        )
         test_runner = LLMRunner(model=runner_model)
 
     pipeline = ResearchPipeline(

@@ -14,9 +14,7 @@ import pytest
 
 from research.models import EvalResult, Thesis, Variant, Verdict
 from research.pipeline import PipelineResult, ResearchPipeline
-from research.runners.base import BaseRunner
 from research.runners.metric import MetricRunner
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -39,13 +37,21 @@ def sample_variants() -> list[Variant]:
     return [
         Variant(
             id=1,
-            content='def add(a: int, b: int) -> int:\n    """Return sum of a and b."""\n    return a + b',
+            content=(
+                "def add(a: int, b: int) -> int:\n"
+                '    """Return sum of a and b."""\n'
+                "    return a + b"
+            ),
             rationale="Added type hints and docstring",
             changes_summary="- Added int type hints\n- Added docstring",
         ),
         Variant(
             id=2,
-            content="from typing import Union\ndef add(a: Union[int, float], b: Union[int, float]) -> Union[int, float]:\n    return a + b",
+            content=(
+                "from typing import Union\n"
+                "def add(a: Union[int, float], b: Union[int, float]) -> Union[int, float]:\n"
+                "    return a + b"
+            ),
             rationale="Used Union types for broader compatibility",
             changes_summary="- Added Union type hints\n- Handles floats too",
         ),

@@ -30,3 +30,7 @@ codegen-units = 1
 [[bench]]
 name = "encoding_bench"
 harness = false
+
+[[bench]]
+name = "hilbert_experiments_bench"
+harness = false

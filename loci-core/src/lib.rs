@@ -14,6 +14,7 @@ use pyo3::prelude::*;
 
 pub mod batch;
 pub mod hilbert;
+pub mod hilbert_experiments;
 pub mod novelty;
 pub mod spatial;
 pub mod temporal;

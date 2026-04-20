@@ -2,6 +2,8 @@
 
 This directory contains the infrastructure and service code for running LOCI as a managed cloud API — similar to Pinecone or Weaviate Cloud.
 
+**New to the Cloud API?** Start with the [Quickstart guide](./docs/quickstart.md) — API keys, curl examples, and Python SDK usage in under five minutes.
+
 ## Architecture Overview
 
 ```
@@ -42,7 +44,8 @@ cloud/
 ├── migrations/                   # Supabase SQL migrations
 │   ├── 001_api_keys.sql          # api_keys + tenants schema
 │   ├── 002_rate_limits.sql       # Per-tenant rate_limit_rpm column
-│   └── 003_rls.sql               # Row-Level Security (service-role only)
+│   ├── 003_rls.sql               # Row-Level Security (service-role only)
+│   └── 004_admin_keys.sql        # is_admin flag for /admin/* endpoints
 ├── terraform/                    # Terraform scaffold (placeholder for future IaC)
 │   ├── main.tf
 │   └── variables.tf
@@ -62,7 +65,7 @@ cloud/
 | 0 | PoC — Fly.io + Supabase + Qdrant Cloud end-to-end | ✅ Done |
 | 1 | API hardening (auth, namespacing, rate limiting, input validation, tests) | ✅ Done |
 | 2 | Infrastructure maturity (CI/CD deploy, Cloudflare edge, Supabase RLS, monitoring, secrets runbook) | ✅ Done |
-| 3 | Developer experience (SDK update, dashboard, CLI) | Planned |
+| 3 | Developer experience (SDK cloud mode, admin endpoints, `loci` CLI, quickstart) | ✅ Done |
 | 4 | Billing & metering (Stripe, usage tracking, tier enforcement) | Planned |
 | 5 | Production hardening (multi-region, load testing, security audit) | Planned |
 
@@ -114,6 +117,7 @@ Apply in order via Supabase SQL editor or `psql`:
 psql $DATABASE_URL < cloud/migrations/001_api_keys.sql
 psql $DATABASE_URL < cloud/migrations/002_rate_limits.sql
 psql $DATABASE_URL < cloud/migrations/003_rls.sql
+psql $DATABASE_URL < cloud/migrations/004_admin_keys.sql
 ```
 
 RLS is enabled on `api_keys`, `tenants`, `usage_events`, `usage_monthly`. The service role bypasses RLS; anonymous/public access is denied.

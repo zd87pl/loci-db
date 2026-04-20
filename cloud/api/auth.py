@@ -53,7 +53,8 @@ async def require_api_key(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT ak.id, ak.tenant_id, ak.namespace, ak.label, ak.rate_limit_rpm, t.email
+            SELECT ak.id, ak.tenant_id, ak.namespace, ak.label,
+                   ak.rate_limit_rpm, ak.is_admin, t.email
             FROM api_keys ak
             JOIN tenants t ON t.id = ak.tenant_id
             WHERE ak.key_hash = $1 AND ak.revoked = false
@@ -68,3 +69,17 @@ async def require_api_key(
         )
 
     return dict(row)
+
+
+async def require_admin_api_key(
+    credentials: HTTPAuthorizationCredentials = Security(_bearer),
+) -> dict[str, Any]:
+    """FastAPI dependency — validates Bearer token AND requires is_admin.
+
+    Returns the api_keys row dict on success. Raises 401 for invalid keys and
+    403 for non-admin keys.
+    """
+    row = await require_api_key(credentials)
+    if not row.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin API key required")
+    return row

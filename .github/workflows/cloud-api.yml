@@ -7,12 +7,18 @@ on:
     paths:
       - "cloud/**"
       - "loci/client.py"
+      - "loci/async_client.py"
+      - "loci/cloud_transport.py"
+      - "loci/cli.py"
       - "loci/temporal/sharding.py"
       - ".github/workflows/cloud-api.yml"
   pull_request:
     paths:
       - "cloud/**"
       - "loci/client.py"
+      - "loci/async_client.py"
+      - "loci/cloud_transport.py"
+      - "loci/cli.py"
       - "loci/temporal/sharding.py"
       - ".github/workflows/cloud-api.yml"
 

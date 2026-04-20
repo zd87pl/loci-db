@@ -51,6 +51,9 @@ dev = [
     "anthropic>=0.94.0",
 ]
 
+[project.scripts]
+loci = "loci.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["loci"]
 

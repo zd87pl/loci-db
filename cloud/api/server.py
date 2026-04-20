@@ -23,8 +23,11 @@ Environment variables (set as Fly.io secrets — never committed to git):
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -40,7 +43,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from auth import close_pool, get_pool, require_api_key
+from auth import close_pool, get_pool, require_admin_api_key, require_api_key
 from loci import LociClient, WorldState
 
 # ── Structured JSON logging ────────────────────────────────────────────────
@@ -366,3 +369,215 @@ async def query(
             for r in results
         ]
     )
+
+
+# ── Admin: API key management ─────────────────────────────────────────────
+
+_NAMESPACE_RE = re.compile(r"^[a-z0-9_]{3,64}$")
+
+
+def _generate_raw_key() -> str:
+    return "loci_" + secrets.token_hex(32)
+
+
+def _hash_raw_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode()).hexdigest()
+
+
+class CreateKeyRequest(BaseModel):
+    tenant_email: str = Field(..., min_length=3, max_length=320)
+    tenant_name: str | None = Field(None, max_length=256)
+    namespace: str = Field(..., description="Qdrant collection prefix (lowercase alnum + underscores)")
+    label: str | None = Field(None, max_length=128)
+    rate_limit_rpm: int | None = Field(None, ge=1, le=100_000)
+    is_admin: bool = Field(False, description="Grant admin privileges to this key")
+
+    @field_validator("namespace")
+    @classmethod
+    def check_namespace(cls, v: str) -> str:
+        if not _NAMESPACE_RE.match(v):
+            raise ValueError(
+                "namespace must be 3-64 chars of lowercase letters, digits, or underscores"
+            )
+        return v
+
+
+class CreateKeyResponse(BaseModel):
+    key_id: str
+    raw_key: str = Field(..., description="Shown once; store securely")
+    prefix: str
+    tenant_id: str
+    namespace: str
+    is_admin: bool
+
+
+class KeyInfo(BaseModel):
+    id: str
+    tenant_id: str
+    prefix: str
+    namespace: str
+    label: str | None
+    rate_limit_rpm: int | None
+    is_admin: bool
+    revoked: bool
+    last_used_at: str | None
+    created_at: str
+
+
+class ListKeysResponse(BaseModel):
+    keys: list[KeyInfo]
+
+
+class RevokeKeyResponse(BaseModel):
+    key_id: str
+    revoked: bool
+
+
+@app.post(
+    "/admin/keys",
+    response_model=CreateKeyResponse,
+    tags=["admin"],
+    status_code=201,
+)
+async def admin_create_key(
+    req: CreateKeyRequest,
+    _admin: Annotated[dict[str, Any], Depends(require_admin_api_key)],
+):
+    """Create a new API key. Requires an admin key.
+
+    Creates or reuses a tenant by email, then inserts a new api_keys row and
+    returns the raw key value exactly once.
+    """
+    raw_key = _generate_raw_key()
+    key_hash = _hash_raw_key(raw_key)
+    prefix = raw_key[:12]
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            tenant_row = await conn.fetchrow(
+                """
+                INSERT INTO tenants (name, email, tier)
+                VALUES ($1, $2, 'pro')
+                ON CONFLICT (email) DO UPDATE
+                    SET name = COALESCE(EXCLUDED.name, tenants.name)
+                RETURNING id
+                """,
+                req.tenant_name or req.tenant_email,
+                req.tenant_email,
+            )
+            tenant_id = tenant_row["id"]
+
+            try:
+                key_row = await conn.fetchrow(
+                    """
+                    INSERT INTO api_keys
+                        (tenant_id, key_hash, prefix, namespace, label,
+                         rate_limit_rpm, is_admin)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    RETURNING id
+                    """,
+                    tenant_id,
+                    key_hash,
+                    prefix,
+                    req.namespace,
+                    req.label,
+                    req.rate_limit_rpm,
+                    req.is_admin,
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="namespace already in use",
+                ) from exc
+
+    return CreateKeyResponse(
+        key_id=str(key_row["id"]),
+        raw_key=raw_key,
+        prefix=prefix,
+        tenant_id=str(tenant_id),
+        namespace=req.namespace,
+        is_admin=req.is_admin,
+    )
+
+
+@app.get(
+    "/admin/keys",
+    response_model=ListKeysResponse,
+    tags=["admin"],
+)
+async def admin_list_keys(
+    _admin: Annotated[dict[str, Any], Depends(require_admin_api_key)],
+    tenant_id: str | None = None,
+    include_revoked: bool = False,
+):
+    """List API keys, optionally filtered by tenant_id. Requires admin key."""
+    try:
+        tenant_uuid = uuid.UUID(tenant_id) if tenant_id else None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="tenant_id must be a UUID") from exc
+
+    query = [
+        "SELECT id, tenant_id, prefix, namespace, label, rate_limit_rpm,",
+        "       is_admin, revoked, last_used_at, created_at",
+        "FROM api_keys",
+    ]
+    where: list[str] = []
+    params: list[Any] = []
+    if tenant_uuid is not None:
+        params.append(tenant_uuid)
+        where.append(f"tenant_id = ${len(params)}")
+    if not include_revoked:
+        where.append("revoked = false")
+    if where:
+        query.append("WHERE " + " AND ".join(where))
+    query.append("ORDER BY created_at DESC LIMIT 500")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("\n".join(query), *params)
+
+    return ListKeysResponse(
+        keys=[
+            KeyInfo(
+                id=str(r["id"]),
+                tenant_id=str(r["tenant_id"]),
+                prefix=r["prefix"],
+                namespace=r["namespace"],
+                label=r["label"],
+                rate_limit_rpm=r["rate_limit_rpm"],
+                is_admin=r["is_admin"],
+                revoked=r["revoked"],
+                last_used_at=r["last_used_at"].isoformat() if r["last_used_at"] else None,
+                created_at=r["created_at"].isoformat(),
+            )
+            for r in rows
+        ]
+    )
+
+
+@app.delete(
+    "/admin/keys/{key_id}",
+    response_model=RevokeKeyResponse,
+    tags=["admin"],
+)
+async def admin_revoke_key(
+    key_id: str,
+    _admin: Annotated[dict[str, Any], Depends(require_admin_api_key)],
+):
+    """Revoke an API key. Idempotent — returns 404 only for unknown IDs."""
+    try:
+        key_uuid = uuid.UUID(key_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="key_id must be a UUID") from exc
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE api_keys SET revoked = true WHERE id = $1 RETURNING id",
+            key_uuid,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="key not found")
+
+    return RevokeKeyResponse(key_id=str(row["id"]), revoked=True)

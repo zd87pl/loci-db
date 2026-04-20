@@ -36,7 +36,7 @@ def _http(method: str, base_url: str, path: str, api_key: str, body: dict | None
     req.add_header("Authorization", f"Bearer {api_key}")
     req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310 — scheme validated above  # noqa: S310
             raw = resp.read().decode() or "{}"
             return json.loads(raw)
     except urllib.error.HTTPError as exc:

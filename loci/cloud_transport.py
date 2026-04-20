@@ -108,7 +108,7 @@ class CloudTransport:
         req.add_header("Authorization", f"Bearer {self._api_key}")
         req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # nosec B310 — scheme validated above  # noqa: S310
                 parsed: dict[str, Any] = json.loads(resp.read().decode() or "{}")
                 return parsed
         except urllib.error.HTTPError as exc:

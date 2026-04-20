@@ -7,6 +7,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
+from typing import cast
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -22,6 +23,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+from loci.cloud_transport import CloudModeUnsupportedError, CloudTransport
 from loci.payload_filters import extra_filter_to_conditions
 from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
 from loci.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
@@ -65,7 +67,7 @@ class LociClient:
 
     def __init__(
         self,
-        qdrant_url: str,
+        qdrant_url: str | None = None,
         epoch_size_ms: int = 5000,
         spatial_resolution: int = 4,
         vector_size: int = 512,
@@ -77,8 +79,22 @@ class LociClient:
         resolutions: list[int] | None = None,
         api_key: str | None = None,
         collection_prefix: str = "",
+        base_url: str | None = None,
     ) -> None:
-        self._qdrant = QdrantClient(url=qdrant_url, api_key=api_key)
+        # Cloud mode: both base_url and api_key provided → talk to LOCI Cloud API.
+        # Local mode (default): qdrant_url is required and points at a Qdrant cluster.
+        if base_url is not None:
+            if api_key is None:
+                raise ValueError("cloud mode requires api_key")
+            self._cloud: CloudTransport | None = CloudTransport(base_url, api_key)
+            # _qdrant is unused in cloud mode; keep type as QdrantClient so the
+            # local-mode code paths type-check without pervasive None checks.
+            self._qdrant: QdrantClient = cast(QdrantClient, None)
+        else:
+            if qdrant_url is None:
+                raise ValueError("qdrant_url is required unless base_url is provided")
+            self._cloud = None
+            self._qdrant = QdrantClient(url=qdrant_url, api_key=api_key)
         self._epoch_size_ms = epoch_size_ms
         self._spatial_resolution = spatial_resolution
         self._vector_size = vector_size
@@ -196,6 +212,9 @@ class LociClient:
         Returns:
             The unique ID assigned to this state.
         """
+        if self._cloud is not None:
+            return self._cloud.insert(state)
+
         point_id = uuid.uuid4().hex
 
         ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
@@ -329,6 +348,25 @@ class LociClient:
         Returns:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
         """
+        if self._cloud is not None:
+            _advanced = (
+                _extra_payload_filter is not None
+                or _epoch_ids is not None
+                or min_confidence is not None
+            )
+            if _advanced:
+                raise CloudModeUnsupportedError(
+                    "advanced filtering (payload filters, epoch ids, min_confidence) "
+                    "is not supported in cloud mode"
+                )
+            return self._cloud.query(
+                vector=vector,
+                spatial_bounds=spatial_bounds,
+                time_window_ms=time_window_ms,
+                limit=limit,
+                overlap_factor=overlap_factor,
+            )
+
         return [
             candidate.state
             for candidate in self.query_scored(

@@ -33,11 +33,22 @@ def hash_key(raw_key: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate a LOCI admin API key")
+    parser = argparse.ArgumentParser(description="Generate a LOCI API key (admin or regular)")
     parser.add_argument("--name", required=True, help="Tenant display name")
     parser.add_argument("--email", required=True, help="Tenant email (unique)")
     parser.add_argument("--label", default="admin", help="Key label (default: admin)")
     parser.add_argument("--namespace", default="loci_admin", help="Qdrant collection prefix")
+    parser.add_argument(
+        "--admin",
+        action="store_true",
+        help="Grant admin privileges (required for /admin/* endpoints)",
+    )
+    parser.add_argument(
+        "--rate-limit-rpm",
+        type=int,
+        default=None,
+        help="Per-minute request limit (default: server default)",
+    )
     args = parser.parse_args()
 
     database_url = os.environ.get("DATABASE_URL")
@@ -66,11 +77,21 @@ def main() -> None:
 
                 cur.execute(
                     """
-                    INSERT INTO api_keys (tenant_id, key_hash, prefix, namespace, label)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO api_keys
+                        (tenant_id, key_hash, prefix, namespace, label,
+                         rate_limit_rpm, is_admin)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (tenant_id, key_hash, prefix, args.namespace, args.label),
+                    (
+                        tenant_id,
+                        key_hash,
+                        prefix,
+                        args.namespace,
+                        args.label,
+                        args.rate_limit_rpm,
+                        args.admin,
+                    ),
                 )
                 key_id = cur.fetchone()[0]
 
@@ -79,6 +100,7 @@ def main() -> None:
         print(f"Tenant   : {args.name} <{args.email}>")
         print(f"Label    : {args.label}")
         print(f"Prefix   : {prefix}")
+        print(f"Admin    : {args.admin}")
         print(f"\nRAW KEY (save this — shown only once):")
         print(f"\n  {raw_key}\n")
     finally:

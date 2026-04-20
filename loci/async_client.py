@@ -8,6 +8,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
+from typing import cast
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -23,6 +24,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
+from loci.cloud_transport import AsyncCloudTransport, CloudModeUnsupportedError
 from loci.payload_filters import extra_filter_to_conditions
 from loci.retrieval.predict import PredictRetrieveResult, rerank_prediction_candidates
 from loci.schema import ScoredWorldState, WorldState
@@ -66,7 +68,7 @@ class AsyncLociClient:
 
     def __init__(
         self,
-        qdrant_url: str,
+        qdrant_url: str | None = None,
         epoch_size_ms: int = 5000,
         spatial_resolution: int = 4,
         vector_size: int = 512,
@@ -76,8 +78,22 @@ class AsyncLociClient:
         max_retries: int = 3,
         retry_backoff: float = 0.5,
         resolutions: list[int] | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
     ) -> None:
-        self._qdrant = AsyncQdrantClient(url=qdrant_url)
+        # Cloud mode: base_url + api_key → route via LOCI Cloud HTTP API.
+        if base_url is not None:
+            if api_key is None:
+                raise ValueError("cloud mode requires api_key")
+            self._cloud: AsyncCloudTransport | None = AsyncCloudTransport(base_url, api_key)
+            # _qdrant is unused in cloud mode; keep type as AsyncQdrantClient so
+            # local-mode code paths type-check without pervasive None guards.
+            self._qdrant: AsyncQdrantClient = cast(AsyncQdrantClient, None)
+        else:
+            if qdrant_url is None:
+                raise ValueError("qdrant_url is required unless base_url is provided")
+            self._cloud = None
+            self._qdrant = AsyncQdrantClient(url=qdrant_url, api_key=api_key)
         self._epoch_size_ms = epoch_size_ms
         self._spatial_resolution = spatial_resolution
         self._vector_size = vector_size
@@ -118,8 +134,11 @@ class AsyncLociClient:
         return self._adaptive.stats() if self._adaptive is not None else None
 
     async def close(self) -> None:
-        """Close the underlying Qdrant connection."""
-        await self._qdrant.close()
+        """Close the underlying Qdrant connection or cloud transport."""
+        if self._cloud is not None:
+            await self._cloud.close()
+        else:
+            await self._qdrant.close()
 
     async def __aenter__(self) -> AsyncLociClient:
         return self
@@ -215,6 +234,9 @@ class AsyncLociClient:
         Returns:
             The unique ID assigned to this state.
         """
+        if self._cloud is not None:
+            return await self._cloud.insert(state)
+
         point_id = uuid.uuid4().hex
 
         ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
@@ -353,6 +375,16 @@ class AsyncLociClient:
         Returns:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
         """
+        if self._cloud is not None:
+            if _extra_payload_filter is not None or _epoch_ids is not None:
+                raise CloudModeUnsupportedError("advanced filtering is not supported in cloud mode")
+            return await self._cloud.query(
+                vector=vector,
+                spatial_bounds=spatial_bounds,
+                time_window_ms=time_window_ms,
+                limit=limit,
+            )
+
         return [
             candidate.state
             for candidate in await self.query_scored(

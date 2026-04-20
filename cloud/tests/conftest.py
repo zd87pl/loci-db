@@ -36,7 +36,18 @@ _MOCK_KEY_ROW: dict[str, Any] = {
     "namespace": TEST_NAMESPACE,
     "label": "test key",
     "rate_limit_rpm": 600,
+    "is_admin": False,
     "email": "test@example.com",
+}
+
+_MOCK_ADMIN_KEY_ROW: dict[str, Any] = {
+    "id": "00000000-0000-0000-0000-000000000099",
+    "tenant_id": "00000000-0000-0000-0000-000000000001",
+    "namespace": "admin_ns",
+    "label": "admin",
+    "rate_limit_rpm": 6000,
+    "is_admin": True,
+    "email": "admin@example.com",
 }
 
 

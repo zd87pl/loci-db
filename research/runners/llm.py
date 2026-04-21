@@ -10,11 +10,10 @@ It is the default runner when no domain-specific runner is configured.
 from __future__ import annotations
 
 import json
-import re
-from typing import Any
 
 from anthropic import Anthropic
 
+from research._llm_utils import LLMResponseError, extract_text, parse_json_object
 from research.models import EvalResult, Thesis, Variant
 from research.runners.base import BaseRunner
 
@@ -32,14 +31,6 @@ Return a JSON object with:
 
 Output ONLY valid JSON.
 """
-
-
-def _extract_json(text: str) -> dict[str, Any]:
-    text = text.strip()
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        text = m.group(1)
-    return json.loads(text)
 
 
 class LLMRunner(BaseRunner):
@@ -81,8 +72,19 @@ class LLMRunner(BaseRunner):
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
-        raw = message.content[0].text
-        data = _extract_json(raw)
+        try:
+            raw = extract_text(message)
+            data = parse_json_object(raw)
+        except LLMResponseError as exc:
+            # A malformed scoring response should not kill the whole pipeline —
+            # fall back to a zero-score failed result so the judge can ignore it.
+            return EvalResult(
+                variant_id=variant.id,
+                score=0.0,
+                metrics={},
+                passed=False,
+                details=f"LLM scoring failed: {exc}",
+            )
 
         return EvalResult(
             variant_id=variant.id,

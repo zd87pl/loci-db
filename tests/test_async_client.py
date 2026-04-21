@@ -529,3 +529,60 @@ async def test_context_manager(mock_async_qdrant):
     async with AsyncLociClient(qdrant_url="http://fake:6333", vector_size=4) as client:
         assert isinstance(client, AsyncLociClient)
     mock_async_qdrant.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tenant namespace prefix (multi-tenant isolation)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_collection_prefix_applied_on_insert(mock_async_qdrant):
+    client = AsyncLociClient(
+        qdrant_url="http://fake:6333",
+        epoch_size_ms=5000,
+        vector_size=4,
+        collection_prefix="tenant_a_",
+    )
+    await client.insert(_make_state(timestamp_ms=10_000))
+
+    create_kwargs = mock_async_qdrant.create_collection.call_args.kwargs
+    assert create_kwargs["collection_name"] == "tenant_a_loci_2"
+
+    upsert_kwargs = mock_async_qdrant.upsert.call_args.kwargs
+    assert upsert_kwargs["collection_name"] == "tenant_a_loci_2"
+
+
+@pytest.mark.asyncio
+async def test_list_active_epochs_respects_prefix(mock_async_qdrant):
+    client = AsyncLociClient(
+        qdrant_url="http://fake:6333",
+        vector_size=4,
+        collection_prefix="tenant_a_",
+    )
+    # Simulate a mix of prefixed and non-prefixed collections in cache.
+    client._known_collections = {"tenant_a_loci_0", "tenant_a_loci_3", "loci_7", "other_"}
+    assert client._list_active_epochs() == [0, 3]
+
+
+@pytest.mark.asyncio
+async def test_discover_collections_respects_prefix(mock_async_qdrant):
+    client = AsyncLociClient(
+        qdrant_url="http://fake:6333",
+        vector_size=4,
+        collection_prefix="tenant_a_",
+    )
+    fake_collections = MagicMock()
+    fake_collections.collections = [
+        MagicMock(name="c1"),
+        MagicMock(name="c2"),
+        MagicMock(name="c3"),
+    ]
+    # MagicMock's .name attribute has to be set explicitly.
+    fake_collections.collections[0].name = "tenant_a_loci_0"
+    fake_collections.collections[1].name = "loci_9"
+    fake_collections.collections[2].name = "tenant_b_loci_2"
+    mock_async_qdrant.get_collections = AsyncMock(return_value=fake_collections)
+
+    await client._discover_collections()
+    assert client._known_collections == {"tenant_a_loci_0"}

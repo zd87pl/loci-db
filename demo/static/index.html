@@ -469,8 +469,24 @@ function setGuideNote(message) {
   document.getElementById('guide-note').textContent = message;
 }
 
+// Escape untrusted strings before embedding in HTML template literals.
+function escapeHtml(value) {
+  if (value == null) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function setCanvasHint(message) {
-  document.getElementById('canvas-hint').innerHTML = `<strong>Try this:</strong> ${message}`;
+  const el = document.getElementById('canvas-hint');
+  el.textContent = '';
+  const bold = document.createElement('strong');
+  bold.textContent = 'Try this:';
+  el.appendChild(bold);
+  el.appendChild(document.createTextNode(' ' + (message == null ? '' : String(message))));
 }
 
 function setTab(tab) {
@@ -1024,7 +1040,7 @@ async function runSpatialSearch() {
 
   let html = '';
   if (data.message) {
-    html = `<div class="msg">${data.message}</div>`;
+    html = `<div class="msg">${escapeHtml(data.message)}</div>`;
   } else {
     const s = data.stats;
     const skipped = s.total_points > 0 && s.total_candidates < s.total_points
@@ -1081,7 +1097,7 @@ async function runSimilarSearch() {
 
   let html = '';
   if (data.message) {
-    html = `<div class="msg">${data.message}</div>`;
+    html = `<div class="msg">${escapeHtml(data.message)}</div>`;
   } else {
     const s = data.stats;
     html += `<div class="result-summary">LOCI used the visit at <strong>(${data.anchor.x}, ${data.anchor.y})</strong> from <strong>${data.anchor.elapsed_s}s</strong> as the anchor and found <strong>${data.results.length}</strong> nearby moments that looked similar.</div>`;
@@ -1127,9 +1143,9 @@ async function runPredictSearch() {
 
   let html = '';
   if (data.message) {
-    html = `<div class="result-summary">${data.message}</div>`;
+    html = `<div class="result-summary">${escapeHtml(data.message)}</div>`;
     if (data.guide?.predict?.message) {
-      html += `<div class="msg">${data.guide.predict.message}</div>`;
+      html += `<div class="msg">${escapeHtml(data.guide.predict.message)}</div>`;
     }
     setGuideNote(data.guide?.predict?.message || data.message);
   } else {
@@ -1254,12 +1270,30 @@ function formatLogTimestamp(tsMs) {
   return `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;
 }
 
+// Allowlist of log tag values to guard against CSS-class injection.
+const LOG_TAG_ALLOWED = new Set([
+  'insert', 'spatial', 'similar', 'predict', 'predictor', 'retrieval',
+  'anomaly', 'info', 'warn', 'error', 'memory', 'shard',
+]);
+
 function appendLogEntries(entries) {
   if (!entries || !entries.length) return;
   for (const entry of entries) {
     const div = document.createElement('div');
     div.className = 'log-entry';
-    div.innerHTML = `<span class="log-ts">${formatLogTimestamp(entry.ts)}</span><span class="log-tag ${entry.tag}">${entry.tag}</span><span class="log-msg">${entry.msg}</span>`;
+    const tsSpan = document.createElement('span');
+    tsSpan.className = 'log-ts';
+    tsSpan.textContent = formatLogTimestamp(entry.ts);
+    const tagSpan = document.createElement('span');
+    const safeTag = LOG_TAG_ALLOWED.has(entry.tag) ? entry.tag : 'info';
+    tagSpan.className = 'log-tag ' + safeTag;
+    tagSpan.textContent = safeTag;
+    const msgSpan = document.createElement('span');
+    msgSpan.className = 'log-msg';
+    msgSpan.textContent = entry.msg == null ? '' : String(entry.msg);
+    div.appendChild(tsSpan);
+    div.appendChild(tagSpan);
+    div.appendChild(msgSpan);
     logScroll.appendChild(div);
     logEntryCount++;
   }

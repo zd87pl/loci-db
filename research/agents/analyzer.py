@@ -12,12 +12,9 @@ provide a clear framing that the Optimizer can act on.
 
 from __future__ import annotations
 
-import json
-import re
-from typing import Any
-
 from anthropic import Anthropic
 
+from research._llm_utils import extract_text, parse_json_object, require_fields
 from research.models import Thesis
 
 _SYSTEM_PROMPT = """\
@@ -41,16 +38,6 @@ concept when forming the hypothesis.
 
 Output ONLY valid JSON.  No markdown, no commentary.
 """
-
-
-def _extract_json(text: str) -> dict[str, Any]:
-    """Extract a JSON object from model output, tolerating markdown fences."""
-    text = text.strip()
-    # Strip ```json ... ``` fences if present
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        text = m.group(1)
-    return json.loads(text)
 
 
 def analyze(
@@ -83,8 +70,9 @@ def analyze(
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
     )
-    raw = message.content[0].text
-    data = _extract_json(raw)
+    raw = extract_text(message)
+    data = parse_json_object(raw)
+    require_fields(data, ["concept_summary", "hypothesis", "test_strategy"], context="Analyzer")
 
     return Thesis(
         concept_summary=data["concept_summary"],

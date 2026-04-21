@@ -12,11 +12,10 @@ rather than incremental tweaks of the first idea.
 from __future__ import annotations
 
 import json
-import re
-from typing import Any
 
 from anthropic import Anthropic
 
+from research._llm_utils import LLMResponseError, extract_text, parse_json_array
 from research.models import Thesis, Variant
 
 _SYSTEM_PROMPT = """\
@@ -41,14 +40,6 @@ You MUST output a single JSON array where each element has:
 
 Output ONLY valid JSON.  No markdown fences, no commentary outside JSON.
 """
-
-
-def _extract_json(text: str) -> list[dict[str, Any]]:
-    text = text.strip()
-    m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
-    if m:
-        text = m.group(1)
-    return json.loads(text)
 
 
 def optimize(
@@ -94,11 +85,15 @@ def optimize(
         system=_SYSTEM_PROMPT.format(n=n),
         messages=[{"role": "user", "content": user_content}],
     )
-    raw = message.content[0].text
-    items = _extract_json(raw)
+    raw = extract_text(message)
+    items = parse_json_array(raw)
 
     variants = []
     for item in items[:n]:
+        if not isinstance(item, dict) or "id" not in item or "content" not in item:
+            raise LLMResponseError(
+                "Optimizer: each variant must be an object with 'id' and 'content' fields"
+            )
         variants.append(
             Variant(
                 id=int(item["id"]),

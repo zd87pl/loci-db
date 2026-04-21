@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -164,8 +167,17 @@ def test_query_buckets_fallback_without_lut() -> None:
     assert result == sorted(set(result))
 
 
+@pytest.mark.skipif(
+    os.environ.get("LOCI_PERF_TESTS") != "1",
+    reason="Wall-clock perf test; opt-in via LOCI_PERF_TESTS=1",
+)
 def test_lut_performance() -> None:
-    """LUT-based query_buckets completes in under 5ms (was ~47ms)."""
+    """LUT-based query_buckets stays well below the pre-LUT baseline (~47ms).
+
+    This is a regression guard, not a hard SLO. Wall-clock assertions are
+    intrinsically flaky on shared CI runners, so the test is opt-in. Set
+    ``LOCI_PERF_TESTS=1`` to enable it locally or in a dedicated perf job.
+    """
     import time
 
     from loci.spatial.hilbert import HilbertIndex, SpatialBounds
@@ -190,6 +202,8 @@ def test_lut_performance() -> None:
         index.query_buckets(bounds, resolution=4)
     elapsed = (time.perf_counter() - start) / 100
 
+    # Generous threshold — 10x the typical measurement is still a clear
+    # regression signal versus the 47ms pre-LUT baseline.
     assert elapsed < 0.020, f"query_buckets took {elapsed * 1000:.1f}ms, expected < 20ms"
 
 

@@ -66,12 +66,27 @@ pub fn temporal_decay_weight(observation_ms: u64, query_ms: u64, decay_factor: f
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "python")]
+fn contig_err() -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(
+        "input array must be contiguous (use np.ascontiguousarray() before passing)",
+    )
+}
+
+#[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "cosine_similarity")]
-pub fn py_cosine_similarity(a: PyReadonlyArray1<'_, f32>, b: PyReadonlyArray1<'_, f32>) -> f32 {
-    let a = a.as_slice().expect("contiguous array");
-    let b = b.as_slice().expect("contiguous array");
-    cosine_sim(a, b)
+pub fn py_cosine_similarity(
+    a: PyReadonlyArray1<'_, f32>,
+    b: PyReadonlyArray1<'_, f32>,
+) -> PyResult<f32> {
+    let a = a.as_slice().map_err(|_| contig_err())?;
+    let b = b.as_slice().map_err(|_| contig_err())?;
+    if a.len() != b.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "cosine_similarity: input vectors must have the same length",
+        ));
+    }
+    Ok(cosine_sim(a, b))
 }
 
 #[cfg(feature = "python")]
@@ -80,12 +95,17 @@ pub fn py_cosine_similarity(a: PyReadonlyArray1<'_, f32>, b: PyReadonlyArray1<'_
 pub fn py_compute_novelty_score(
     predicted: PyReadonlyArray1<'_, f32>,
     retrieved: PyReadonlyArray2<'_, f32>,
-) -> f32 {
-    let pred = predicted.as_slice().expect("contiguous array");
+) -> PyResult<f32> {
+    let pred = predicted.as_slice().map_err(|_| contig_err())?;
     let ret_arr = retrieved.as_array();
     let k = ret_arr.nrows();
     if k == 0 {
-        return 1.0;
+        return Ok(1.0);
+    }
+    if ret_arr.ncols() != pred.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "compute_novelty_score: predicted vector length must match retrieved row width",
+        ));
     }
     let mut max_sim = f32::NEG_INFINITY;
     for i in 0..k {
@@ -95,7 +115,7 @@ pub fn py_compute_novelty_score(
             max_sim = sim;
         }
     }
-    (1.0 - max_sim).clamp(0.0, 1.0)
+    Ok((1.0 - max_sim).clamp(0.0, 1.0))
 }
 
 #[cfg(feature = "python")]

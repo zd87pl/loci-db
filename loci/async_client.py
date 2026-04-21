@@ -64,6 +64,7 @@ class AsyncLociClient:
         distance: Distance metric — ``"cosine"``, ``"dot"``, or ``"euclidean"``.
         max_retries: Maximum number of retry attempts for transient Qdrant failures.
         retry_backoff: Base delay in seconds for exponential backoff between retries.
+        collection_prefix: Optional tenant namespace prefix for Qdrant collections.
     """
 
     def __init__(
@@ -79,6 +80,7 @@ class AsyncLociClient:
         retry_backoff: float = 0.5,
         resolutions: list[int] | None = None,
         api_key: str | None = None,
+        collection_prefix: str = "",
         base_url: str | None = None,
     ) -> None:
         # Cloud mode: base_url + api_key → route via LOCI Cloud HTTP API.
@@ -103,6 +105,7 @@ class AsyncLociClient:
         self._distance = _DISTANCE_MAP[distance]
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
+        self._collection_prefix = collection_prefix
         self._known_collections: set[str] = set()
         self._collection_locks: dict[str, asyncio.Lock] = {}
         self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
@@ -115,6 +118,11 @@ class AsyncLociClient:
             if adaptive
             else None
         )
+
+    def _col_name(self, ep: int) -> str:
+        """Return the Qdrant collection name for an epoch, applying the tenant namespace prefix."""
+        base = collection_name(ep)
+        return f"{self._collection_prefix}{base}" if self._collection_prefix else base
 
     async def _retry(self, fn, *args, **kwargs):
         """Execute an async fn with retry logic."""
@@ -154,10 +162,11 @@ class AsyncLociClient:
         """Populate _known_collections from Qdrant (for read-only clients)."""
         if self._known_collections:
             return
+        prefix = f"{self._collection_prefix}loci_" if self._collection_prefix else "loci_"
         try:
             response = await self._qdrant.get_collections()
             for col in response.collections:
-                if col.name.startswith("loci_"):
+                if col.name.startswith(prefix):
                     self._known_collections.add(col.name)
         except Exception:
             logger.debug("Failed to discover collections", exc_info=True)
@@ -240,7 +249,7 @@ class AsyncLociClient:
         point_id = uuid.uuid4().hex
 
         ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
-        col = collection_name(ep)
+        col = self._col_name(ep)
         await self._ensure_collection(col)
 
         t_norm = _normalise_time(state.timestamp_ms, ep, self._epoch_size_ms)
@@ -293,7 +302,7 @@ class AsyncLociClient:
             id_by_index[orig_idx] = point_id
 
             ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
-            col = collection_name(ep)
+            col = self._col_name(ep)
             await self._ensure_collection(col)
 
             t_norm = _normalise_time(state.timestamp_ms, ep, self._epoch_size_ms)
@@ -419,7 +428,7 @@ class AsyncLociClient:
             epochs = [ep for ep in epochs if ep in _epoch_ids]
 
         epoch_collections = [
-            (e, collection_name(e)) for e in epochs if collection_name(e) in self._known_collections
+            (e, self._col_name(e)) for e in epochs if self._col_name(e) in self._known_collections
         ]
         if not epoch_collections:
             return []
@@ -837,14 +846,16 @@ class AsyncLociClient:
     def _predecessor_search_collections(self, before_ms: int) -> list[str]:
         target_epoch = epoch_id(before_ms, self._epoch_size_ms)
         epochs = [ep for ep in self._list_active_epochs() if ep <= target_epoch]
-        return [collection_name(ep) for ep in sorted(epochs, reverse=True)]
+        return [self._col_name(ep) for ep in sorted(epochs, reverse=True)]
 
     def _list_active_epochs(self) -> list[int]:
+        """Return epoch IDs for all known collections, respecting the tenant prefix."""
+        prefix = f"{self._collection_prefix}loci_" if self._collection_prefix else "loci_"
         epochs: list[int] = []
         for col in self._known_collections:
-            if col.startswith("loci_"):
+            if col.startswith(prefix):
                 with contextlib.suppress(ValueError):
-                    epochs.append(int(col.split("_", 1)[1]))
+                    epochs.append(int(col[len(prefix) :]))
         return sorted(epochs) if epochs else []
 
 

@@ -14,11 +14,10 @@ and measured outcomes.
 from __future__ import annotations
 
 import json
-import re
-from typing import Any
 
 from anthropic import Anthropic
 
+from research._llm_utils import extract_text, parse_json_object, require_fields
 from research.models import EvalResult, Thesis, Verdict
 
 _SYSTEM_PROMPT = """\
@@ -64,14 +63,6 @@ def _format_results(eval_results: list[EvalResult]) -> str:
     return json.dumps(rows, indent=2)
 
 
-def _extract_json(text: str) -> dict[str, Any]:
-    text = text.strip()
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        text = m.group(1)
-    return json.loads(text)
-
-
 def judge(
     thesis: Thesis,
     eval_results: list[EvalResult],
@@ -113,8 +104,9 @@ def judge(
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
     )
-    raw = message.content[0].text
-    data = _extract_json(raw)
+    raw = extract_text(message)
+    data = parse_json_object(raw)
+    require_fields(data, ["winner_id", "reasoning"], context="Judge")
 
     scores = {int(k): float(v) for k, v in data.get("scores", {}).items()}
 

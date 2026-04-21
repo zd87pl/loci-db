@@ -142,10 +142,11 @@ class LociClient:
         """Populate _known_collections from Qdrant (for read-only clients)."""
         if self._known_collections:
             return
+        prefix = f"{self._collection_prefix}loci_" if self._collection_prefix else "loci_"
         try:
             response = self._qdrant.get_collections()
             for col in response.collections:
-                if col.name.startswith("loci_"):
+                if col.name.startswith(prefix):
                     self._known_collections.add(col.name)
         except Exception:
             logger.debug("Failed to discover collections", exc_info=True)

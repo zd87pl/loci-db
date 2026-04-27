@@ -7,7 +7,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -33,6 +33,7 @@ from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.decay import apply_decay
+from loci.temporal.retention import RetentionManager, RetentionPolicy
 from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,7 @@ class LociClient:
         api_key: str | None = None,
         collection_prefix: str = "",
         base_url: str | None = None,
+        retention_policy: RetentionPolicy | None = None,
     ) -> None:
         # Cloud mode: both base_url and api_key provided → talk to LOCI Cloud API.
         # Local mode (default): qdrant_url is required and points at a Qdrant cluster.
@@ -114,6 +116,15 @@ class LociClient:
                 density_threshold=50,
             )
             if adaptive
+            else None
+        )
+        self._retention = (
+            RetentionManager(
+                policy=retention_policy,
+                epoch_size_ms=self._epoch_size_ms,
+                collection_prefix=collection_prefix,
+            )
+            if retention_policy is not None
             else None
         )
 
@@ -242,6 +253,7 @@ class LociClient:
             collection_name=col,
             points=[PointStruct(id=point_id, vector=state.vector, payload=payload)],
         )
+        self._maybe_purge()
         return point_id
 
     def insert_batch(self, states: list[WorldState]) -> list[str]:
@@ -317,6 +329,7 @@ class LociClient:
                             exc_info=True,
                         )
 
+        self._maybe_purge()
         return [id_by_index[i] for i in range(len(states))]
 
     # ------------------------------------------------------------------
@@ -506,6 +519,8 @@ class LociClient:
         spatial_search_radius: float = 0.3,
         alpha: float = 0.7,
         return_prediction: bool = False,
+        *,
+        calibrator: Any = None,
     ) -> list[WorldState] | PredictRetrieveResult:
         """Predict a future state then retrieve nearest neighbours to it.
 
@@ -528,7 +543,7 @@ class LociClient:
             otherwise a plain list of :class:`WorldState`.
         """
         if current_position is not None or return_prediction:
-            ptr = PredictThenRetrieve(self)
+            ptr = PredictThenRetrieve(self, calibrator=calibrator)
             return ptr.retrieve(
                 context_vector=context_vector,
                 predictor_fn=predictor_fn,
@@ -701,6 +716,18 @@ class LociClient:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _maybe_purge(self) -> None:
+        if self._retention is None:
+            return
+        try:
+            self._retention.maybe_purge(
+                active_epochs=self._list_active_epochs(),
+                now_ms=int(time.time() * 1000),
+                delete_fn=self._qdrant.delete_collection,
+            )
+        except Exception as exc:
+            logger.warning("Retention purge failed: %s", exc)
 
     def _normalise_time(self, timestamp_ms: int, ep: int) -> float:
         """Map a timestamp to [0, 1] within its epoch."""

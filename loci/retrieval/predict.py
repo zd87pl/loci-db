@@ -33,6 +33,7 @@ class PredictRetrieveResult:
         predicted_vector: The predicted future embedding (if return_prediction=True).
         retrieval_latency_ms: Time spent on the retrieval query.
         predictor_call_ms: Time spent calling the predictor function.
+        novelty_samples: Number of historical observations used for calibration.
     """
 
     results: list[WorldState] = field(default_factory=list)
@@ -40,6 +41,7 @@ class PredictRetrieveResult:
     predicted_vector: list[float] | None = None
     retrieval_latency_ms: float = 0.0
     predictor_call_ms: float = 0.0
+    novelty_samples: int = 0
 
 
 def rerank_prediction_candidates(
@@ -104,10 +106,15 @@ class PredictThenRetrieve:
     This turns LOCI into a novelty detector for physical agents:
     - novelty ~ 0.0 → "I've seen this before" → use retrieved experience
     - novelty ~ 1.0 → "This is new territory" → alert, proceed carefully
+
+    When a :class:`~loci.retrieval.novelty.NoveltyCalibrator` is supplied,
+    novelty scores are calibrated against a running historical distribution
+    rather than using a raw heuristic.
     """
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, calibrator: Any = None) -> None:
         self._client = client
+        self._calibrator = calibrator
 
     def retrieve(
         self,
@@ -186,8 +193,9 @@ class PredictThenRetrieve:
         retrieval_latency_ms = (time.perf_counter() - t1) * 1000
 
         # Step 4: Combined scoring
+        best_score = 0.0
         if raw_candidates:
-            results, prediction_novelty = rerank_prediction_candidates(
+            results, best_score = rerank_prediction_candidates(
                 raw_candidates,
                 now_ms=now_ms,
                 future_horizon_ms=future_horizon_ms,
@@ -218,10 +226,18 @@ class PredictThenRetrieve:
                 scored.sort(key=lambda x: x[0], reverse=True)
                 results = [ws for _, ws in scored[:limit]]
                 best_score = scored[0][0] if scored else 0.0
-                prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
             else:
                 results = []
-                prediction_novelty = 1.0
+                best_score = 0.0
+
+        # Calibrate novelty if a calibrator is attached
+        if self._calibrator is not None:
+            self._calibrator.observe(best_score)
+            prediction_novelty = self._calibrator.calibrated_novelty(best_score)
+            novelty_samples = len(self._calibrator)
+        else:
+            prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
+            novelty_samples = 0
 
         return PredictRetrieveResult(
             results=results,
@@ -229,6 +245,7 @@ class PredictThenRetrieve:
             predicted_vector=predicted_vector if return_prediction else None,
             retrieval_latency_ms=retrieval_latency_ms,
             predictor_call_ms=predictor_call_ms,
+            novelty_samples=novelty_samples,
         )
 
 

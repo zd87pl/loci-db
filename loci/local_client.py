@@ -19,6 +19,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from loci.backends.memory import MemoryStore
 from loci.payload_filters import extra_filter_to_memory
@@ -29,6 +30,7 @@ from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.decay import apply_decay
+from loci.temporal.retention import RetentionManager, RetentionPolicy
 from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,7 @@ class LocalLociClient:
         distance: str = "cosine",
         adaptive: bool = False,
         resolutions: list[int] | None = None,
+        retention_policy: RetentionPolicy | None = None,
     ) -> None:
         self._store = MemoryStore()
         self._epoch_size_ms = epoch_size_ms
@@ -94,6 +97,15 @@ class LocalLociClient:
                 density_threshold=50,
             )
             if adaptive
+            else None
+        )
+        self._retention = (
+            RetentionManager(
+                policy=retention_policy,
+                epoch_size_ms=self._epoch_size_ms,
+                collection_prefix="",
+            )
+            if retention_policy is not None
             else None
         )
 
@@ -155,6 +167,7 @@ class LocalLociClient:
             self._store.set_payload(prev_col, prev_id, {"next_state_id": point_id})
 
         self._store.upsert(col, [{"id": point_id, "vector": state.vector, "payload": payload}])
+        self._maybe_purge()
         return point_id
 
     def insert_batch(self, states: list[WorldState]) -> list[str]:
@@ -206,6 +219,7 @@ class LocalLociClient:
                         {"next_state_id": point["id"]},
                     )
 
+        self._maybe_purge()
         return [id_by_index[i] for i in range(len(states))]
 
     # ------------------------------------------------------------------
@@ -357,6 +371,8 @@ class LocalLociClient:
         spatial_search_radius: float = 0.3,
         alpha: float = 0.7,
         return_prediction: bool = False,
+        *,
+        calibrator: Any = None,
     ) -> list[WorldState] | PredictRetrieveResult:
         """Predict-then-retrieve using the local backend.
 
@@ -366,7 +382,7 @@ class LocalLociClient:
         if current_position is not None or return_prediction:
             from loci.retrieval.predict import PredictThenRetrieve
 
-            ptr = PredictThenRetrieve(self)
+            ptr = PredictThenRetrieve(self, calibrator=calibrator)
             return ptr.retrieve(
                 context_vector=context_vector,
                 predictor_fn=predictor_fn,
@@ -479,6 +495,18 @@ class LocalLociClient:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _maybe_purge(self) -> None:
+        if self._retention is None:
+            return
+        try:
+            self._retention.maybe_purge(
+                active_epochs=self._list_active_epochs(),
+                now_ms=int(time.time() * 1000),
+                delete_fn=self._store.delete_collection,
+            )
+        except Exception as exc:
+            logger.warning("Retention purge failed: %s", exc)
 
     def _normalise_time(self, timestamp_ms: int, ep: int) -> float:
         epoch_start = ep * self._epoch_size_ms

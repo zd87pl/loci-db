@@ -193,19 +193,13 @@ def create_server_app(config: dict):
     voice = VoicePipeline(memory)
     oak = OakPipeline(blob_path=blob_path, classes=classes)
 
-    app = FastAPI(title="LOCI OAK-D Lite Demo", version="0.1.0")
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
     _oak_task = None
     _shutdown = asyncio.Event()
 
-    @app.on_event("startup")
-    async def startup():
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app):
         nonlocal _oak_task
         try:
             oak.start()
@@ -213,13 +207,19 @@ def create_server_app(config: dict):
             logger.info("OAK-D pipeline started in server mode")
         except Exception as e:
             logger.warning("OAK-D not available: %s", e)
-
-    @app.on_event("shutdown")
-    async def shutdown():
+        yield
         _shutdown.set()
         if _oak_task:
             _oak_task.cancel()
         oak.stop()
+
+    app = FastAPI(title="LOCI OAK-D Lite Demo", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/health")
     async def health():

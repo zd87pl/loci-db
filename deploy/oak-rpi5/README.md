@@ -9,7 +9,7 @@ keys?" and get a spoken natural-language response.
 | Component | Notes |
 |-----------|-------|
 | Raspberry Pi 5 (8GB) | With active cooler |
-| Luxonis OAK-D Lite | USB-C, RGB + stereo depth + Myriad X VPU |
+| Luxonis OAK-D Lite | USB-C or USB-A, RGB + stereo depth + Myriad X VPU |
 | Bluetooth headphones | Any A2DP + HFP profile (mic + speakers) |
 | USB-C PD power supply | 27W for RPi5 |
 
@@ -82,7 +82,7 @@ sudo systemctl start loci-demo
 ## Architecture
 
 ```
-OAK-D Lite (USB-C)
+OAK-D Lite (USB-C / USB-A)
     │
     ├─ RGB camera ──────┐
     ├─ Stereo depth ────┤

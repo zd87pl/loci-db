@@ -54,6 +54,10 @@ class MemoryStore:
     def collection_exists(self, name: str) -> bool:
         return name in self._collections
 
+    def delete_collection(self, name: str) -> None:
+        """Remove a collection and all its points."""
+        self._collections.pop(name, None)
+
     def create_payload_index(self, collection: str, field_name: str) -> None:
         if collection in self._collections:
             self._collections[collection].payload_indices.add(field_name)

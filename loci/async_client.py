@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -33,6 +33,7 @@ from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.decay import apply_decay
+from loci.temporal.retention import RetentionManager, RetentionPolicy
 from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ class AsyncLociClient:
         api_key: str | None = None,
         collection_prefix: str = "",
         base_url: str | None = None,
+        retention_policy: RetentionPolicy | None = None,
     ) -> None:
         # Cloud mode: base_url + api_key → route via LOCI Cloud HTTP API.
         if base_url is not None:
@@ -116,6 +118,15 @@ class AsyncLociClient:
                 density_threshold=50,
             )
             if adaptive
+            else None
+        )
+        self._retention = (
+            RetentionManager(
+                policy=retention_policy,
+                epoch_size_ms=self._epoch_size_ms,
+                collection_prefix=collection_prefix,
+            )
+            if retention_policy is not None
             else None
         )
 
@@ -272,6 +283,7 @@ class AsyncLociClient:
             collection_name=col,
             points=[PointStruct(id=point_id, vector=state.vector, payload=payload)],
         )
+        await self._maybe_purge()
         return point_id
 
     async def insert_batch(self, states: list[WorldState]) -> list[str]:
@@ -355,6 +367,7 @@ class AsyncLociClient:
 
         # Return IDs in original order
         ids = [id_by_index[i] for i in range(len(states))]
+        await self._maybe_purge()
         return ids
 
     # ------------------------------------------------------------------
@@ -535,6 +548,8 @@ class AsyncLociClient:
         spatial_search_radius: float = 0.3,
         alpha: float = 0.7,
         return_prediction: bool = False,
+        *,
+        calibrator: Any = None,
     ) -> list[WorldState] | PredictRetrieveResult:
         """Predict a future state then retrieve nearest neighbours.
 
@@ -586,7 +601,7 @@ class AsyncLociClient:
             retrieval_latency_ms = (time.perf_counter() - t0) * 1000
 
             if raw_results:
-                results, prediction_novelty = rerank_prediction_candidates(
+                results, best_score = rerank_prediction_candidates(
                     raw_results,
                     now_ms=now_ms,
                     future_horizon_ms=future_horizon_ms,
@@ -595,7 +610,15 @@ class AsyncLociClient:
                 )
             else:
                 results = []
-                prediction_novelty = 1.0
+                best_score = 0.0
+
+            if calibrator is not None:
+                calibrator.observe(best_score)
+                prediction_novelty = calibrator.calibrated_novelty(best_score)
+                novelty_samples = len(calibrator)
+            else:
+                prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
+                novelty_samples = 0
 
             return PredictRetrieveResult(
                 results=results,
@@ -603,6 +626,7 @@ class AsyncLociClient:
                 predicted_vector=predicted_vector if return_prediction else None,
                 retrieval_latency_ms=retrieval_latency_ms,
                 predictor_call_ms=predictor_call_ms,
+                novelty_samples=novelty_samples,
             )
 
         return await self.query(
@@ -814,6 +838,18 @@ class AsyncLociClient:
                 return
             except Exception:  # noqa: S112  # retry loop across epochs
                 continue
+
+    async def _maybe_purge(self) -> None:
+        if self._retention is None:
+            return
+        try:
+            await self._retention.maybe_purge_async(
+                active_epochs=self._list_active_epochs(),
+                now_ms=int(time.time() * 1000),
+                delete_fn=self._qdrant.delete_collection,
+            )
+        except Exception as exc:
+            logger.warning("Retention purge failed: %s", exc)
 
     async def _scroll_all(
         self,

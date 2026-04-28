@@ -89,6 +89,8 @@ _clients: dict[str, LociClient] = {}
 
 
 def _get_client(namespace: str) -> LociClient:
+    if QDRANT_URL is None or QDRANT_API_KEY is None:
+        raise RuntimeError("Server configuration not validated; call _validate_config() first")
     if namespace not in _clients:
         _clients[namespace] = LociClient(
             QDRANT_URL,

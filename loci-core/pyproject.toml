@@ -4,9 +4,9 @@ build-backend = "maturin"
 
 [project]
 name = "loci-core"
-version = "0.1.0"
+version = "0.3.0"
 description = "High-performance native primitives for LOCI-DB spatiotemporal vector database"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 
 [tool.maturin]

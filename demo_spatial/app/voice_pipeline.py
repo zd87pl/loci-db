@@ -68,10 +68,50 @@ _CHANGES_PATTERNS = [
     r"(?:any|what)\s+(?:new|recent)\s+(?:changes|updates|movements)",
 ]
 
+# Mode-switching intents — checked before spatial queries
+_MODE_GUIDE_PATTERNS = [
+    r"\bguide\s+me\b",
+    r"\bstart\s+(?:guiding|navigation|alerts?)\b",
+    r"\bturn\s+on\s+(?:alerts?|guidance|navigation)\b",
+    r"\benable\s+(?:alerts?|guidance)\b",
+    r"\bproactive\s+(?:mode|alerts?)\b",
+]
+
+_MODE_QUIET_PATTERNS = [
+    r"\bquiet\s+(?:mode|down|please)?\b",
+    r"\bsilence\b",
+    r"\bstop\s+(?:talking|alerts?|guiding)\b",
+    r"\bturn\s+off\s+(?:alerts?|guidance)\b",
+    r"\bdisable\s+(?:alerts?|guidance)\b",
+    r"\bmute\b",
+]
+
+_SCENE_SUMMARY_PATTERNS = [
+    r"\bwhat(?:'s| is)\s+(?:around|nearby|here)\b",
+    r"\bwhat\s+do\s+(?:you\s+)?see\b",
+    r"\blook\s+around\b",
+    r"\bdescribe\s+(?:the\s+)?(?:scene|surroundings?|area)\b",
+    r"\bscan\s+(?:the\s+)?(?:area|room)\b",
+    r"\bwhat(?:'s| is)\s+in\s+(?:the\s+)?(?:area|room)\b",
+]
+
 
 def parse_intent(text: str) -> QueryIntent:
     """Extract structured intent from transcribed voice query."""
     cleaned = text.strip().lower().rstrip("?!.")
+
+    # Mode-switching commands take priority over spatial queries
+    for pat in _MODE_GUIDE_PATTERNS:
+        if re.search(pat, cleaned):
+            return QueryIntent(kind="mode_guide", object_name="", raw_text=text)
+
+    for pat in _MODE_QUIET_PATTERNS:
+        if re.search(pat, cleaned):
+            return QueryIntent(kind="mode_quiet", object_name="", raw_text=text)
+
+    for pat in _SCENE_SUMMARY_PATTERNS:
+        if re.search(pat, cleaned):
+            return QueryIntent(kind="scene_summary", object_name="", raw_text=text)
 
     # Check change/movement queries
     for pat in _CHANGES_PATTERNS:
@@ -169,6 +209,26 @@ def build_response_text(intent: QueryIntent, memory: SpatialMemory, vlm_answer: 
     """Build a natural language response from intent + LOCI-DB query results."""
     if vlm_answer:
         return vlm_answer
+
+    # Mode-switching responses — ProactiveVoice.set_mode() must be called separately
+    if intent.kind == "mode_guide":
+        return "Guide mode on. I'll alert you to obstacles ahead."
+    if intent.kind == "mode_quiet":
+        return "Quiet mode. Proactive alerts paused."
+
+    # One-shot scene summary (delegates to spatial memory if available)
+    if intent.kind == "scene_summary":
+        objects = memory.current_objects()
+        if not objects:
+            return "I haven't tracked any objects yet. Try scanning the area."
+        parts = []
+        for o in objects[:5]:
+            age_str = _format_age(o.age_seconds)
+            parts.append(f"your {o.label} {o.position_description}, seen {age_str}")
+        result = "Around you: " + "; ".join(parts) + "."
+        if len(objects) > 5:
+            result += f" And {len(objects) - 5} more."
+        return result
 
     if intent.kind == "list_objects":
         objects = memory.current_objects()

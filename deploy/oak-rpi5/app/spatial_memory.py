@@ -275,6 +275,7 @@ class SpatialMemory:
                 confidence=r.confidence,
                 timestamp_ms=r.timestamp_ms,
                 state_id=r.id,
+                depth_m=round(r.z * 5.0, 3) if r.z > 0 else None,
             )
             for r in results
         ]

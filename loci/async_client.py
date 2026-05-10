@@ -85,6 +85,11 @@ class AsyncLociClient:
         base_url: str | None = None,
         retention_policy: RetentionPolicy | None = None,
     ) -> None:
+        if epoch_size_ms <= 0:
+            raise ValueError(f"epoch_size_ms must be positive, got {epoch_size_ms}")
+        if distance not in _DISTANCE_MAP:
+            raise ValueError(f"distance must be one of {list(_DISTANCE_MAP)}, got {distance!r}")
+
         # Cloud mode: base_url + api_key → route via LOCI Cloud HTTP API.
         if base_url is not None:
             if api_key is None:
@@ -102,14 +107,13 @@ class AsyncLociClient:
         self._spatial_resolution = spatial_resolution
         self._vector_size = vector_size
         self._decay_lambda = decay_lambda
-        if distance not in _DISTANCE_MAP:
-            raise ValueError(f"distance must be one of {list(_DISTANCE_MAP)}, got {distance!r}")
         self._distance = _DISTANCE_MAP[distance]
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
         self._collection_prefix = collection_prefix
         self._known_collections: set[str] = set()
         self._collection_locks: dict[str, asyncio.Lock] = {}
+        self._locks_mutex = asyncio.Lock()
         self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
         self._adaptive = (
             AdaptiveResolution(
@@ -187,9 +191,10 @@ class AsyncLociClient:
         if name in self._known_collections:
             return
 
-        # Per-collection lock prevents concurrent creation races
-        if name not in self._collection_locks:
-            self._collection_locks[name] = asyncio.Lock()
+        # Per-collection lock prevents concurrent creation races.
+        async with self._locks_mutex:
+            if name not in self._collection_locks:
+                self._collection_locks[name] = asyncio.Lock()
         async with self._collection_locks[name]:
             if name in self._known_collections:
                 return
@@ -383,6 +388,8 @@ class AsyncLociClient:
         *,
         _extra_payload_filter: dict | None = None,
         _epoch_ids: set[int] | None = None,
+        overlap_factor: float = 1.2,
+        min_confidence: float | None = None,
     ) -> list[WorldState]:
         """Search for nearest neighbours with parallel shard fan-out.
 
@@ -416,6 +423,8 @@ class AsyncLociClient:
                 limit,
                 _extra_payload_filter=_extra_payload_filter,
                 _epoch_ids=_epoch_ids,
+                overlap_factor=overlap_factor,
+                min_confidence=min_confidence,
             )
         ]
 
@@ -428,6 +437,8 @@ class AsyncLociClient:
         *,
         _extra_payload_filter: dict | None = None,
         _epoch_ids: set[int] | None = None,
+        overlap_factor: float = 1.2,
+        min_confidence: float | None = None,
     ) -> list[ScoredWorldState]:
         """Search and return scored results for downstream reranking."""
         await self._discover_collections()
@@ -459,12 +470,12 @@ class AsyncLociClient:
                     time_window_ms,
                     ep,
                     self._epoch_size_ms,
-                    1.2,
+                    overlap_factor,
                 )
                 hids = self._hilbert.query_buckets(
                     bounds_for_epoch(spatial_bounds, time_window_ms, ep, self._epoch_size_ms),
                     resolution=query_resolution,
-                    overlap_factor=1.2,
+                    overlap_factor=overlap_factor,
                 )
                 if not hids:
                     return []
@@ -513,7 +524,7 @@ class AsyncLociClient:
         for batch in shard_results:
             all_results.extend(batch)
 
-        if spatial_bounds is not None or time_window_ms is not None:
+        if spatial_bounds is not None or time_window_ms is not None or min_confidence is not None:
             all_results = [
                 r
                 for r in all_results
@@ -521,6 +532,7 @@ class AsyncLociClient:
                     r["payload"],
                     spatial_bounds=spatial_bounds,
                     time_window_ms=time_window_ms,
+                    min_confidence=min_confidence,
                 )
             ]
 
@@ -545,18 +557,22 @@ class AsyncLociClient:
         future_horizon_ms: int = 1000,
         limit: int = 5,
         current_position: tuple[float, float, float] | None = None,
+        current_timestamp_ms: int | None = None,
         spatial_search_radius: float = 0.3,
         alpha: float = 0.7,
         return_prediction: bool = False,
         *,
         calibrator: Any = None,
+        search_time_window_ms: tuple[int, int] | None = None,
     ) -> list[WorldState] | PredictRetrieveResult:
         """Predict a future state then retrieve nearest neighbours.
 
         When ``current_position`` is provided or ``return_prediction`` is
         enabled, returns a full :class:`PredictRetrieveResult` with novelty
         scoring and timing. Otherwise falls back to the legacy API returning
-        a plain list.
+        a plain list. By default, retrieval searches stored history for
+        analogs; pass ``search_time_window_ms`` to restrict it to an absolute
+        timestamp range.
 
         Args:
             context_vector: Current-state embedding.
@@ -564,9 +580,12 @@ class AsyncLociClient:
             future_horizon_ms: How far ahead to search (milliseconds).
             limit: Maximum number of results.
             current_position: Optional (x, y, z) for spatial + novelty scoring.
+            current_timestamp_ms: Current time in ms for novelty scoring
+                (defaults to wall-clock now).
             spatial_search_radius: Search radius around current_position.
             alpha: Weight for vector_sim vs temporal_proximity (default 0.7).
             return_prediction: Include predicted vector in result.
+            search_time_window_ms: Optional explicit timestamp range to search.
 
         Returns:
             :class:`PredictRetrieveResult` when ``current_position`` is set
@@ -576,7 +595,10 @@ class AsyncLociClient:
         t_predictor = time.perf_counter()
         predicted_vector = predictor_fn(context_vector)
         predictor_call_ms = (time.perf_counter() - t_predictor) * 1000
-        now_ms = int(time.time() * 1000)
+        if current_timestamp_ms is not None:
+            now_ms = current_timestamp_ms
+        else:
+            now_ms = int(time.time() * 1000)
 
         if current_position is not None or return_prediction:
             t0 = time.perf_counter()
@@ -595,7 +617,7 @@ class AsyncLociClient:
             raw_results = await self.query_scored(
                 vector=predicted_vector,
                 spatial_bounds=spatial_bounds,
-                time_window_ms=(now_ms, now_ms + future_horizon_ms),
+                time_window_ms=search_time_window_ms,
                 limit=limit * 2,
             )
             retrieval_latency_ms = (time.perf_counter() - t0) * 1000
@@ -607,6 +629,7 @@ class AsyncLociClient:
                     future_horizon_ms=future_horizon_ms,
                     alpha=alpha,
                     limit=limit,
+                    use_temporal_proximity=search_time_window_ms is not None,
                 )
             else:
                 results = []
@@ -631,7 +654,7 @@ class AsyncLociClient:
 
         return await self.query(
             vector=predicted_vector,
-            time_window_ms=(now_ms, now_ms + future_horizon_ms),
+            time_window_ms=search_time_window_ms,
             limit=limit,
         )
 

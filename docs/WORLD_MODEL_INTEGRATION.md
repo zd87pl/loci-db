@@ -102,6 +102,11 @@ result = ptr.retrieve(
 print(f"Novelty: {result.prediction_novelty:.2f}")
 ```
 
+The default retrieval mode searches stored history for analogs to the predicted
+future embedding. Use `search_time_window_ms=(start, end)` only when your store
+contains states that should be constrained to a specific absolute timestamp
+range.
+
 ## Generic Models (numpy / torch)
 
 For any model that produces numpy arrays or PyTorch tensors:

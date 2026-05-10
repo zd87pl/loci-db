@@ -59,8 +59,9 @@ The async client searches all matching shards **concurrently** via `asyncio.gath
 ### Layer 3: Retrieval
 
 **predict-then-retrieve** — Calls the user's predictor function to generate a
-hypothetical future embedding, then runs a standard query filtered to
-`[now, now + future_horizon_ms]`.
+hypothetical future embedding, then retrieves stored historical analogs matching
+that prediction. Callers can optionally pass an explicit absolute time window
+when they are storing scheduled or future-dated states.
 
 **funnel search** — Cascades through scale levels (sequence → frame → patch)
 to progressively refine results when multi-scale embeddings are stored. Matching

@@ -83,6 +83,11 @@ class LociClient:
         base_url: str | None = None,
         retention_policy: RetentionPolicy | None = None,
     ) -> None:
+        if epoch_size_ms <= 0:
+            raise ValueError(f"epoch_size_ms must be positive, got {epoch_size_ms}")
+        if distance not in _DISTANCE_MAP:
+            raise ValueError(f"distance must be one of {list(_DISTANCE_MAP)}, got {distance!r}")
+
         # Cloud mode: both base_url and api_key provided → talk to LOCI Cloud API.
         # Local mode (default): qdrant_url is required and points at a Qdrant cluster.
         if base_url is not None:
@@ -101,8 +106,6 @@ class LociClient:
         self._spatial_resolution = spatial_resolution
         self._vector_size = vector_size
         self._decay_lambda = decay_lambda
-        if distance not in _DISTANCE_MAP:
-            raise ValueError(f"distance must be one of {list(_DISTANCE_MAP)}, got {distance!r}")
         self._distance = _DISTANCE_MAP[distance]
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
@@ -516,17 +519,21 @@ class LociClient:
         future_horizon_ms: int = 1000,
         limit: int = 5,
         current_position: tuple[float, float, float] | None = None,
+        current_timestamp_ms: int | None = None,
         spatial_search_radius: float = 0.3,
         alpha: float = 0.7,
         return_prediction: bool = False,
         *,
         calibrator: Any = None,
+        search_time_window_ms: tuple[int, int] | None = None,
     ) -> list[WorldState] | PredictRetrieveResult:
         """Predict a future state then retrieve nearest neighbours to it.
 
         When ``current_position`` is provided, returns a full
         :class:`PredictRetrieveResult` with novelty scoring and timing.
         Otherwise falls back to the legacy API returning a plain list.
+        By default the retrieval step searches stored history for analogs;
+        pass ``search_time_window_ms`` to restrict it to an absolute time range.
 
         Args:
             context_vector: Current-state embedding.
@@ -534,9 +541,12 @@ class LociClient:
             future_horizon_ms: How far ahead to search (milliseconds).
             limit: Maximum number of results.
             current_position: Optional (x, y, z) for spatial + novelty scoring.
+            current_timestamp_ms: Current time in ms for novelty scoring
+                (defaults to wall-clock now).
             spatial_search_radius: Search radius around current_position.
             alpha: Weight for vector_sim vs temporal_proximity (default 0.7).
             return_prediction: Include predicted vector in result.
+            search_time_window_ms: Optional explicit timestamp range to search.
 
         Returns:
             :class:`PredictRetrieveResult` when current_position is set,
@@ -549,10 +559,12 @@ class LociClient:
                 predictor_fn=predictor_fn,
                 future_horizon_ms=future_horizon_ms,
                 current_position=current_position,
+                current_timestamp_ms=current_timestamp_ms,
                 spatial_search_radius=spatial_search_radius,
                 limit=limit,
                 alpha=alpha,
                 return_prediction=return_prediction,
+                search_time_window_ms=search_time_window_ms,
             )
         return _predict_and_retrieve(
             self,
@@ -560,6 +572,7 @@ class LociClient:
             predictor_fn,
             future_horizon_ms=future_horizon_ms,
             limit=limit,
+            search_time_window_ms=search_time_window_ms,
         )
 
     def funnel_query(

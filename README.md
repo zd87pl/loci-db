@@ -249,6 +249,12 @@ Run the retrieval benchmark on your hardware:
 python benchmarks/benchmark_retrieval.py
 ```
 
+Run the world-model proof harness:
+
+```bash
+python benchmarks/world_model_harness.py --quick
+```
+
 For a LOCI-vs-naive-Qdrant comparison benchmark:
 
 ```bash

@@ -45,6 +45,28 @@ For the `LOCI current` row, the checked-in benchmark applies the same decay-weig
 
 This benchmark script measures the retrieval path only. Scenario D is a broader-radius, short-window query, not the `predict_and_retrieve` API.
 
+## World-Model Proof Harness
+
+`benchmarks/world_model_harness.py` complements the raw retrieval benchmarks
+with a deterministic product-level proof. It creates a closed-loop patrol
+episode in `LocalLociClient` and reports whether LOCI can:
+
+- retrieve a historical analog for the current state,
+- retrieve the predicted future phase better than a current-state query,
+- raise novelty for an out-of-distribution spatial probe,
+- reconstruct the trajectory around a retrieved state.
+
+Run it locally with:
+
+```bash
+python benchmarks/world_model_harness.py
+python benchmarks/world_model_harness.py --quick
+```
+
+The JSON artifact is written to `benchmarks/results/world_model_latest.json`.
+The harness is intentionally deterministic so it can be used as a regression
+test for the concept, not only as a performance benchmark.
+
 ## Metrics
 
 For each scenario and dataset size:

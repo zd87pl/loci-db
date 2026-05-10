@@ -61,47 +61,46 @@ def main() -> None:
 
     conn = psycopg2.connect(database_url)
     try:
-        with conn:
-            with conn.cursor() as cur:
-                # Insert or fetch tenant
-                cur.execute(
-                    """
-                    INSERT INTO tenants (name, email, tier)
-                    VALUES (%s, %s, 'pro')
-                    ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name
-                    RETURNING id
-                    """,
-                    (args.name, args.email),
-                )
-                tenant_id = cur.fetchone()[0]
+        with conn, conn.cursor() as cur:
+            # Insert or fetch tenant.
+            cur.execute(
+                """
+                INSERT INTO tenants (name, email, tier)
+                VALUES (%s, %s, 'pro')
+                ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name
+                RETURNING id
+                """,
+                (args.name, args.email),
+            )
+            tenant_id = cur.fetchone()[0]
 
-                cur.execute(
-                    """
-                    INSERT INTO api_keys
-                        (tenant_id, key_hash, prefix, namespace, label,
-                         rate_limit_rpm, is_admin)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                    """,
-                    (
-                        tenant_id,
-                        key_hash,
-                        prefix,
-                        args.namespace,
-                        args.label,
-                        args.rate_limit_rpm,
-                        args.admin,
-                    ),
-                )
-                key_id = cur.fetchone()[0]
+            cur.execute(
+                """
+                INSERT INTO api_keys
+                    (tenant_id, key_hash, prefix, namespace, label,
+                     rate_limit_rpm, is_admin)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    tenant_id,
+                    key_hash,
+                    prefix,
+                    args.namespace,
+                    args.label,
+                    args.rate_limit_rpm,
+                    args.admin,
+                ),
+            )
+            key_id = cur.fetchone()[0]
 
-        print(f"\n=== API Key Generated ===")
+        print("\n=== API Key Generated ===")
         print(f"Key ID   : {key_id}")
         print(f"Tenant   : {args.name} <{args.email}>")
         print(f"Label    : {args.label}")
         print(f"Prefix   : {prefix}")
         print(f"Admin    : {args.admin}")
-        print(f"\nRAW KEY (save this — shown only once):")
+        print("\nRAW KEY (save this — shown only once):")
         print(f"\n  {raw_key}\n")
     finally:
         conn.close()

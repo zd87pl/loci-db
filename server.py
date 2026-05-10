@@ -113,7 +113,7 @@ def query(req: QueryRequest):
     if req.time_start_ms is not None and req.time_end_ms is not None:
         time_window = (req.time_start_ms, req.time_end_ms)
 
-    results = get_client().query(
+    results = get_client().query_scored(
         vector=req.vector,
         spatial_bounds={
             "x_min": req.x_min,
@@ -131,13 +131,14 @@ def query(req: QueryRequest):
     return {
         "results": [
             {
-                "id": r.id,
-                "x": r.x,
-                "y": r.y,
-                "z": r.z,
-                "timestamp_ms": r.timestamp_ms,
-                "scene_id": r.scene_id,
+                "id": r.state.id,
+                "x": r.state.x,
+                "y": r.state.y,
+                "z": r.state.z,
+                "timestamp_ms": r.state.timestamp_ms,
+                "scene_id": r.state.scene_id,
                 "score": r.score,
+                "decayed_score": r.decayed_score,
             }
             for r in results
         ]

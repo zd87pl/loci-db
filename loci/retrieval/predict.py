@@ -51,29 +51,29 @@ def rerank_prediction_candidates(
     future_horizon_ms: int,
     alpha: float,
     limit: int,
+    use_temporal_proximity: bool = False,
 ) -> tuple[list[WorldState], float]:
-    """Re-rank scored retrieval candidates for predict-and-retrieve."""
+    """Re-rank scored retrieval candidates and return the best match score."""
     if not candidates:
-        return [], 1.0
+        return [], 0.0
 
     vector_scores = _normalize_prediction_scores([candidate.score for candidate in candidates])
     mid_ms = now_ms + future_horizon_ms // 2
     combined: list[tuple[float, float, WorldState]] = []
     for candidate, vector_sim in zip(candidates, vector_scores, strict=False):
-        if future_horizon_ms > 0:
+        if use_temporal_proximity and future_horizon_ms > 0:
             t_dist = abs(candidate.state.timestamp_ms - mid_ms)
             temporal_prox = max(0.0, 1.0 - t_dist / (future_horizon_ms / 2))
+            score = alpha * vector_sim + (1.0 - alpha) * temporal_prox
         else:
-            temporal_prox = 1.0
+            score = vector_sim
 
-        score = alpha * vector_sim + (1.0 - alpha) * temporal_prox
         combined.append((score, candidate.decayed_score, candidate.state))
 
     combined.sort(key=lambda item: (item[0], item[1]), reverse=True)
     best_score = combined[0][0]
     results = [state for _, _, state in combined[:limit]]
-    prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
-    return results, prediction_novelty
+    return results, best_score
 
 
 def _normalize_prediction_scores(scores: list[float]) -> list[float]:
@@ -127,14 +127,16 @@ class PredictThenRetrieve:
         limit: int = 10,
         alpha: float = 0.7,
         return_prediction: bool = False,
+        search_time_window_ms: tuple[int, int] | None = None,
     ) -> PredictRetrieveResult:
         """Run the predict-then-retrieve pipeline.
 
         Pipeline:
         1. Call predictor_fn(context_vector) → predicted_vector (timed)
-        2. Query store with predicted_vector, filtered by time window
-           and spatial bounds (if current_position provided)
+        2. Query store with predicted_vector, filtered by spatial bounds
+           and by search_time_window_ms only when explicitly provided
         3. Score results: alpha * vector_sim + (1-alpha) * temporal_proximity
+           when a time window is explicit; otherwise rank by vector similarity
         4. Compute prediction_novelty from best match score
 
         Args:
@@ -149,6 +151,9 @@ class PredictThenRetrieve:
             alpha: Weight for vector similarity vs temporal proximity.
                 0.7 = 70% vector similarity, 30% temporal proximity.
             return_prediction: Whether to include predicted_vector in result.
+            search_time_window_ms: Optional explicit timestamp range to search.
+                By default, searches all stored history for analogs rather than
+                assuming future-dated states already exist in the database.
 
         Returns:
             PredictRetrieveResult with ranked results and novelty score.
@@ -162,8 +167,10 @@ class PredictThenRetrieve:
         predicted_vector = predictor_fn(context_vector)
         predictor_call_ms = (time.perf_counter() - t0) * 1000
 
-        # Step 2: Build query parameters
-        time_window = (now_ms, now_ms + future_horizon_ms)
+        # Step 2: Build query parameters.  The default is historical analog
+        # search across stored memories; callers can opt into a concrete
+        # absolute-time search window when their data is future-scheduled.
+        time_window = search_time_window_ms
 
         spatial_bounds = None
         if current_position is not None:
@@ -201,6 +208,7 @@ class PredictThenRetrieve:
                 future_horizon_ms=future_horizon_ms,
                 alpha=alpha,
                 limit=limit,
+                use_temporal_proximity=search_time_window_ms is not None,
             )
         else:
             raw_results = self._client.query(
@@ -214,13 +222,13 @@ class PredictThenRetrieve:
                 scored = []
                 for i, ws in enumerate(raw_results):
                     vector_sim = max(0.0, 1.0 - i / max(len(raw_results), 1))
-                    if future_horizon_ms > 0:
+                    if search_time_window_ms is not None and future_horizon_ms > 0:
                         t_dist = abs(ws.timestamp_ms - mid_ms)
                         temporal_prox = max(0.0, 1.0 - t_dist / (future_horizon_ms / 2))
+                        combined = alpha * vector_sim + (1.0 - alpha) * temporal_prox
                     else:
-                        temporal_prox = 1.0
+                        combined = vector_sim
 
-                    combined = alpha * vector_sim + (1.0 - alpha) * temporal_prox
                     scored.append((combined, ws))
 
                 scored.sort(key=lambda x: x[0], reverse=True)
@@ -260,6 +268,7 @@ def predict_and_retrieve(
     predictor_fn: Callable[[list[float]], list[float]],
     future_horizon_ms: int = 1000,
     limit: int = 5,
+    search_time_window_ms: tuple[int, int] | None = None,
 ) -> list[WorldState]:
     """Run the predict-then-retrieve primitive (legacy API).
 
@@ -267,10 +276,9 @@ def predict_and_retrieve(
     :class:`PredictThenRetrieve` directly.
     """
     predicted_vector = predictor_fn(context_vector)
-    now_ms = int(time.time() * 1000)
     results: list[WorldState] = client.query(
         vector=predicted_vector,
-        time_window_ms=(now_ms, now_ms + future_horizon_ms),
+        time_window_ms=search_time_window_ms,
         limit=limit,
     )
     return results

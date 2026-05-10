@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from loci.retrieval.predict import (
     PredictRetrieveResult,
@@ -38,21 +38,33 @@ def test_predict_and_retrieve_calls_predictor() -> None:
     assert len(results) == 1
 
 
-def test_predict_and_retrieve_time_window() -> None:
-    """The query should filter to [now, now + horizon]."""
+def test_predict_and_retrieve_searches_history_by_default() -> None:
+    """The legacy helper should not assume future-dated states exist."""
     predictor_fn = MagicMock(return_value=[0.0])
     mock_client = MagicMock()
     mock_client.query.return_value = []
 
-    with patch("loci.retrieval.predict.time") as mock_time:
-        mock_time.time.return_value = 10.0  # 10 000 ms
-        mock_time.perf_counter.return_value = 0.0
-        predict_and_retrieve(mock_client, [0.0], predictor_fn, future_horizon_ms=500)
+    predict_and_retrieve(mock_client, [0.0], predictor_fn, future_horizon_ms=500)
 
     call_kwargs = mock_client.query.call_args.kwargs
-    start, end = call_kwargs["time_window_ms"]
-    assert start == 10_000
-    assert end == 10_500
+    assert call_kwargs["time_window_ms"] is None
+
+
+def test_predict_and_retrieve_accepts_explicit_time_window() -> None:
+    predictor_fn = MagicMock(return_value=[0.0])
+    mock_client = MagicMock()
+    mock_client.query.return_value = []
+
+    predict_and_retrieve(
+        mock_client,
+        [0.0],
+        predictor_fn,
+        future_horizon_ms=500,
+        search_time_window_ms=(10_000, 10_500),
+    )
+
+    call_kwargs = mock_client.query.call_args.kwargs
+    assert call_kwargs["time_window_ms"] == (10_000, 10_500)
 
 
 def test_predict_retrieve_result_defaults() -> None:
@@ -113,8 +125,8 @@ def test_predict_then_retrieve_no_results_max_novelty() -> None:
     assert result.results == []
 
 
-def test_predict_then_retrieve_timestamp_zero_handled() -> None:
-    """current_timestamp_ms=0 should be treated as 0, not fallback to time.time()."""
+def test_predict_then_retrieve_timestamp_zero_handled_with_explicit_window() -> None:
+    """current_timestamp_ms=0 should be accepted when scoring an explicit window."""
     mock_client = MagicMock()
     mock_client.query.return_value = []
 
@@ -125,10 +137,8 @@ def test_predict_then_retrieve_timestamp_zero_handled() -> None:
         future_horizon_ms=1000,
         current_timestamp_ms=0,
         limit=5,
+        search_time_window_ms=(0, 1000),
     )
 
-    # Verify the query was called with time_window starting at 0
     call_kwargs = mock_client.query.call_args.kwargs
-    start, end = call_kwargs["time_window_ms"]
-    assert start == 0
-    assert end == 1000
+    assert call_kwargs["time_window_ms"] == (0, 1000)

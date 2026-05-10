@@ -34,7 +34,8 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 import asyncpg
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from auth import close_pool, get_pool, require_admin_api_key, require_api_key
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -43,7 +44,6 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from auth import close_pool, get_pool, require_admin_api_key, require_api_key
 from loci import LociClient, WorldState
 
 # ── Structured JSON logging ────────────────────────────────────────────────
@@ -180,8 +180,9 @@ class InsertRequest(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def check_metadata_size(self) -> "InsertRequest":
+    def check_metadata_size(self) -> InsertRequest:
         import json
+
         meta = json.dumps({"scene_id": self.scene_id, "scale_level": self.scale_level})
         if len(meta.encode()) > MAX_METADATA_BYTES:
             raise ValueError(f"metadata exceeds {MAX_METADATA_BYTES} bytes")
@@ -209,16 +210,19 @@ class QueryRequest(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def check_spatial_bounds(self) -> "QueryRequest":
+    def check_spatial_bounds(self) -> QueryRequest:
         if self.x_min > self.x_max:
             raise ValueError("x_min must be <= x_max")
         if self.y_min > self.y_max:
             raise ValueError("y_min must be <= y_max")
         if self.z_min > self.z_max:
             raise ValueError("z_min must be <= z_max")
-        if self.time_start_ms is not None and self.time_end_ms is not None:
-            if self.time_start_ms > self.time_end_ms:
-                raise ValueError("time_start_ms must be <= time_end_ms")
+        if (
+            self.time_start_ms is not None
+            and self.time_end_ms is not None
+            and self.time_start_ms > self.time_end_ms
+        ):
+            raise ValueError("time_start_ms must be <= time_end_ms")
         return self
 
 
@@ -280,6 +284,7 @@ async def ready():
     # Check Qdrant
     try:
         from qdrant_client import QdrantClient as _QC
+
         _qc = _QC(url=QDRANT_URL, api_key=QDRANT_API_KEY)
         _qc.get_collections()
         qdrant_ok = True
@@ -389,7 +394,10 @@ def _hash_raw_key(raw_key: str) -> str:
 class CreateKeyRequest(BaseModel):
     tenant_email: str = Field(..., min_length=3, max_length=320)
     tenant_name: str | None = Field(None, max_length=256)
-    namespace: str = Field(..., description="Qdrant collection prefix (lowercase alnum + underscores)")
+    namespace: str = Field(
+        ...,
+        description="Qdrant collection prefix (lowercase alnum + underscores)",
+    )
     label: str | None = Field(None, max_length=128)
     rate_limit_rpm: int | None = Field(None, ge=1, le=100_000)
     is_admin: bool = Field(False, description="Grant admin privileges to this key")
@@ -455,43 +463,42 @@ async def admin_create_key(
     prefix = raw_key[:12]
 
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            tenant_row = await conn.fetchrow(
+    async with pool.acquire() as conn, conn.transaction():
+        tenant_row = await conn.fetchrow(
+            """
+            INSERT INTO tenants (name, email, tier)
+            VALUES ($1, $2, 'pro')
+            ON CONFLICT (email) DO UPDATE
+                SET name = COALESCE(EXCLUDED.name, tenants.name)
+            RETURNING id
+            """,
+            req.tenant_name or req.tenant_email,
+            req.tenant_email,
+        )
+        tenant_id = tenant_row["id"]
+
+        try:
+            key_row = await conn.fetchrow(
                 """
-                INSERT INTO tenants (name, email, tier)
-                VALUES ($1, $2, 'pro')
-                ON CONFLICT (email) DO UPDATE
-                    SET name = COALESCE(EXCLUDED.name, tenants.name)
+                INSERT INTO api_keys
+                    (tenant_id, key_hash, prefix, namespace, label,
+                     rate_limit_rpm, is_admin)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 RETURNING id
                 """,
-                req.tenant_name or req.tenant_email,
-                req.tenant_email,
+                tenant_id,
+                key_hash,
+                prefix,
+                req.namespace,
+                req.label,
+                req.rate_limit_rpm,
+                req.is_admin,
             )
-            tenant_id = tenant_row["id"]
-
-            try:
-                key_row = await conn.fetchrow(
-                    """
-                    INSERT INTO api_keys
-                        (tenant_id, key_hash, prefix, namespace, label,
-                         rate_limit_rpm, is_admin)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    RETURNING id
-                    """,
-                    tenant_id,
-                    key_hash,
-                    prefix,
-                    req.namespace,
-                    req.label,
-                    req.rate_limit_rpm,
-                    req.is_admin,
-                )
-            except asyncpg.UniqueViolationError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail="namespace already in use",
-                ) from exc
+        except asyncpg.UniqueViolationError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="namespace already in use",
+            ) from exc
 
     return CreateKeyResponse(
         key_id=str(key_row["id"]),

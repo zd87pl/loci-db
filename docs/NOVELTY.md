@@ -42,7 +42,7 @@
 
 **What exists:** HyDE (ACL 2023) generates hypothetical documents for retrieval. No existing system applies this concept to spatiotemporal world models.
 
-**What LOCI adds:** An atomic pipeline: (1) call user's world model predictor to generate a predicted future-state embedding, (2) retrieve historical states matching that prediction within a spatial-temporal window, (3) compute a combined similarity score, (4) return a prediction_novelty score.
+**What LOCI adds:** An atomic pipeline: (1) call user's world model predictor to generate a predicted future-state embedding, (2) retrieve historical states matching that prediction, optionally constrained by spatial bounds or an explicit time window, (3) compute a combined similarity score, (4) return a prediction_novelty score.
 
 **Why it matters:** This turns a vector database into a novelty detector for physical agents. A robot with LOCI can answer "Have I seen a situation like what I'm about to encounter?" before acting. No prior system provides this primitive.
 

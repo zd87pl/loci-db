@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+from loci.schema import ScoredWorldState, WorldState
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -29,6 +31,7 @@ def _make_client() -> TestClient:
     mock_loci_client = MagicMock()
     mock_loci_client.return_value.insert.return_value = "test-uuid-1234"
     mock_loci_client.return_value.query.return_value = []
+    mock_loci_client.return_value.query_scored.return_value = []
 
     with (
         patch.dict("os.environ", {"LOCI_VECTOR_SIZE": str(VECTOR_SIZE)}),
@@ -113,6 +116,37 @@ class TestQuery:
         assert resp.status_code == 200
         assert "results" in resp.json()
 
+    def test_query_serializes_scored_results(self) -> None:
+        client, _, mock = _make_client()
+        state = WorldState(
+            x=0.1,
+            y=0.2,
+            z=0.3,
+            timestamp_ms=1000,
+            vector=[0.1, 0.2, 0.3, 0.4],
+            scene_id="scene-a",
+            id="state-1",
+        )
+        mock.query_scored.return_value = [
+            ScoredWorldState(state=state, score=0.8, decayed_score=0.7)
+        ]
+
+        resp = client.post("/query", json={"vector": [0.1, 0.2, 0.3, 0.4]})
+
+        assert resp.status_code == 200
+        assert resp.json()["results"] == [
+            {
+                "id": "state-1",
+                "x": 0.1,
+                "y": 0.2,
+                "z": 0.3,
+                "timestamp_ms": 1000,
+                "scene_id": "scene-a",
+                "score": 0.8,
+                "decayed_score": 0.7,
+            }
+        ]
+
     def test_query_wrong_vector_size(self) -> None:
         client, _, _ = _make_client()
         payload: dict[str, Any] = {"vector": [0.1, 0.2]}
@@ -156,5 +190,5 @@ class TestQuery:
         }
         resp = client.post("/query", json=payload)
         assert resp.status_code == 200
-        call_kwargs = mock.query.call_args.kwargs
+        call_kwargs = mock.query_scored.call_args.kwargs
         assert call_kwargs["time_window_ms"] == (0, 5000)

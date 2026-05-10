@@ -80,13 +80,19 @@ class LocalLociClient:
         adaptive: bool = False,
         resolutions: list[int] | None = None,
         retention_policy: RetentionPolicy | None = None,
+        collection_prefix: str = "",
     ) -> None:
+        if epoch_size_ms <= 0:
+            raise ValueError(f"epoch_size_ms must be positive, got {epoch_size_ms}")
+        if distance not in {"cosine", "dot", "euclidean"}:
+            raise ValueError("distance must be one of ['cosine', 'dot', 'euclidean']")
         self._store = MemoryStore()
         self._epoch_size_ms = epoch_size_ms
         self._spatial_resolution = spatial_resolution
         self._vector_size = vector_size
         self._decay_lambda = decay_lambda
         self._distance = distance
+        self._collection_prefix = collection_prefix
         self._known_collections: set[str] = set()
         self._last_query_stats: QueryStats | None = None
         self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
@@ -103,7 +109,7 @@ class LocalLociClient:
             RetentionManager(
                 policy=retention_policy,
                 epoch_size_ms=self._epoch_size_ms,
-                collection_prefix="",
+                collection_prefix=self._collection_prefix,
             )
             if retention_policy is not None
             else None
@@ -128,6 +134,10 @@ class LocalLociClient:
     # Collection management
     # ------------------------------------------------------------------
 
+    def _col_name(self, ep: int) -> str:
+        base = collection_name(ep)
+        return f"{self._collection_prefix}{base}" if self._collection_prefix else base
+
     def _ensure_collection(self, name: str) -> None:
         if name in self._known_collections:
             return
@@ -148,7 +158,7 @@ class LocalLociClient:
         point_id = uuid.uuid4().hex
 
         ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
-        col = collection_name(ep)
+        col = self._col_name(ep)
         self._ensure_collection(col)
 
         t_norm = self._normalise_time(state.timestamp_ms, ep)
@@ -184,7 +194,7 @@ class LocalLociClient:
             id_by_index[orig_idx] = point_id
 
             ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
-            col = collection_name(ep)
+            col = self._col_name(ep)
             self._ensure_collection(col)
 
             t_norm = self._normalise_time(state.timestamp_ms, ep)
@@ -235,6 +245,7 @@ class LocalLociClient:
         *,
         _extra_payload_filter: dict | None = None,
         _epoch_ids: set[int] | None = None,
+        overlap_factor: float = 1.2,
         min_confidence: float | None = None,
     ) -> list[WorldState]:
         """Search with Hilbert pre-filtering, temporal sharding, and decay.
@@ -250,6 +261,7 @@ class LocalLociClient:
                 limit,
                 _extra_payload_filter=_extra_payload_filter,
                 _epoch_ids=_epoch_ids,
+                overlap_factor=overlap_factor,
                 min_confidence=min_confidence,
             )
         ]
@@ -263,6 +275,7 @@ class LocalLociClient:
         *,
         _extra_payload_filter: dict | None = None,
         _epoch_ids: set[int] | None = None,
+        overlap_factor: float = 1.2,
         min_confidence: float | None = None,
     ) -> list[ScoredWorldState]:
         """Search and return scored results for downstream reranking."""
@@ -278,7 +291,7 @@ class LocalLociClient:
             epochs = [ep for ep in epochs if ep in _epoch_ids]
 
         epoch_collections = [
-            (e, collection_name(e)) for e in epochs if collection_name(e) in self._known_collections
+            (e, self._col_name(e)) for e in epochs if self._col_name(e) in self._known_collections
         ]
         stats.shards_searched = len(epoch_collections)
 
@@ -295,12 +308,12 @@ class LocalLociClient:
                     time_window_ms,
                     ep,
                     self._epoch_size_ms,
-                    1.2,
+                    overlap_factor,
                 )
                 hids = self._hilbert.query_buckets(
                     bounds_for_epoch(spatial_bounds, time_window_ms, ep, self._epoch_size_ms),
                     resolution=query_resolution,
-                    overlap_factor=1.2,
+                    overlap_factor=overlap_factor,
                 )
                 if not hids:
                     continue
@@ -368,16 +381,20 @@ class LocalLociClient:
         future_horizon_ms: int = 1000,
         limit: int = 5,
         current_position: tuple[float, float, float] | None = None,
+        current_timestamp_ms: int | None = None,
         spatial_search_radius: float = 0.3,
         alpha: float = 0.7,
         return_prediction: bool = False,
         *,
         calibrator: Any = None,
+        search_time_window_ms: tuple[int, int] | None = None,
     ) -> list[WorldState] | PredictRetrieveResult:
         """Predict-then-retrieve using the local backend.
 
         When ``current_position`` is provided, returns a full
-        :class:`PredictRetrieveResult` with novelty scoring.
+        :class:`PredictRetrieveResult` with novelty scoring.  By default,
+        retrieval searches stored history for analogs; pass
+        ``search_time_window_ms`` to restrict it to an absolute timestamp range.
         """
         if current_position is not None or return_prediction:
             from loci.retrieval.predict import PredictThenRetrieve
@@ -388,16 +405,17 @@ class LocalLociClient:
                 predictor_fn=predictor_fn,
                 future_horizon_ms=future_horizon_ms,
                 current_position=current_position,
+                current_timestamp_ms=current_timestamp_ms,
                 spatial_search_radius=spatial_search_radius,
                 limit=limit,
                 alpha=alpha,
                 return_prediction=return_prediction,
+                search_time_window_ms=search_time_window_ms,
             )
         predicted = predictor_fn(context_vector)
-        now_ms = int(time.time() * 1000)
         return self.query(
             vector=predicted,
-            time_window_ms=(now_ms, now_ms + future_horizon_ms),
+            time_window_ms=search_time_window_ms,
             limit=limit,
         )
 
@@ -558,16 +576,17 @@ class LocalLociClient:
 
     def _list_active_epochs(self) -> list[int]:
         epochs: list[int] = []
+        prefix = f"{self._collection_prefix}loci_" if self._collection_prefix else "loci_"
         for col in self._known_collections:
-            if col.startswith("loci_"):
+            if col.startswith(prefix):
                 with contextlib.suppress(ValueError):
-                    epochs.append(int(col.split("_", 1)[1]))
+                    epochs.append(int(col[len(prefix) :]))
         return sorted(epochs) if epochs else []
 
     def _predecessor_search_collections(self, before_ms: int) -> list[str]:
         target_epoch = epoch_id(before_ms, self._epoch_size_ms)
         epochs = [ep for ep in self._list_active_epochs() if ep <= target_epoch]
-        return [collection_name(ep) for ep in sorted(epochs, reverse=True)]
+        return [self._col_name(ep) for ep in sorted(epochs, reverse=True)]
 
 
 # ------------------------------------------------------------------

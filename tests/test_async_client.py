@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -110,6 +111,7 @@ async def test_ensure_collection_propagates_500(mock_async_qdrant):
     client._distance = MagicMock()
     client._known_collections = set()
     client._collection_locks = {}
+    client._locks_mutex = asyncio.Lock()
 
     with pytest.raises(UnexpectedResponse):
         await client._ensure_collection("loci_0")
@@ -474,7 +476,7 @@ async def test_predict_and_retrieve_extended_path(
     async_client.query_scored.assert_awaited_once_with(
         vector=predicted,
         spatial_bounds=expected_spatial_bounds,
-        time_window_ms=(now_ms, now_ms + 2000),
+        time_window_ms=None,
         limit=6,
     )
 

@@ -64,6 +64,10 @@ print(f"Novelty: {result.prediction_novelty:.2f}")
 # 1.0 = "This is new territory"
 ```
 
+By default this searches stored history for analogs to the predicted future
+embedding. Pass `search_time_window_ms=(start, end)` only when you explicitly
+want to restrict retrieval to an absolute timestamp range.
+
 ## Quick Start
 
 ### Quick Start with Docker

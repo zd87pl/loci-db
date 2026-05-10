@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from typing import Any
+from typing import Annotated, Any
 
 import asyncpg
 from fastapi import HTTPException, Security
@@ -40,7 +40,7 @@ def _hash_key(raw_key: str) -> str:
 
 
 async def require_api_key(
-    credentials: HTTPAuthorizationCredentials = Security(_bearer),
+    credentials: Annotated[HTTPAuthorizationCredentials, Security(_bearer)],
 ) -> dict[str, Any]:
     """FastAPI dependency — validates Bearer token against Supabase.
 
@@ -72,7 +72,7 @@ async def require_api_key(
 
 
 async def require_admin_api_key(
-    credentials: HTTPAuthorizationCredentials = Security(_bearer),
+    credentials: Annotated[HTTPAuthorizationCredentials, Security(_bearer)],
 ) -> dict[str, Any]:
     """FastAPI dependency — validates Bearer token AND requires is_admin.
 

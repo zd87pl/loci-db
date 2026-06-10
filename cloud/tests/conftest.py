@@ -55,6 +55,7 @@ _MOCK_ADMIN_KEY_ROW: dict[str, Any] = {
 def app():
     """Return the FastAPI app with auth and LociClient dependencies mocked out."""
     import auth
+
     import server as srv
 
     # ── Override auth dependency — bypasses real DB lookup ────────────────

@@ -51,8 +51,11 @@ def _query_payload(
     time_window_ms: tuple[int, int] | None,
     limit: int,
     overlap_factor: float,
+    include_vectors: bool = True,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {"vector": vector, "limit": limit, "overlap_factor": overlap_factor}
+    if not include_vectors:
+        body["include_vectors"] = False
     if spatial_bounds is not None:
         body.update(
             {
@@ -79,7 +82,7 @@ def _parse_query_results(payload: dict[str, Any]) -> list[WorldState]:
                 y=r["y"],
                 z=r["z"],
                 timestamp_ms=r["timestamp_ms"],
-                vector=[],
+                vector=r.get("vector", []),
                 scene_id=r.get("scene_id", ""),
                 id=str(r["id"]),
             )
@@ -126,8 +129,11 @@ class CloudTransport:
         time_window_ms: tuple[int, int] | None = None,
         limit: int = 10,
         overlap_factor: float = 1.2,
+        include_vectors: bool = True,
     ) -> list[WorldState]:
-        body = _query_payload(vector, spatial_bounds, time_window_ms, limit, overlap_factor)
+        body = _query_payload(
+            vector, spatial_bounds, time_window_ms, limit, overlap_factor, include_vectors
+        )
         resp = self._request("POST", "/query", body)
         return _parse_query_results(resp)
 
@@ -179,7 +185,10 @@ class AsyncCloudTransport:
         time_window_ms: tuple[int, int] | None = None,
         limit: int = 10,
         overlap_factor: float = 1.2,
+        include_vectors: bool = True,
     ) -> list[WorldState]:
-        body = _query_payload(vector, spatial_bounds, time_window_ms, limit, overlap_factor)
+        body = _query_payload(
+            vector, spatial_bounds, time_window_ms, limit, overlap_factor, include_vectors
+        )
         resp = await self._request("POST", "/query", body)
         return _parse_query_results(resp)

@@ -36,8 +36,11 @@ Repository = "https://github.com/zd87pl/loci-db"
 Issues = "https://github.com/zd87pl/loci-db/issues"
 
 [project.optional-dependencies]
+# Note: with uv this resolves to the local ./loci-core path via [tool.uv.sources]
+# below. With plain pip, `pip install .[native]` will look for loci-core on PyPI
+# (where it does not exist) — pip users should instead run `pip install -e ./loci-core`.
 native = [
-    "loci-core @ ./loci-core",
+    "loci-core",
 ]
 research = [
     "anthropic>=0.94.0",
@@ -63,6 +66,12 @@ loci = "loci.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["loci"]
+
+# uv-specific: resolve the `native` extra's loci-core dependency to the local
+# Rust crate instead of PyPI. pip ignores this table; see the comment on the
+# `native` optional-dependency above for the pip equivalent.
+[tool.uv.sources]
+loci-core = { path = "loci-core", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -64,3 +64,36 @@ def test_valid_scale_levels() -> None:
     for sl in ("patch", "frame", "sequence"):
         s = _make(scale_level=sl)
         assert s.scale_level == sl
+
+
+def test_metadata_defaults_to_empty_dict() -> None:
+    s = _make()
+    assert s.metadata == {}
+
+
+def test_metadata_default_not_shared_between_instances() -> None:
+    a = _make()
+    b = _make()
+    a.metadata["k"] = "v"
+    assert b.metadata == {}
+
+
+def test_metadata_round_trips_through_every_client_serializer() -> None:
+    """Anti-drift guard: all three client serializer copies must carry metadata."""
+    import loci.async_client as async_mod
+    import loci.local_client as local_mod
+    from loci.client import LociClient
+
+    pairs = [
+        (LociClient._state_to_payload, LociClient._payload_to_state),
+        (async_mod._state_to_payload, async_mod._payload_to_state),
+        (local_mod._state_to_payload, local_mod._payload_to_state),
+    ]
+    state = _make(metadata={"label": "doorway", "n": 3})
+    for to_payload, from_payload in pairs:
+        payload = to_payload(state, {})
+        restored = from_payload(payload, "pid-1", [1.0])
+        assert restored.metadata == {"label": "doorway", "n": 3}
+        # Old payloads written before the metadata field existed restore to {}.
+        legacy = {k: v for k, v in payload.items() if k != "metadata"}
+        assert from_payload(legacy, "pid-2", [1.0]).metadata == {}

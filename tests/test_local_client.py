@@ -369,3 +369,25 @@ class TestDistanceMetrics:
         c.insert(_make_state(vector=[1, 0, 0, 0]))
         results = c.query(vector=[1, 0, 0, 0], limit=1)
         assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# Metadata round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestMetadataRoundTrip:
+    def test_metadata_survives_insert_and_query(self, client):
+        state = _make_state()
+        state.metadata = {"label": "doorway", "height_m": 2.1}
+        client.insert(state)
+
+        results = client.query(vector=[1.0, 0.0, 0.0, 0.0], limit=1)
+
+        assert len(results) == 1
+        assert results[0].metadata == {"label": "doorway", "height_m": 2.1}
+
+    def test_metadata_defaults_to_empty_dict(self, client):
+        client.insert(_make_state())
+        results = client.query(vector=[1.0, 0.0, 0.0, 0.0], limit=1)
+        assert results[0].metadata == {}

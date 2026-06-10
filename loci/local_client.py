@@ -605,6 +605,7 @@ def _state_to_payload(state: WorldState, hilbert_ids: dict[str, int]) -> dict:
         "confidence": state.confidence,
         "prev_state_id": state.prev_state_id,
         "next_state_id": state.next_state_id,
+        "metadata": state.metadata,
     }
     payload.update(hilbert_ids)
     return payload
@@ -624,5 +625,6 @@ def _payload_to_state(
         confidence=payload.get("confidence", 1.0),
         prev_state_id=payload.get("prev_state_id"),
         next_state_id=payload.get("next_state_id"),
+        metadata=payload.get("metadata") or {},
         id=str(point_id),
     )

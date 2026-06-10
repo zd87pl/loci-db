@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -21,6 +22,8 @@ class WorldState:
         scene_id: Optional scene/environment identifier.
         scale_level: Granularity — ``"patch"``, ``"frame"``, or ``"sequence"``.
         confidence: Confidence score for this state, in [0, 1].
+        metadata: Arbitrary caller-supplied key/value payload, stored and
+            returned verbatim. Must be JSON-serializable for Qdrant backends.
         prev_state_id: ID of the causally preceding state (populated after insert).
         next_state_id: ID of the causally following state (populated after insert).
         id: Unique identifier assigned by the store on insert.
@@ -39,6 +42,7 @@ class WorldState:
     scene_id: str = ""
     scale_level: str = "patch"
     confidence: float = 1.0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     # causal links (populated by the store after insert)
     prev_state_id: str | None = None

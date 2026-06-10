@@ -27,4 +27,8 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# --proxy-headers + --forwarded-allow-ips: the machine is only reachable via
+# Fly.io's proxy, so trust its X-Forwarded-For and surface the real client IP to
+# request.client.host. Without this every client appears as the proxy IP and the
+# per-IP auth-failure throttle collapses into a single shared bucket.
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]

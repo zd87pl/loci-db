@@ -28,21 +28,26 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 import asyncpg
-from auth import close_pool, get_pool, require_admin_api_key, require_api_key
+from auth import (
+    FixedWindowCounter,
+    close_pool,
+    get_pool,
+    require_admin_api_key,
+    require_api_key,
+)
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pythonjsonlogger import jsonlogger
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 from loci import LociClient, WorldState
 
@@ -66,41 +71,45 @@ DEV_MODE: bool = os.environ.get("LOCI_DEV_MODE", "").lower() == "true"
 MAX_METADATA_BYTES: int = int(os.environ.get("LOCI_MAX_METADATA_BYTES", "4096"))
 MAX_BODY_BYTES: int = int(os.environ.get("LOCI_MAX_BODY_BYTES", str(5 * 1024 * 1024)))
 DEFAULT_RPM: int = int(os.environ.get("LOCI_DEFAULT_RPM", "600"))
-_DEFAULT_RATE_LIMIT: str = f"{DEFAULT_RPM}/minute"
 
 _raw_origins = os.environ.get("LOCI_CORS_ORIGINS", "")
 CORS_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 
 # ── Rate limiting ─────────────────────────────────────────────────────────
-# Key function: use the authenticated tenant's namespace (set in request.state by auth).
-# Falls back to remote IP for unauthenticated paths.
+# Per-key throttle: each authenticated request counts against the tenant's
+# namespace, enforced at the tenant's own ``rate_limit_rpm`` (read from the key
+# row at auth time). This replaces the old slowapi decorator, which applied a
+# single hardcoded limit to everyone and ignored per-key limits entirely.
 
-
-def _rate_key(request: Request) -> str:
-    ns = getattr(request.state, "namespace", None)
-    return ns if ns else get_remote_address(request)
-
-
-limiter = Limiter(key_func=_rate_key)
+_key_rate_counter = FixedWindowCounter()
 
 # ── Per-namespace LociClient cache ────────────────────────────────────────
 
 _clients: dict[str, LociClient] = {}
+# /insert and /query are sync path operations, so FastAPI runs them in a
+# threadpool — guard the lazy cache against a concurrent check-then-create that
+# would build duplicate clients for the same namespace.
+_clients_lock = threading.Lock()
 
 
 def _get_client(namespace: str) -> LociClient:
     if QDRANT_URL is None or QDRANT_API_KEY is None:
         raise RuntimeError("Server configuration not validated; call _validate_config() first")
-    if namespace not in _clients:
-        _clients[namespace] = LociClient(
-            QDRANT_URL,
-            api_key=QDRANT_API_KEY,
-            vector_size=VECTOR_SIZE,
-            epoch_size_ms=EPOCH_SIZE_MS,
-            distance=DISTANCE,
-            collection_prefix=f"{namespace}_",
-        )
-    return _clients[namespace]
+    client = _clients.get(namespace)
+    if client is None:
+        with _clients_lock:
+            client = _clients.get(namespace)
+            if client is None:
+                client = LociClient(
+                    QDRANT_URL,
+                    api_key=QDRANT_API_KEY,
+                    vector_size=VECTOR_SIZE,
+                    epoch_size_ms=EPOCH_SIZE_MS,
+                    distance=DISTANCE,
+                    collection_prefix=f"{namespace}_",
+                )
+                _clients[namespace] = client
+    return client
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────
@@ -121,9 +130,6 @@ app = FastAPI(
     redoc_url="/redoc" if DEV_MODE else None,
     lifespan=lifespan,
 )
-
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS: read strictly from env var, no wildcards.
 app.add_middleware(
@@ -201,6 +207,9 @@ class QueryRequest(BaseModel):
     time_end_ms: int | None = Field(None, ge=0)
     limit: int = Field(10, ge=1, le=1000)
     overlap_factor: float = Field(1.0, ge=0.1, le=10.0)
+    include_vectors: bool = Field(
+        True, description="Return the stored embedding vector with each result"
+    )
 
     @field_validator("vector")
     @classmethod
@@ -248,6 +257,10 @@ class QueryResult(BaseModel):
     z: float
     timestamp_ms: int
     scene_id: str
+    vector: list[float] = Field(
+        default_factory=list,
+        description="Embedding vector; empty unless include_vectors was set",
+    )
 
 
 class QueryResponse(BaseModel):
@@ -261,8 +274,16 @@ async def _auth_with_state(
     request: Request,
     key_row: Annotated[dict[str, Any], Depends(require_api_key)],
 ) -> dict[str, Any]:
-    request.state.namespace = key_row["namespace"]
-    request.state.rate_limit_rpm = key_row.get("rate_limit_rpm") or 60
+    namespace = key_row["namespace"]
+    rpm = key_row.get("rate_limit_rpm") or DEFAULT_RPM
+    request.state.namespace = namespace
+    request.state.rate_limit_rpm = rpm
+    if not _key_rate_counter.hit(namespace, rpm):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded",
+            headers={"Retry-After": "60"},
+        )
     return key_row
 
 
@@ -281,15 +302,19 @@ async def ready():
     qdrant_ok = False
     supabase_ok = False
 
-    # Check Qdrant
-    try:
+    # Check Qdrant. The client construction + call are blocking, so run them in
+    # a threadpool to avoid stalling the event loop. Log only the exception type
+    # — the message can embed the connection URL/API key.
+    def _ping_qdrant() -> None:
         from qdrant_client import QdrantClient as _QC
 
-        _qc = _QC(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-        _qc.get_collections()
+        _QC(url=QDRANT_URL, api_key=QDRANT_API_KEY).get_collections()
+
+    try:
+        await run_in_threadpool(_ping_qdrant)
         qdrant_ok = True
     except Exception as exc:  # noqa: BLE001
-        logger.warning("qdrant_not_ready", extra={"error": str(exc)})
+        logger.warning("qdrant_not_ready", extra={"error_type": type(exc).__name__})
 
     # Check Supabase (Postgres)
     try:
@@ -298,7 +323,7 @@ async def ready():
             await conn.fetchval("SELECT 1")
         supabase_ok = True
     except Exception as exc:  # noqa: BLE001
-        logger.warning("supabase_not_ready", extra={"error": str(exc)})
+        logger.warning("supabase_not_ready", extra={"error_type": type(exc).__name__})
 
     overall = "ok" if (qdrant_ok and supabase_ok) else "degraded"
     status_code = 200 if overall == "ok" else 503
@@ -313,13 +338,15 @@ async def ready():
 
 
 @app.post("/insert", response_model=InsertResponse, tags=["data"])
-@limiter.limit(_DEFAULT_RATE_LIMIT)
-async def insert(
-    request: Request,
+def insert(
     req: InsertRequest,
     key_row: Annotated[dict[str, Any], Depends(_auth_with_state)],
 ):
-    """Insert a world-state vector. Requires valid API key."""
+    """Insert a world-state vector. Requires valid API key.
+
+    Defined as a sync endpoint so FastAPI runs the blocking Qdrant call in a
+    worker thread rather than on the event loop.
+    """
     namespace = key_row["namespace"]
     state = WorldState(
         x=req.x,
@@ -336,13 +363,15 @@ async def insert(
 
 
 @app.post("/query", response_model=QueryResponse, tags=["data"])
-@limiter.limit(_DEFAULT_RATE_LIMIT)
-async def query(
-    request: Request,
+def query(
     req: QueryRequest,
     key_row: Annotated[dict[str, Any], Depends(_auth_with_state)],
 ):
-    """Spatiotemporal vector search. Requires valid API key."""
+    """Spatiotemporal vector search. Requires valid API key.
+
+    Defined as a sync endpoint so FastAPI runs the blocking Qdrant call in a
+    worker thread rather than on the event loop.
+    """
     namespace = key_row["namespace"]
     time_window = None
     if req.time_start_ms is not None and req.time_end_ms is not None:
@@ -372,6 +401,7 @@ async def query(
                 z=r.z,
                 timestamp_ms=r.timestamp_ms,
                 scene_id=r.scene_id,
+                vector=list(r.vector) if req.include_vectors else [],
             )
             for r in results
         ]
@@ -380,7 +410,12 @@ async def query(
 
 # ── Admin: API key management ─────────────────────────────────────────────
 
-_NAMESPACE_RE = re.compile(r"^[a-z0-9_]{3,64}$")
+# Namespaces must NOT contain underscores. Qdrant collections are named
+# ``{namespace}_loci_{epoch}`` and discovery matches on the ``{namespace}_loci_``
+# prefix; if underscores were allowed, namespace "foo" would match collections
+# belonging to namespace "foo_loci" (prefix "foo_loci_") — a cross-tenant read.
+# Restricting to lowercase alphanumerics makes the separator unambiguous.
+_NAMESPACE_RE = re.compile(r"^[a-z0-9]{3,64}$")
 
 
 def _generate_raw_key() -> str:
@@ -396,7 +431,7 @@ class CreateKeyRequest(BaseModel):
     tenant_name: str | None = Field(None, max_length=256)
     namespace: str = Field(
         ...,
-        description="Qdrant collection prefix (lowercase alnum + underscores)",
+        description="Qdrant collection prefix (3-64 lowercase letters and digits)",
     )
     label: str | None = Field(None, max_length=128)
     rate_limit_rpm: int | None = Field(None, ge=1, le=100_000)
@@ -407,7 +442,7 @@ class CreateKeyRequest(BaseModel):
     def check_namespace(cls, v: str) -> str:
         if not _NAMESPACE_RE.match(v):
             raise ValueError(
-                "namespace must be 3-64 chars of lowercase letters, digits, or underscores"
+                "namespace must be 3-64 chars of lowercase letters and digits (no underscores)"
             )
         return v
 

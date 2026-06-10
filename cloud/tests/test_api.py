@@ -12,8 +12,8 @@ Tests cover:
 from __future__ import annotations
 
 import os
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -212,6 +212,107 @@ def test_query_limit_too_large(client):
         headers={"Authorization": f"Bearer loci_{'a' * 64}"},
     )
     assert resp.status_code == 422
+
+
+def _fake_result() -> SimpleNamespace:
+    return SimpleNamespace(
+        id="abc",
+        x=0.1,
+        y=0.2,
+        z=0.3,
+        timestamp_ms=1000,
+        scene_id="s",
+        vector=VEC,
+    )
+
+
+def test_query_returns_vectors_by_default(client):
+    """Cloud query returns embedding vectors, matching local-client semantics."""
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.query.return_value = [_fake_result()]
+    try:
+        resp = client.post(
+            "/query",
+            json={"vector": VEC},
+            headers={"Authorization": f"Bearer loci_{'a' * 64}"},
+        )
+        assert resp.status_code == 200
+        results = resp.json()["results"]
+        assert results[0]["vector"] == VEC
+    finally:
+        mock_client.query.return_value = []
+
+
+def test_query_omits_vectors_when_disabled(client):
+    """include_vectors=false trims the (potentially large) vector payload."""
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.query.return_value = [_fake_result()]
+    try:
+        resp = client.post(
+            "/query",
+            json={"vector": VEC, "include_vectors": False},
+            headers={"Authorization": f"Bearer loci_{'a' * 64}"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["vector"] == []
+    finally:
+        mock_client.query.return_value = []
+
+
+def test_per_key_rate_limit_returns_429(client):
+    """Once a tenant exceeds its rate_limit_rpm, further requests get 429."""
+    import auth
+
+    import server as srv
+
+    ns = "rltestns"
+    low_rpm_row = {
+        "id": "00000000-0000-0000-0000-0000000000aa",
+        "tenant_id": "00000000-0000-0000-0000-000000000001",
+        "namespace": ns,
+        "label": "rl",
+        "rate_limit_rpm": 2,
+        "is_admin": False,
+        "email": "rl@example.com",
+    }
+
+    async def _fake_low_rpm_key():
+        return low_rpm_row
+
+    saved = srv.app.dependency_overrides.get(auth.require_api_key)
+    srv.app.dependency_overrides[auth.require_api_key] = _fake_low_rpm_key
+    srv._clients[ns] = MagicMock(insert=MagicMock(return_value="x" * 32))
+    # Reset the shared counter window for this namespace.
+    srv._key_rate_counter._windows.pop(ns, None)
+    try:
+        body = {"x": 0, "y": 0, "z": 0, "timestamp_ms": 0, "vector": VEC, "scene_id": "s"}
+        h = {"Authorization": f"Bearer loci_{'a' * 64}"}
+        assert client.post("/insert", json=body, headers=h).status_code == 200
+        assert client.post("/insert", json=body, headers=h).status_code == 200
+        assert client.post("/insert", json=body, headers=h).status_code == 429
+    finally:
+        if saved is not None:
+            srv.app.dependency_overrides[auth.require_api_key] = saved
+        srv._clients.pop(ns, None)
+        srv._key_rate_counter._windows.pop(ns, None)
+
+
+def test_fixed_window_counter_semantics():
+    from auth import FixedWindowCounter
+
+    c = FixedWindowCounter()
+    assert c.hit("k", 2) is True   # 1
+    assert c.over("k", 2) is False
+    assert c.hit("k", 2) is True   # 2
+    assert c.over("k", 2) is True   # at limit
+    assert c.hit("k", 2) is False  # 3 — over
+    # A non-positive limit means unlimited.
+    assert c.hit("unlimited", 0) is True
+    assert c.over("unlimited", 0) is False
 
 
 # ── Request ID ────────────────────────────────────────────────────────────

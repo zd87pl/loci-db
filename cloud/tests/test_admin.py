@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import asyncpg
 import pytest
 from fastapi.testclient import TestClient
-
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -47,6 +46,7 @@ def _fake_transaction() -> Any:
 def admin_client(app):
     """TestClient with the admin-auth dependency forced to an admin key."""
     import auth
+
     import server as srv
 
     async def _fake_admin():
@@ -71,8 +71,9 @@ def admin_client(app):
 def non_admin_client(app):
     """TestClient where the admin dependency raises 403 like the real one does."""
     import auth
-    import server as srv
     from fastapi import HTTPException
+
+    import server as srv
 
     async def _fake_admin_rejected():
         raise HTTPException(status_code=403, detail="Admin API key required")
@@ -90,7 +91,7 @@ def non_admin_client(app):
 def test_create_key_requires_admin(non_admin_client):
     resp = non_admin_client.post(
         "/admin/keys",
-        json={"tenant_email": "x@y", "namespace": "ns_create_a"},
+        json={"tenant_email": "x@y", "namespace": "nscreatea"},
     )
     assert resp.status_code == 403
 
@@ -116,7 +117,7 @@ def test_create_key_happy_path(admin_client, monkeypatch):
         json={
             "tenant_email": "partner@example.com",
             "tenant_name": "Partner",
-            "namespace": "partner_prod",
+            "namespace": "partnerprod",
             "label": "prod",
             "rate_limit_rpm": 1200,
             "is_admin": False,
@@ -126,7 +127,7 @@ def test_create_key_happy_path(admin_client, monkeypatch):
     body = resp.json()
     assert body["key_id"] == str(key_id)
     assert body["tenant_id"] == str(tenant_id)
-    assert body["namespace"] == "partner_prod"
+    assert body["namespace"] == "partnerprod"
     assert body["is_admin"] is False
     assert body["raw_key"].startswith("loci_")
     assert len(body["raw_key"]) == len("loci_") + 64
@@ -136,6 +137,15 @@ def test_create_key_rejects_bad_namespace(admin_client):
     resp = admin_client.post(
         "/admin/keys",
         json={"tenant_email": "x@y.z", "namespace": "Bad Namespace!"},
+    )
+    assert resp.status_code == 422
+
+
+def test_create_key_rejects_underscore_namespace(admin_client):
+    """Underscores are banned to keep the collection prefix unambiguous."""
+    resp = admin_client.post(
+        "/admin/keys",
+        json={"tenant_email": "x@y.z", "namespace": "foo_loci"},
     )
     assert resp.status_code == 422
 
@@ -160,7 +170,7 @@ def test_create_key_conflict_on_duplicate_namespace(admin_client, monkeypatch):
 
     resp = admin_client.post(
         "/admin/keys",
-        json={"tenant_email": "x@y.z", "namespace": "taken_ns"},
+        json={"tenant_email": "x@y.z", "namespace": "takenns"},
     )
     assert resp.status_code == 409
 
@@ -176,7 +186,7 @@ def test_list_keys_requires_admin(non_admin_client):
 def test_list_keys_happy_path(admin_client, monkeypatch):
     import server as srv
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = {
         "id": uuid.UUID("33333333-3333-3333-3333-333333333333"),
         "tenant_id": uuid.UUID("11111111-1111-1111-1111-111111111111"),

@@ -29,6 +29,9 @@ def bounds_for_epoch(
         overlap_end = min(time_window_ms[1], epoch_start + epoch_size_ms)
         t_min = min(1.0, max(0.0, (overlap_start - epoch_start) / epoch_size_ms))
         t_max = min(1.0, max(0.0, (overlap_end - epoch_start) / epoch_size_ms))
+        # A non-overlapping epoch (overlap_start > overlap_end) would otherwise
+        # yield an inverted t_min > t_max range; collapse it to a valid point.
+        t_max = max(t_min, t_max)
 
     return SpatialBounds(
         x_min=bounds.x_min,

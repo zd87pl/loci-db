@@ -760,6 +760,7 @@ class LociClient:
             "confidence": state.confidence,
             "prev_state_id": state.prev_state_id,
             "next_state_id": state.next_state_id,
+            "metadata": state.metadata,
         }
         payload.update(hilbert_ids)
         return payload
@@ -779,6 +780,7 @@ class LociClient:
             confidence=payload.get("confidence", 1.0),
             prev_state_id=payload.get("prev_state_id"),
             next_state_id=payload.get("next_state_id"),
+            metadata=payload.get("metadata") or {},
             id=str(point_id),
         )
 

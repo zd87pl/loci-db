@@ -104,6 +104,23 @@ class TestInsert:
         assert resp1.status_code == 200
         assert resp2.status_code == 200
 
+    def test_insert_passes_metadata_to_world_state(self) -> None:
+        """Client-supplied metadata must reach the stored WorldState, not be dropped."""
+        client, _, mock = _make_client()
+        payload: dict[str, Any] = {
+            "x": 0.1,
+            "y": 0.2,
+            "z": 0.3,
+            "timestamp_ms": 1000,
+            "vector": [0.1, 0.2, 0.3, 0.4],
+            "scene_id": "scene-a",
+            "metadata": {"label": "doorway", "source": "lidar"},
+        }
+        resp = client.post("/insert", json=payload)
+        assert resp.status_code == 200
+        state = mock.insert.call_args.args[0]
+        assert state.metadata == {"label": "doorway", "source": "lidar"}
+
 
 class TestQuery:
     def test_query_valid(self) -> None:
@@ -125,6 +142,7 @@ class TestQuery:
             timestamp_ms=1000,
             vector=[0.1, 0.2, 0.3, 0.4],
             scene_id="scene-a",
+            metadata={"label": "doorway"},
             id="state-1",
         )
         mock.query_scored.return_value = [
@@ -142,6 +160,7 @@ class TestQuery:
                 "z": 0.3,
                 "timestamp_ms": 1000,
                 "scene_id": "scene-a",
+                "metadata": {"label": "doorway"},
                 "score": 0.8,
                 "decayed_score": 0.7,
             }

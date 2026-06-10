@@ -97,6 +97,7 @@ def insert(req: InsertRequest):
         vector=req.vector,
         scene_id=req.scene_id,
         scale_level=req.scale_level,
+        metadata=req.metadata,
     )
     state_id = get_client().insert(state)
     return {"id": state_id}
@@ -137,6 +138,7 @@ def query(req: QueryRequest):
                 "z": r.state.z,
                 "timestamp_ms": r.state.timestamp_ms,
                 "scene_id": r.state.scene_id,
+                "metadata": r.state.metadata,
                 "score": r.score,
                 "decayed_score": r.decayed_score,
             }

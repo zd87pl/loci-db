@@ -24,7 +24,7 @@ if _API_DIR not in sys.path:
 os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("QDRANT_API_KEY", "test-qdrant-key")
 os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost/test")
-os.environ.setdefault("LOCI_VECTOR_SIZE", "4")   # tiny vectors for speed
+os.environ.setdefault("LOCI_VECTOR_SIZE", "4")  # tiny vectors for speed
 os.environ.setdefault("LOCI_DEV_MODE", "true")
 
 VECTOR_SIZE = int(os.environ["LOCI_VECTOR_SIZE"])

@@ -145,7 +145,8 @@ class AsyncCloudTransport:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
-        self._client = None  # lazy init so httpx isn't required at import time
+        # httpx.AsyncClient, but typed Any so httpx isn't required at import time
+        self._client: Any = None
 
     async def _get_client(self):
         if self._client is None:

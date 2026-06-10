@@ -61,9 +61,7 @@ class FixedWindowCounter:
                 # Drop entries from elapsed windows to bound memory. If a flood of
                 # distinct keys within the *current* window still leaves us over
                 # the cap, reset entirely — a safety valve to bound memory/CPU.
-                self._windows = {
-                    k: v for k, v in self._windows.items() if v[0] == window
-                }
+                self._windows = {k: v for k, v in self._windows.items() if v[0] == window}
                 if len(self._windows) > self._MAX_KEYS:
                     self._windows.clear()
             entry = self._windows.get(key)

@@ -169,9 +169,12 @@ async def request_id_middleware(request: Request, call_next):  # noqa: ANN001
 
 
 class InsertRequest(BaseModel):
-    x: float = Field(..., ge=-1e9, le=1e9, description="X spatial coordinate")
-    y: float = Field(..., ge=-1e9, le=1e9, description="Y spatial coordinate")
-    z: float = Field(..., ge=-1e9, le=1e9, description="Z spatial coordinate")
+    # Bounds mirror WorldState's normalised-coordinate contract ([0, 1]) so
+    # invalid input fails validation as 422 instead of surfacing as a 500 when
+    # the WorldState constructor rejects it.
+    x: float = Field(..., ge=0.0, le=1.0, description="X spatial coordinate (normalised)")
+    y: float = Field(..., ge=0.0, le=1.0, description="Y spatial coordinate (normalised)")
+    z: float = Field(..., ge=0.0, le=1.0, description="Z spatial coordinate (normalised)")
     timestamp_ms: int = Field(..., ge=0, description="Unix timestamp in milliseconds")
     vector: list[float] = Field(..., description=f"Embedding vector ({VECTOR_SIZE} dims)")
     scene_id: str = Field(..., min_length=1, max_length=256, description="Scene identifier")
@@ -348,16 +351,22 @@ def insert(
     worker thread rather than on the event loop.
     """
     namespace = key_row["namespace"]
-    state = WorldState(
-        x=req.x,
-        y=req.y,
-        z=req.z,
-        timestamp_ms=req.timestamp_ms,
-        vector=req.vector,
-        scene_id=req.scene_id,
-        scale_level=req.scale_level,
-        confidence=req.confidence,
-    )
+    try:
+        state = WorldState(
+            x=req.x,
+            y=req.y,
+            z=req.z,
+            timestamp_ms=req.timestamp_ms,
+            vector=req.vector,
+            scene_id=req.scene_id,
+            scale_level=req.scale_level,
+            confidence=req.confidence,
+        )
+    except ValueError as exc:
+        # WorldState enforces invariants Pydantic doesn't fully mirror (e.g.
+        # scale_level ∈ {patch, frame, sequence}) — report as a validation
+        # error, not a 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     state_id = _get_client(namespace).insert(state)
     return InsertResponse(id=state_id)
 

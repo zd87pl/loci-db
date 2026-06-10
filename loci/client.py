@@ -177,8 +177,6 @@ class LociClient:
         except UnexpectedResponse as exc:
             if exc.status_code != 404:
                 raise
-        except Exception:
-            raise
 
         if not exists:
             self._qdrant.create_collection(

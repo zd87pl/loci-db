@@ -1,25 +1,23 @@
 name: Cloud API CI/CD
 
+# The cloud API imports the whole loci/ package transitively (spatial/,
+# temporal/, retrieval/, schema, payload_filters), and the Fly image vendors
+# loci/ at build time — so any library change must re-test AND re-deploy,
+# not just changes to the five files the old filter listed.
 on:
   push:
     branches:
       - main
     paths:
       - "cloud/**"
-      - "loci/client.py"
-      - "loci/async_client.py"
-      - "loci/cloud_transport.py"
-      - "loci/cli.py"
-      - "loci/temporal/sharding.py"
+      - "loci/**"
+      - "pyproject.toml"
       - ".github/workflows/cloud-api.yml"
   pull_request:
     paths:
       - "cloud/**"
-      - "loci/client.py"
-      - "loci/async_client.py"
-      - "loci/cloud_transport.py"
-      - "loci/cli.py"
-      - "loci/temporal/sharding.py"
+      - "loci/**"
+      - "pyproject.toml"
       - ".github/workflows/cloud-api.yml"
 
 jobs:
@@ -64,7 +62,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
+        # SHA-pinned (was @master): this job holds the prod deploy token, so a
+        # mutable ref would mean trust-on-every-run of a third-party repo.
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master 2026-04-08
 
       - name: Deploy to Fly.io
         env:

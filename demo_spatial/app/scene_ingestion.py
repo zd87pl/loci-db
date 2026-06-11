@@ -145,7 +145,9 @@ class SceneIngestion:
             self._model.set_classes(self._classes)
             logger.info("YOLO-World classes updated: %d classes", len(self._classes))
 
-    def _run_yolo(self, image_bytes: bytes, conf_threshold: float = _YOLO_CONF_THRESHOLD) -> list[Detection]:
+    def _run_yolo(
+        self, image_bytes: bytes, conf_threshold: float = _YOLO_CONF_THRESHOLD
+    ) -> list[Detection]:
         """Run YOLO inference on raw image bytes. Returns list of detections."""
         if self._model is None:
             return []

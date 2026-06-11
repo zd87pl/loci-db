@@ -225,9 +225,7 @@ def test_list_keys_rejects_bad_tenant_id(admin_client):
 
 
 def test_revoke_key_requires_admin(non_admin_client):
-    resp = non_admin_client.delete(
-        "/admin/keys/22222222-2222-2222-2222-222222222222"
-    )
+    resp = non_admin_client.delete("/admin/keys/22222222-2222-2222-2222-222222222222")
     assert resp.status_code == 403
 
 

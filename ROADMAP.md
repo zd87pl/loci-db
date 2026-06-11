@@ -38,7 +38,7 @@
 ## v1.0 — Production Ready
 
 - [ ] gRPC transport option
-- [ ] Authentication and multi-tenancy
+- [x] Authentication and multi-tenancy (cloud API: API keys, per-tenant namespaces, rate limits)
 - [ ] Observability (OpenTelemetry traces, Prometheus metrics)
 - [ ] Helm chart for Kubernetes deployment
-- [ ] Published to PyPI
+- [x] Published to PyPI (as `loci-stdb`)

@@ -26,6 +26,26 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short
 
+  # The cloud API imports the whole loci/ package, so its suite must run on
+  # every change — not only when cloud/ paths change (see cloud-api.yml).
+  cloud-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install -r cloud/api/requirements.txt
+
+      - name: Run cloud API tests
+        run: pytest cloud/tests/ -v --tb=short
+
   typecheck:
     runs-on: ubuntu-latest
     steps:
@@ -58,10 +78,11 @@ jobs:
         run: pip install ruff
 
       - name: Check formatting
-        run: ruff format --check loci/ tests/
+        # TODO: extend to demos/research/benchmarks after a one-time reformat pass
+        run: ruff format --check loci/ tests/ cloud/
 
       - name: Lint
-        run: ruff check loci/ tests/
+        run: ruff check loci/ tests/ cloud/ research/ benchmarks/ demo/ demo_spatial/ examples/ server.py
 
   security:
     runs-on: ubuntu-latest
@@ -77,7 +98,7 @@ jobs:
         run: pip install bandit[toml] pip-audit
 
       - name: Run bandit (static security analysis)
-        run: bandit -r loci/ server.py -ll -ii
+        run: bandit -r loci/ cloud/api/ server.py -ll -ii
 
       - name: Audit dependencies for known CVEs
         run: pip-audit --requirement <(pip freeze) --skip-editable

@@ -94,7 +94,9 @@ def test_insert_happy_path(client):
     resp = client.post(
         "/insert",
         json={
-            "x": 0.5, "y": 0.5, "z": 0.5,
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
             "timestamp_ms": 1000,
             "vector": VEC,
             "scene_id": "test-scene",
@@ -110,7 +112,9 @@ def test_insert_wrong_vector_dim(client):
     resp = client.post(
         "/insert",
         json={
-            "x": 0.5, "y": 0.5, "z": 0.5,
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
             "timestamp_ms": 1000,
             "vector": bad_vec,
             "scene_id": "test-scene",
@@ -126,7 +130,9 @@ def test_insert_negative_timestamp_rejected(client):
     resp = client.post(
         "/insert",
         json={
-            "x": 0.0, "y": 0.0, "z": 0.0,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
             "timestamp_ms": -1,
             "vector": VEC,
             "scene_id": "s",
@@ -140,7 +146,9 @@ def test_insert_empty_scene_id_rejected(client):
     resp = client.post(
         "/insert",
         json={
-            "x": 0.0, "y": 0.0, "z": 0.0,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
             "timestamp_ms": 0,
             "vector": VEC,
             "scene_id": "",
@@ -154,7 +162,9 @@ def test_insert_confidence_out_of_range(client):
     resp = client.post(
         "/insert",
         json={
-            "x": 0.0, "y": 0.0, "z": 0.0,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
             "timestamp_ms": 0,
             "vector": VEC,
             "scene_id": "s",
@@ -305,10 +315,10 @@ def test_fixed_window_counter_semantics():
     from auth import FixedWindowCounter
 
     c = FixedWindowCounter()
-    assert c.hit("k", 2) is True   # 1
+    assert c.hit("k", 2) is True  # 1
     assert c.over("k", 2) is False
-    assert c.hit("k", 2) is True   # 2
-    assert c.over("k", 2) is True   # at limit
+    assert c.hit("k", 2) is True  # 2
+    assert c.over("k", 2) is True  # at limit
     assert c.hit("k", 2) is False  # 3 — over
     # A non-positive limit means unlimited.
     assert c.hit("unlimited", 0) is True
@@ -327,3 +337,38 @@ def test_request_id_generated_when_absent(client):
     resp = client.get("/health")
     assert "x-request-id" in resp.headers
     assert len(resp.headers["x-request-id"]) == 32  # uuid4().hex
+
+
+def test_insert_out_of_range_coordinate_rejected_as_422(client):
+    """Coordinates outside WorldState's [0,1] contract must 422, not 500."""
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 5.0,
+            "y": 0.0,
+            "z": 0.0,
+            "timestamp_ms": 0,
+            "vector": VEC,
+            "scene_id": "s",
+        },
+        headers={"Authorization": f"Bearer loci_{'a' * 64}"},
+    )
+    assert resp.status_code == 422
+
+
+def test_insert_invalid_scale_level_rejected_as_422(client):
+    """scale_level outside {patch, frame, sequence} must 422, not 500."""
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 0,
+            "vector": VEC,
+            "scene_id": "s",
+            "scale_level": "galaxy",
+        },
+        headers={"Authorization": f"Bearer loci_{'a' * 64}"},
+    )
+    assert resp.status_code == 422

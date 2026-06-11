@@ -1,8 +1,12 @@
+# Ports bind to 127.0.0.1 on purpose: neither the LOCI API nor Qdrant has any
+# authentication in this stack, so binding 0.0.0.0 would let any LAN peer read,
+# write, or wipe the database (Qdrant's admin API included). Change the bind
+# address only behind a firewall or after putting auth in front.
 services:
   loci:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       QDRANT_URL: http://qdrant:6333
       LOCI_VECTOR_SIZE: "512"
@@ -15,9 +19,11 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
+    # The loci service reaches Qdrant over the compose network; this host
+    # mapping exists only so local tools can inspect Qdrant at localhost:6333.
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
     volumes:
       - qdrant-data:/qdrant/storage
     networks:

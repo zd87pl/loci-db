@@ -8,19 +8,17 @@ resolution are shipped. This document prioritizes the remaining work.
 
 ## Priority 1: Deferred architecture refactors
 
-These are the two known structural debts (see "Known Limitations and Planned
+The remaining known structural debt (see "Known Limitations and Planned
 Refactors" in [ARCHITECTURE.md](ARCHITECTURE.md)):
 
-### 1a. Bounded epoch storage (replaces per-epoch collections)
-**Why:** One Qdrant collection per temporal epoch grows without bound —
-~17,000 collections per day of continuous ingest at the default 5s epoch —
-and makes shard routing, compaction, and health checks O(collections).
-
-- Migrate to payload-indexed epoch IDs within a bounded set of collections,
-  preserving epoch-pruned query semantics
-- Provide a migration path for existing per-epoch deployments
-- Interim mitigation: `ShardPolicy` (`warm_retention_ms`, `cold_action`)
-  with a `client.compact()` method that archives or deletes cold epochs
+### 1a. Bounded epoch storage — DONE
+Shipped: each tenant/store now uses exactly two collections
+(`{prefix}loci_data` for raw states, `{prefix}loci_summary` for consolidated
+summaries) with payload-indexed timestamps and Hilbert buckets. Epochs are
+purely logical (consolidation granularity + Hilbert t-normalisation), time
+selectivity comes from the indexed `timestamp_ms` range filter, and every
+operation is O(1) in collection count. Existing per-epoch deployments migrate
+with `loci migrate-layout` (dry-run, verified copy, optional `--delete-old`).
 
 ### 1b. Shared client core (sync/async/local parity)
 **Why:** `LociClient`, `AsyncLociClient`, and `LocalLociClient` duplicate
@@ -118,7 +116,7 @@ unregistered name would be a dependency-confusion vector. Either:
 | Step | Item | Effort | Impact |
 |------|------|--------|--------|
 | 1 | 2a — loci-core distribution decision | Small | High (unblocks native path) |
-| 2 | 1a — Bounded epoch storage | Large | High (operations) |
+| 2 | 1a — Bounded epoch storage | Done | Shipped (two-collection layout + `loci migrate-layout`) |
 | 3 | 1b — Shared client core | Large | High (correctness/parity) |
 | 4 | 5b — Error handling audit | Small | Medium (correctness) |
 | 5 | 3a — Result caching | Medium | Medium (performance) |

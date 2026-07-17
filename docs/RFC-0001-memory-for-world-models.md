@@ -119,12 +119,14 @@ parity-tested Hilbert + temporal math. Grow it into an embedded engine:
 ## 3. Pragmatic engineering (usable)
 
 ### P1. Storage refactor: bounded collections *(prerequisite for production)*
-Replace one-collection-per-5s-epoch with payload-indexed epochs in a bounded
-collection set (or much coarser epochs). Already documented in ARCHITECTURE.md
-"Known Limitations"; mitigations (epoch-set intersection, retention, discovery
-refresh) landed, but the O(collections) cost model gates real deployments.
-**Effort:** ~2–3 wk + migration tooling. **Metric:** 30 days of continuous writes
-with flat p50 query latency and bounded collection count.
+**Landed in this change**: exactly two collections per tenant
+(`{prefix}loci_data` + `{prefix}loci_summary`) with payload-indexed
+timestamps and Hilbert buckets; epochs are purely logical and every operation
+is O(1) in collection count. The old one-collection-per-5s-epoch layout and
+its O(collections) cost model are gone; existing deployments migrate with the
+`loci migrate-layout` CLI (dry-run, verified copy, optional `--delete-old`).
+**Metric:** 30 days of continuous writes with flat p50 query latency and
+bounded collection count.
 
 ### P2. MCP server — spatial memory for agents
 **Landed as v1 in this change** (`loci/mcp/`, `loci-mcp` entry point,
@@ -143,9 +145,10 @@ clone to running demo in under 20 minutes, measured with a stopwatch, by someone
 didn't build it.
 
 ### P4. QueryStats observability
-Queries can silently degrade (per-shard failures log at WARNING but callers can't
-see them). Return an optional stats object: shards hit/failed, buckets enumerated,
-filter mode chosen (feeds R4), overfetch efficiency, consolidation hits.
+Queries can silently degrade (search failures log at WARNING but callers can't
+see them). Return an optional stats object: data/summary searches hit/failed,
+buckets enumerated, filter mode chosen (feeds R4), overfetch efficiency,
+consolidation hits.
 **Effort:** ~1 wk. **Metric:** a partial-outage query is distinguishable from an
 empty result at the API level.
 
@@ -172,7 +175,7 @@ software agents.
 
 | Horizon | Items | Outcome |
 |---|---|---|
-| **Now** (≤1 month) | P1 storage refactor, P5 releases, P4 QueryStats, R1 Qdrant wiring, P3 demo path | Adoptable: a team can run LOCI in production without tripping on it |
+| **Now** (≤1 month) | P1 storage refactor (landed), P5 releases, P4 QueryStats, R1 Qdrant wiring (landed), P3 demo path | Adoptable: a team can run LOCI in production without tripping on it |
 | **Quarter** | R5 stage (a)+(b), R2 conformal novelty, R3 benchmark v1 | Defensible: measurable claims nobody else can make |
 | **Two quarters** | R5 quantization, R4 planner, R1 multi-tier, multi-agent shared memory | Category-defining: "memory for world models" has a reference implementation |
 

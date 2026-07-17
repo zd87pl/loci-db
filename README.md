@@ -40,12 +40,17 @@ dense regions can be promoted to finer Hilbert resolutions at query time.
     └──────────────────┘     └──────────────────┘
 ```
 
-### 2. Temporal Sharding
+### 2. Logical Epochs over a Bounded Two-Collection Layout
 
-Automatic routing of vectors to **time-partitioned Qdrant collections**
-(`loci_{epoch_id}`). Configurable epoch size. Queries fan out only to
-epochs that overlap the requested time window — with the async client,
-all shards are searched **concurrently** via `asyncio.gather`.
+All raw states live in one **`loci_data`** collection and consolidated
+summaries in one **`loci_summary`** collection — the collection count stays
+fixed no matter how long you ingest. Epochs (configurable width, default 5s)
+are a purely **logical** concept: the unit of consolidation granularity and
+of Hilbert t-normalisation. Time-windowed queries apply an **indexed
+`timestamp_ms` range filter**, so temporal selectivity comes from the payload
+index rather than collection routing. Each query issues one data search plus
+one summary search — the async client runs them **concurrently** via
+`asyncio.gather` and batches insert operations.
 
 ### 3. Predict-then-Retrieve with Novelty Detection
 
@@ -176,7 +181,7 @@ state = WorldState(
 )
 state_id = client.insert(state)
 
-# Batch insert (truly batched — one Qdrant call per epoch)
+# Batch insert (truly batched — one bulk Qdrant upsert)
 ids = client.insert_batch(states)
 
 # Spatiotemporal query with overlap factor
@@ -205,7 +210,11 @@ trajectory = client.get_trajectory(state_id, steps_back=20, steps_forward=20)
 context = client.get_causal_context(state_id, window_ms=5000)
 ```
 
-### Async API (parallel shard fan-out)
+Upgrading a deployment created before the bounded two-collection layout?
+Run `loci migrate-layout --qdrant-url http://localhost:6333` once (see
+[CHANGELOG.md](CHANGELOG.md) — this was a breaking storage-layout change).
+
+### Async API (concurrent data + summary searches)
 
 ```python
 from loci import AsyncLociClient
@@ -275,9 +284,9 @@ tens to hundreds of milliseconds at these dataset sizes.
 | 1,000 | Spatial bounding box | 580ms | 636ms |
 
 Adding a temporal window to a spatial query roughly halves its cost through
-epoch shard pruning (40.0ms vs 97.5ms p50 at N=100), but the exact spatial
-post-filter — the authoritative geometric check — dominates spatial query time
-in the pure-Python in-memory backend. Accelerating that path is the motivation
+indexed time-range filtering (40.0ms vs 97.5ms p50 at N=100), but the exact
+spatial post-filter — the authoritative geometric check — dominates spatial
+query time in the pure-Python in-memory backend. Accelerating that path is the motivation
 for the optional native Rust primitives in `loci-core/`.
 
 Insert throughput: **~60,000-67,000 states/s** (in-memory backend, 128-dim vectors).
@@ -321,13 +330,15 @@ within this 3D bounding box in the last 5 seconds").
 ## Why not TANNS?
 
 TANNS (ICDE 2025) builds a single graph managing all timestamps internally
-with a Timestamp Graph structure. LOCI uses collection-level sharding with
-storage tiering.
+with a Timestamp Graph structure. LOCI uses payload-indexed time filtering
+over a bounded raw + summary collection pair, with episodic-to-semantic
+consolidation as data ages.
 
 **Use TANNS** for single-session temporal ANN where all data fits in one graph.
 
-**Use LOCI** when you need cross-session persistence, multi-agent memory sharing,
-hot/warm/cold storage tiering, or predict-then-retrieve.
+**Use LOCI** when you need cross-session persistence, multi-agent memory
+sharing, bounded-storage memory aging (raw states consolidate into summaries),
+or predict-then-retrieve.
 
 ## Architecture
 
@@ -343,13 +354,15 @@ hot/warm/cold storage tiering, or predict-then-retrieve.
 ├───────────────────────────────────────────────┤
 │           Indexing & Routing Layer            │
 │  spatial/  — multi-res Hilbert + overlap      │
-│  temporal/ — epoch sharding + decay scoring   │
+│  temporal/ — logical epochs: consolidation,   │
+│              retention, decay scoring         │
 ├───────────────────────────────────────────────┤
 │              Adapters Layer                   │
 │  V-JEPA 2 · DreamerV3 · Generic numpy/torch  │
 ├───────────────────────────────────────────────┤
 │              Storage Layer                    │
-│  Qdrant (one collection per temporal epoch)   │
+│  Qdrant — two bounded collections per tenant: │
+│    loci_data (raw) + loci_summary (aged)      │
 │  MemoryStore (in-process, no infra needed)    │
 └───────────────────────────────────────────────┘
 ```

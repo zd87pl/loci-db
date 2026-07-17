@@ -35,7 +35,7 @@ MCP client (see the config snippets below), not by hand.
 | `LOCI_CLOUD_URL` | — | LOCI Cloud base URL. **Required** in `cloud` mode. |
 | `LOCI_API_KEY` | — | API key. **Required** in `cloud` mode; also passed to Qdrant in `qdrant` mode if set. |
 | `LOCI_VECTOR_SIZE` | `512` | Embedding dimensionality. Every `vector` argument must have exactly this many components. |
-| `LOCI_EPOCH_SIZE_MS` | `5000` | Temporal shard width in milliseconds. |
+| `LOCI_EPOCH_SIZE_MS` | `5000` | Logical epoch width in milliseconds (consolidation granularity + Hilbert t-normalisation). |
 | `LOCI_DISTANCE` | `cosine` | Distance metric: `cosine`, `dot`, or `euclidean`. |
 | `LOCI_SCENE_ID` | `default` | Scene used when a tool call omits `scene_id`. |
 
@@ -158,13 +158,15 @@ Not available in `cloud` mode.
 ### `memory_stats()`
 
 Describe the memory: `{mode, vector_size, distance, epoch_size_ms,
-default_scene_id, total_states, epochs_known}`. `total_states` is exact in
-`local` mode and `"unknown"` where counting is not cheap.
+default_scene_id, total_states, oldest_timestamp_ms, newest_timestamp_ms}`.
+`total_states` is exact in `local` mode and `"unknown"` where counting is not
+cheap. The timestamp bounds span raw and consolidated memories and are `null`
+when the memory is empty or the backend cannot report them cheaply.
 
 ### No `forget` tool
 
 The LOCI client API has no safe targeted-deletion primitive (retention
-purging is an internal, whole-epoch, policy-driven mechanism), so the server
+purging is an internal, cutoff-based, policy-driven mechanism), so the server
 ships no `forget` tool rather than a misleading stub.
 
 ## Agent recipes

@@ -14,30 +14,57 @@
 ├───────────────────────────────────────────────┤
 │           Indexing & Routing Layer            │
 │  spatial/  — 4D Hilbert encoding + bucketing  │
-│  temporal/ — epoch sharding + decay scoring   │
+│  temporal/ — logical epochs: consolidation,   │
+│              retention, decay scoring         │
 ├───────────────────────────────────────────────┤
 │              Storage Layer                    │
-│  Qdrant (one collection per temporal epoch)   │
+│  Qdrant — two bounded collections per tenant: │
+│    loci_data (raw) + loci_summary (aged)      │
 │  MemoryStore (in-process, no infra needed)    │
 └───────────────────────────────────────────────┘
 ```
 
 ### Layer 1: Storage (Qdrant)
 
-Each temporal epoch maps to a separate Qdrant collection (`loci_{epoch_id}`).
-Collections are created lazily on first insert.  Payload indices:
+Each tenant/store uses exactly **two** Qdrant collections, created lazily on
+first use and constant for the lifetime of the deployment:
 
-| Field          | Type      | Purpose                        |
-|----------------|-----------|--------------------------------|
-| `hilbert_r4/r8/r12` | INTEGER | Multi-resolution spatial bucket pre-filter |
-| `timestamp_ms` | INTEGER   | Temporal range filter          |
-| `scale_level`  | KEYWORD   | Multi-scale funnel search      |
-| `scene_id`     | KEYWORD   | Causal chains and funnel narrowing |
+- **`{prefix}loci_data`** — every raw `WorldState`. Payload indices:
+
+  | Field          | Type      | Purpose                        |
+  |----------------|-----------|--------------------------------|
+  | `hilbert_r4/r8/r12` | INTEGER | Multi-resolution spatial bucket pre-filter |
+  | `timestamp_ms` | INTEGER   | Indexed temporal Range filter  |
+  | `scale_level`  | KEYWORD   | Multi-scale funnel search      |
+  | `scene_id`     | KEYWORD   | Causal chains and funnel narrowing |
+
+- **`{prefix}loci_summary`** — consolidated summary states produced by
+  episodic-to-semantic aging. Same indices **except** the Hilbert fields:
+  summaries carry no Hilbert payload, and spatial queries reach them through
+  the exact geometric post-filter on `x`/`y`/`z`.
+
+**Epochs are purely logical.** An epoch (`timestamp_ms // epoch_size_ms`) is
+the unit of consolidation granularity and of Hilbert t-normalisation — it is
+never a collection. Time selectivity comes from a Range condition on the
+indexed `timestamp_ms` field, so every operation (insert, query, retention,
+consolidation) touches at most two collections regardless of how long the
+deployment has been ingesting: **O(1) in collection count**.
+
+- **Retention** is a filter-based delete: both `RetentionPolicy` knobs
+  (`max_epochs`, `max_age_ms`) reduce to a single epoch-aligned cutoff
+  timestamp, and raw points older than the cutoff are deleted from
+  `loci_data`. Summaries are never purged.
+- **Consolidation** folds raw epochs that leave the raw window into
+  `loci_summary`: the coarse group's existing summaries are selected by
+  timestamp range, re-consolidated together with the stale raw states
+  (lossless bookkeeping of `source_count` / `t_min_ms` / `t_max_ms`), and
+  the epoch's raw points are deleted.
 
 Distance metric is configurable: `cosine` (default), `dot`, or `euclidean`.
 
 `LocalLociClient` swaps Qdrant for **`MemoryStore`**, an in-process backend
-with the same epoch/Hilbert layout — no external infrastructure required.
+with the same two-collection/Hilbert layout — no external infrastructure
+required.
 
 ### Layer 2: Indexing & Routing
 
@@ -56,9 +83,19 @@ Quantisation in `encode()` uses `round()`. Query-time expansion uses
 `floor()`/`ceil()` at the boundaries to guarantee no misses at grid edges, and
 an exact payload post-filter is the final source of truth for geometric bounds.
 
-**Temporal** — `timestamp_ms // epoch_size_ms` determines the epoch.  Queries
-compute which epochs overlap the requested time window and fan out searches.
-The async client searches all matching shards **concurrently** via `asyncio.gather`.
+**Temporal** — `timestamp_ms // epoch_size_ms` determines the logical epoch,
+which fixes how `t` is normalised into `[0, 1]` for Hilbert encoding. A query
+time window becomes an indexed `timestamp_ms` Range condition; every query
+issues **one search on `loci_data` plus one on `loci_summary`** and merges the
+results (the async client runs the two searches **concurrently** via
+`asyncio.gather`).
+
+Hilbert cover rules: when the time window falls inside a **single epoch**, the
+bucket cover uses that epoch's normalised t-bounds — full 4D selectivity. When
+the window spans **multiple epochs**, or there is no window, the cover is
+computed over the full t range `[0, 1]` — spatial-only selectivity — because
+Hilbert t-encoding is epoch-relative, and the indexed timestamp Range carries
+the t-dimension instead.
 
 ### Layer 3: Retrieval
 
@@ -69,8 +106,9 @@ when they are storing scheduled or future-dated states.
 
 **funnel search** — Cascades through scale levels (sequence → frame → patch)
 to progressively refine results when multi-scale embeddings are stored. Matching
-epochs and scene IDs are carried forward between stages so finer passes do not
-re-scan unrelated shards. Always returns results at the finest available granularity.
+epochs and scene IDs are carried forward between stages, narrowing the timestamp
+Range and scene filter so finer passes do not re-scan unrelated data. Always
+returns results at the finest available granularity.
 
 **temporal decay** — Re-ranks results using exponential decay:
 `score = similarity × exp(-λ × age_ms)`.  λ defaults to
@@ -82,9 +120,10 @@ setting the per-millisecond `decay_lambda` directly.
 
 Three client implementations share identical APIs:
 
-- **`LociClient`** — Synchronous.  Sequential shard iteration.
-- **`AsyncLociClient`** — Asynchronous.  Parallel shard fan-out via
-  `asyncio.gather`.  Async-safe collection creation with per-collection locks.
+- **`LociClient`** — Synchronous.  Sequential data + summary searches.
+- **`AsyncLociClient`** — Asynchronous.  Runs the data and summary searches
+  concurrently via `asyncio.gather`; async-safe collection creation with
+  per-collection locks.
 - **`LocalLociClient`** — Synchronous, backed by the in-process `MemoryStore`.
   Zero infrastructure: no Qdrant server needed.
 
@@ -98,21 +137,26 @@ Both support:
 
 ```
 insert(WorldState)
-  → compute epoch_id → ensure collection exists
+  → ensure loci_data exists → compute logical epoch
   → normalise t within epoch → compute hilbert_id
   → find causal predecessor in same scene → link prev/next
-  → upsert PointStruct to qdrant
+  → upsert PointStruct to loci_data
+  → maintenance pass: consolidation, then retention
 
 insert_batch(states)
   → sort by (scene_id, timestamp_ms) → build causal chains
-  → group by epoch → one upsert per collection
+  → one bulk upsert to loci_data
   → patch next_state_id links
+  → maintenance pass: consolidation, then retention
 
 query(vector, bounds, time_window)
-  → determine epoch range → build epoch-local 4D bounds
-  → choose Hilbert resolution → expand bounds to bucket IDs
-  → fan-out search across collections with MatchAny + Range filters
-  → exact post-filter → apply temporal decay → re-rank
+  → time window → indexed timestamp_ms Range condition
+  → single-epoch window: epoch-local 4D Hilbert cover
+    multi-epoch or no window: spatial-only cover (t carried by the Range)
+  → search loci_data (Range + Hilbert MatchAny)
+    + search loci_summary (Range only, no Hilbert payload)
+    (async client runs both searches concurrently)
+  → merge → exact post-filter → apply temporal decay → re-rank
   → return WorldStates with vectors
 
 predict_and_retrieve(context_vector, predictor_fn, horizon)
@@ -132,18 +176,10 @@ causal chain forward and backward from any anchor state.
 
 ## Known Limitations and Planned Refactors
 
-Two structural issues are known and deliberately deferred; both are tracked
-in [ROADMAP.md](ROADMAP.md):
+One structural issue is known and deliberately deferred; it is tracked in
+[ROADMAP.md](ROADMAP.md) alongside the `loci-core` distribution decision:
 
-1. **Unbounded collection growth.** One Qdrant collection per temporal epoch
-   means collection count grows linearly with wall-clock time — at the default
-   5-second epoch, roughly 17,000 collections per day of continuous ingest.
-   Operations that enumerate collections (shard routing, compaction, health
-   checks) are O(collections). Planned fix: migrate to payload-indexed epoch
-   IDs within a bounded set of collections, keeping the same epoch-pruned
-   query semantics.
-
-2. **Hand-maintained client parity.** `LociClient`, `AsyncLociClient`, and
+1. **Hand-maintained client parity.** `LociClient`, `AsyncLociClient`, and
    `LocalLociClient` implement the same API surface with roughly 77% duplicated
    logic, so every behavioral fix must be applied three times and parity drifts.
    Planned fix: extract a shared core (query planning, filter construction,

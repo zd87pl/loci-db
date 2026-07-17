@@ -18,15 +18,17 @@ _TRANSIENT_CODES = {502, 503, 504, 429}
 # Optional dependencies: qdrant-client wraps httpx transport failures in
 # ResponseHandlingException (which has no status_code and a class name that
 # matches none of the keyword heuristics), so both must be handled explicitly.
+_QdrantWrapped: type[Exception] | None
 try:  # pragma: no cover - import guard
     from qdrant_client.http.exceptions import ResponseHandlingException as _QdrantWrapped
 except ImportError:  # pragma: no cover
     _QdrantWrapped = None
 
+_HttpxTransportError: type[Exception] | None
 try:  # pragma: no cover - import guard
-    import httpx as _httpx
+    from httpx import TransportError as _HttpxTransportError
 except ImportError:  # pragma: no cover
-    _httpx = None
+    _HttpxTransportError = None
 
 
 def _is_transient(exc: Exception) -> bool:
@@ -38,7 +40,7 @@ def _is_transient(exc: Exception) -> bool:
         if isinstance(source, Exception):
             return _is_transient(source)
     # httpx transport failures (ConnectError, ReadTimeout, ...) are transient.
-    if _httpx is not None and isinstance(exc, _httpx.TransportError):
+    if _HttpxTransportError is not None and isinstance(exc, _HttpxTransportError):
         return True
     # qdrant_client raises UnexpectedResponse with a status_code attribute
     status = getattr(exc, "status_code", None)

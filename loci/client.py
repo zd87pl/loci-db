@@ -60,7 +60,7 @@ def _is_already_exists_error(exc: Exception) -> bool:
 def _point_timestamp(point: Any) -> int:
     """Timestamp of a scrolled Qdrant point (0 when payload is missing)."""
     payload = getattr(point, "payload", None) or {}
-    return payload.get("timestamp_ms", 0)
+    return int(payload.get("timestamp_ms", 0))
 
 
 _EXACT_FILTER_OVERFETCH = 3

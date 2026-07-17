@@ -26,7 +26,11 @@ from qdrant_client.models import (
 
 from loci.cloud_transport import AsyncCloudTransport, CloudModeUnsupportedError
 from loci.payload_filters import extra_filter_to_conditions
-from loci.retrieval.predict import PredictRetrieveResult, rerank_prediction_candidates
+from loci.retrieval.predict import (
+    PredictRetrieveResult,
+    _validate_predicted_vector,
+    rerank_prediction_candidates,
+)
 from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.filtering import exact_payload_match
@@ -704,6 +708,7 @@ class AsyncLociClient:
         t_predictor = time.perf_counter()
         predicted_vector = predictor_fn(context_vector)
         predictor_call_ms = (time.perf_counter() - t_predictor) * 1000
+        _validate_predicted_vector(predicted_vector, len(context_vector))
         if current_timestamp_ms is not None:
             now_ms = current_timestamp_ms
         else:
@@ -739,15 +744,19 @@ class AsyncLociClient:
                     alpha=alpha,
                     limit=limit,
                     use_temporal_proximity=search_time_window_ms is not None,
+                    predicted_vector=predicted_vector,
+                    time_window_ms=search_time_window_ms,
                 )
             else:
                 results = []
                 best_score = 0.0
 
             if calibrator is not None:
-                calibrator.observe(best_score)
+                # Score against the window *before* observing so the current
+                # sample does not contaminate its own baseline.
                 prediction_novelty = calibrator.calibrated_novelty(best_score)
                 novelty_samples = len(calibrator)
+                calibrator.observe(best_score)
             else:
                 prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
                 novelty_samples = 0
@@ -1087,7 +1096,7 @@ def _is_already_exists_error(exc: Exception) -> bool:
 def _point_timestamp(point: Any) -> int:
     """Timestamp of a scrolled Qdrant point (0 when payload is missing)."""
     payload = getattr(point, "payload", None) or {}
-    return payload.get("timestamp_ms", 0)
+    return int(payload.get("timestamp_ms", 0))
 
 
 def _normalise_time(timestamp_ms: int, ep: int, epoch_size_ms: int) -> float:

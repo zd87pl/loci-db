@@ -239,6 +239,20 @@ adapter = GenericAdapter(expected_dim=512)
 ws = adapter.from_numpy(embedding, position, ts, scene_id)
 ```
 
+### MCP server (spatial memory for agents)
+
+LOCI ships an MCP server that gives Claude Desktop, Claude Code, or any MCP
+client a spatial memory: `remember`, `recall`, `novelty`, `trajectory`, and
+`memory_stats` tools backed by local, Qdrant, or cloud mode.
+
+```bash
+pip install "loci-stdb[mcp]"
+loci-mcp  # stdio; configure via LOCI_MCP_MODE, LOCI_VECTOR_SIZE, ...
+```
+
+See [docs/MCP_SERVER.md](docs/MCP_SERVER.md) for the env table, client
+config snippets, tool reference, and agent recipes.
+
 ## Performance
 
 All numbers below come straight from `benchmarks/results/retrieval_latest.json`

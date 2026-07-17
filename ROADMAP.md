@@ -30,8 +30,20 @@
 - [ ] Benchmarks against Milvus and Weaviate spatial filters
 - [ ] Batch predict-then-retrieve (multiple context vectors)
 
-## v0.4 — Multi-Scale
+## v0.4 — Multi-Scale & Memory Semantics
 
+Direction set by [RFC-0001](docs/RFC-0001-memory-for-world-models.md)
+("the memory system for world models"): invest above the filter layer.
+
+- [x] Memory consolidation v1 — episodic→semantic aging on `LocalLociClient`
+      (`ConsolidationPolicy`; RFC-0001 R1)
+- [x] MCP server — spatial memory for agents (`loci-stdb[mcp]`, `loci-mcp`;
+      RFC-0001 P2)
+- [ ] Consolidation for the Qdrant clients + multi-tier fidelity curves
+- [ ] Conformal novelty — false-alarm-rate guarantees (RFC-0001 R2)
+- [ ] World-model memory benchmark suite (RFC-0001 R3)
+- [ ] Adaptive query planner: Hilbert range-runs vs buckets vs naive filters
+      chosen per query (RFC-0001 R4)
 - [ ] Cross-scale causal linking
 - [ ] Scale-aware temporal decay
 

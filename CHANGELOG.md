@@ -8,6 +8,20 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Memory consolidation** (RFC-0001 R1, v1 for `LocalLociClient`): a
+  `ConsolidationPolicy` that summarizes epochs older than a raw window into
+  per-scene centroid states stored in coarse summary collections instead of
+  deleting them. Queries include summaries transparently (marked with
+  `metadata["consolidated"]`); trajectories and causal context ignore them;
+  storage stays bounded while old data remains findable.
+- **MCP server** (RFC-0001 P2): `pip install "loci-stdb[mcp]"` + `loci-mcp`
+  exposes LOCI as a Model Context Protocol server — `remember` / `recall` /
+  `novelty` / `trajectory` / `memory_stats` over local, Qdrant, or cloud
+  backends. See `docs/MCP_SERVER.md`.
+- **RFC-0001** (`docs/RFC-0001-memory-for-world-models.md`): strategic
+  direction and R&D roadmap to v1.0.
+
 ### Correctness fixes
 - Temporal decay now defaults to a **one-hour half-life** (`DEFAULT_DECAY_LAMBDA`, derived via `lambda_from_half_life()`); the decay exponent is clamped so very old results degrade to similarity-order instead of collapsing to a 0.0 tie. Derive custom rates from a half-life rather than setting the per-millisecond `decay_lambda` directly.
 - `predict_and_retrieve` novelty is now computed on an absolute scale: 0 = strong historical analog, 1 = no analog, independent of the rest of the result batch.

@@ -221,8 +221,8 @@ fn test_batch_prepare_consistency() {
     let xs = vec![0.5, 0.2, 0.8];
     let ys = vec![0.3, 0.7, 0.1];
     let zs = vec![0.8, 0.4, 0.6];
-    let timestamps = vec![7_500u64, 12_000, 25_000];
-    let epoch_size = 5_000u64;
+    let timestamps = vec![7_500i64, 12_000, 25_000];
+    let epoch_size = 5_000i64;
     let order = 8u32;
 
     for i in 0..xs.len() {
@@ -257,11 +257,20 @@ fn test_max_coordinates() {
 
 #[test]
 fn test_large_timestamp() {
-    let ts = 1_700_000_000_000u64; // ~2023
+    let ts = 1_700_000_000_000i64; // ~2023
     let epoch = temporal::compute_epoch(ts, 5_000);
     assert_eq!(epoch, 340_000_000);
     let name = temporal::collection_name(epoch);
     assert_eq!(name, "loci_340000000");
+}
+
+#[test]
+fn test_negative_timestamp_clamps_like_python_clients() {
+    // The Python clients clamp negative timestamps to 0 before epoch
+    // computation; the Rust backend must return identical results.
+    assert_eq!(temporal::compute_epoch(-42, 5_000), 0);
+    assert_eq!(temporal::epochs_for_window(-9_000, 4_999, 5_000), vec![0]);
+    assert_eq!(temporal::normalise_in_epoch(-42, 0, 5_000), 0.0);
 }
 
 #[test]

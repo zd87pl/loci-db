@@ -4,9 +4,11 @@ Encodes a normalised 4D coordinate at multiple Hilbert resolutions for
 efficient spatial pre-filtering in Qdrant.  Points near bucket boundaries
 are captured by the overlap_factor in query_buckets().
 
-When the ``loci_core`` Rust extension is available, the module-level
-:func:`encode` and :func:`decode` functions use the native implementation
-for ~14,000x speedup over pure Python.
+When the ``loci_core`` Rust extension is available, :meth:`HilbertIndex.encode`
+and the module-level :func:`encode` route through the native implementation
+(bit-for-bit identical to the pure-Python path, which remains as fallback).
+The per-call speedup is bounded by Python/Rust FFI overhead; the headline
+~14,000x figure applies to native batch encoding only.
 """
 
 from __future__ import annotations
@@ -23,7 +25,13 @@ try:
 
     _RUST_AVAILABLE = True
 except ImportError:
+    _rust = None  # type: ignore[assignment]
     _RUST_AVAILABLE = False
+
+# The Rust extension packs 4D Hilbert distances into a u64, so it only
+# supports orders where 4 * order <= 64.  Higher orders fall back to the
+# pure-Python big-int implementation.
+_RUST_MAX_ORDER_4D = 16
 
 
 def _make_curve(resolution_order: int) -> HilbertCurve:
@@ -33,6 +41,31 @@ def _make_curve(resolution_order: int) -> HilbertCurve:
 
 def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
+
+
+def _validate_finite(x: float, y: float, z: float, t: float) -> None:
+    """Reject NaN/inf coordinates with the same error type on both backends."""
+    for name, value in (("x", x), ("y", y), ("z", z), ("t", t)):
+        if not math.isfinite(value):
+            raise ValueError(f"coordinate '{name}' must be finite (got {value})")
+
+
+def _encode_point(curve: HilbertCurve, x: float, y: float, z: float, t: float, order: int) -> int:
+    """Encode one 4D point at *order*, using the Rust extension when possible.
+
+    The Rust and pure-Python paths are bit-for-bit identical (both use
+    round-half-to-even quantisation followed by Skilling's algorithm).
+    """
+    if _RUST_AVAILABLE and order <= _RUST_MAX_ORDER_4D:
+        return int(_rust.encode_hilbert_4d(x, y, z, t, order))
+    side = (1 << order) - 1
+    coords = [
+        _clamp(int(round(x * side)), 0, side),
+        _clamp(int(round(y * side)), 0, side),
+        _clamp(int(round(z * side)), 0, side),
+        _clamp(int(round(t * side)), 0, side),
+    ]
+    return int(curve.distance_from_point(coords))
 
 
 @dataclass(frozen=True)
@@ -78,16 +111,31 @@ class HilbertIndex:
     payload-level post-filtering and narrow point lookups.
     """
 
-    _LUT_MAX_SIDE = 16  # Precompute LUT for resolutions where 2^p <= this
+    _LUT_MAX_SIDE = 16  # Build LUT for resolutions where 2^p <= this
 
     def __init__(self, resolutions: list[int] | None = None) -> None:
         self.resolutions = resolutions or [4, 8, 12]
         self._curves: dict[int, HilbertCurve] = {r: _make_curve(r) for r in self.resolutions}
+        # LUTs are built lazily on first query_buckets() call — building the
+        # 16^4-entry table takes ~350ms, which should not be paid at client
+        # construction or insert time.
         self._luts: dict[int, np.ndarray] = {}
-        for r in self.resolutions:
-            side = 1 << r
-            if side <= self._LUT_MAX_SIDE:
-                self._luts[r] = self._build_lut(r)
+
+    def _lut_for(self, resolution: int) -> np.ndarray | None:
+        """Return the LUT for *resolution*, building it lazily on first use.
+
+        Returns None for resolutions that do not get a LUT (grid side
+        larger than ``_LUT_MAX_SIDE`` or not in the configured resolutions).
+        """
+        lut = self._luts.get(resolution)
+        if (
+            lut is None
+            and resolution in self.resolutions
+            and (1 << resolution) <= self._LUT_MAX_SIDE
+        ):
+            lut = self._build_lut(resolution)
+            self._luts[resolution] = lut
+        return lut
 
     def _build_lut(self, resolution: int) -> np.ndarray:
         """Precompute the full (x, y, z, t) → hilbert_distance LUT for *resolution*."""
@@ -110,21 +158,18 @@ class HilbertIndex:
     ) -> dict[str, int]:
         """Encode a point at all configured resolutions.
 
+        Uses the Rust ``loci_core`` extension when available (one native
+        call per configured resolution); the pure-Python fallback is
+        bit-for-bit identical.
+
         Returns:
             Dict with keys like ``hilbert_r4``, ``hilbert_r8``, etc.
         """
-        result: dict[str, int] = {}
-        for r in self.resolutions:
-            curve = self._curves[r]
-            side = (1 << r) - 1
-            coords = [
-                _clamp(int(round(x * side)), 0, side),
-                _clamp(int(round(y * side)), 0, side),
-                _clamp(int(round(z * side)), 0, side),
-                _clamp(int(round(t_normalized * side)), 0, side),
-            ]
-            result[f"hilbert_r{r}"] = int(curve.distance_from_point(coords))
-        return result
+        _validate_finite(x, y, z, t_normalized)
+        return {
+            f"hilbert_r{r}": _encode_point(self._curves[r], x, y, z, t_normalized, r)
+            for r in self.resolutions
+        }
 
     def query_buckets(
         self,
@@ -149,8 +194,9 @@ class HilbertIndex:
         res, curve, ranges = self._expanded_index_ranges(bounds, resolution, overlap_factor)
         (ix_lo, ix_hi), (iy_lo, iy_hi), (iz_lo, iz_hi), (it_lo, it_hi) = ranges
 
-        if res in self._luts:
-            sub = self._luts[res][
+        lut = self._lut_for(res)
+        if lut is not None:
+            sub = lut[
                 ix_lo : ix_hi + 1,
                 iy_lo : iy_hi + 1,
                 iz_lo : iz_hi + 1,
@@ -230,7 +276,6 @@ class HilbertIndex:
 
 _DEFAULT_ORDER = 4
 _DEFAULT_CURVE = _make_curve(_DEFAULT_ORDER)
-_DEFAULT_INDEX = HilbertIndex(resolutions=[_DEFAULT_ORDER])
 
 
 def encode(
@@ -246,21 +291,15 @@ def encode(
     All coordinates must be in [0, 1].  They are quantised to integer
     grid coordinates in ``[0, 2**resolution_order - 1]`` before encoding.
 
-    Uses the Rust ``loci_core`` extension when available (~14,000x faster).
+    Uses the Rust ``loci_core`` extension when available; the pure-Python
+    fallback produces bit-for-bit identical results.
     """
     order = resolution_order if resolution_order is not None else _DEFAULT_ORDER
-    if _RUST_AVAILABLE:
-        return int(_rust.encode_hilbert_4d(x, y, z, t_norm, order=order))
+    _validate_finite(x, y, z, t_norm)
+    if _RUST_AVAILABLE and order <= _RUST_MAX_ORDER_4D:
+        return int(_rust.encode_hilbert_4d(x, y, z, t_norm, order))
     curve = _DEFAULT_CURVE if order == _DEFAULT_ORDER else _make_curve(order)
-    side = (1 << order) - 1
-
-    coords = [
-        _clamp(int(round(x * side)), 0, side),
-        _clamp(int(round(y * side)), 0, side),
-        _clamp(int(round(z * side)), 0, side),
-        _clamp(int(round(t_norm * side)), 0, side),
-    ]
-    return int(curve.distance_from_point(coords))
+    return _encode_point(curve, x, y, z, t_norm, order)
 
 
 def decode(

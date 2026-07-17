@@ -30,7 +30,11 @@ fn loci_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hilbert::py_batch_encode_hilbert_3d, m)?)?;
     m.add_function(wrap_pyfunction!(hilbert::py_batch_encode_hilbert_4d, m)?)?;
     m.add_function(wrap_pyfunction!(
-        hilbert::py_spatial_bounds_to_hilbert_buckets,
+        hilbert::py_spatial_bounds_to_hilbert_buckets_3d,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        hilbert_experiments::py_spatial_bounds_to_hilbert_buckets_4d,
         m
     )?)?;
 

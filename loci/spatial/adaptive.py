@@ -3,9 +3,15 @@
 Standard Hilbert encoding uses a fixed resolution (e.g. p=4 → 16 bins/axis).
 This wastes precision in dense regions and filter cardinality in sparse ones.
 
-AdaptiveResolution tracks insertion density per Hilbert cell and recommends
-higher resolution for cells that exceed a density threshold.  This lets
-Loci self-tune its spatial indexing as data arrives — no manual knob-turning.
+AdaptiveResolution tracks insertion density per 3D spatial cell and
+recommends higher resolution for cells that exceed a density threshold.
+This lets Loci self-tune its spatial indexing as data arrives — no manual
+knob-turning.
+
+Density is deliberately keyed on the 3D spatial cell only (time is
+marginalised out): keying on the 4D cell would spread a spatially hot
+region across ~16 epoch-relative time bins, diluting hot-cell detection,
+and record-time keys would rarely match query-time probes.
 
 Design principles:
 - Zero-copy: operates on counters, never touches stored vectors
@@ -25,7 +31,7 @@ from __future__ import annotations
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 
-from loci.spatial.hilbert import encode as hilbert_encode
+from loci.spatial.hilbert import _clamp
 
 
 @dataclass
@@ -34,11 +40,12 @@ class DensityStats:
 
     Attributes:
         total_points: Total points recorded.
-        num_cells: Number of non-empty cells at base resolution.
-        max_density: Maximum point count in any single cell.
-        mean_density: Mean point count across non-empty cells.
-        hot_cells: Number of cells above the density threshold.
-        resolution_map: Mapping of cell_id → active resolution for hot cells.
+        num_cells: Number of non-empty 3D spatial cells at base resolution.
+        max_density: Maximum point count in any single spatial cell.
+        mean_density: Mean point count across non-empty spatial cells.
+        hot_cells: Number of spatial cells above the density threshold.
+        resolution_map: Mapping of packed 3D grid cell_id → active resolution
+            for hot cells (see ``AdaptiveResolution._spatial_cell_id``).
     """
 
     total_points: int = 0
@@ -52,9 +59,12 @@ class DensityStats:
 class AdaptiveResolution:
     """Density-aware Hilbert resolution selector.
 
-    Tracks per-cell density at the base resolution.  When a cell exceeds
-    ``density_threshold`` points, queries and inserts into that region
-    use a higher resolution (``base_order + 1``, up to ``max_order``).
+    Tracks per-cell density at the base resolution, keyed on the **3D
+    spatial cell** (the epoch-relative time coordinate is ignored so that
+    record-time and query-time probes of the same spatial region agree).
+    When a spatial cell exceeds ``density_threshold`` points, queries and
+    inserts into that region use a higher resolution (``base_order + 1``,
+    up to ``max_order``).
 
     This is a pure heuristic — it trades slightly larger Hilbert ID sets
     in dense regions for better spatial discrimination.
@@ -62,7 +72,8 @@ class AdaptiveResolution:
     Args:
         base_order: Default Hilbert resolution (p value).
         max_order: Maximum resolution to escalate to.
-        density_threshold: Point count per cell that triggers escalation.
+        density_threshold: Point count per spatial cell that triggers
+            escalation.
         max_cache_size: Maximum number of entries in the resolution LRU cache.
             Older entries are evicted when the limit is reached.  Defaults to
             4096, which bounds memory to roughly 100 KB for typical workloads.
@@ -116,12 +127,29 @@ class AdaptiveResolution:
         if len(self._resolution_cache) > self._max_cache_size:
             self._resolution_cache.popitem(last=False)
 
+    def _spatial_cell_id(self, x: float, y: float, z: float) -> int:
+        """Quantise (x, y, z) to the base-resolution grid and pack into one int.
+
+        Uses the same quantisation as Hilbert encoding (round-half-even,
+        clamped to the grid), but deliberately excludes the time coordinate:
+        density is tracked per 3D spatial cell so points that share a spatial
+        region aggregate regardless of their epoch-relative timestamps.
+        """
+        side = (1 << self._base_order) - 1
+        ix = _clamp(int(round(x * side)), 0, side)
+        iy = _clamp(int(round(y * side)), 0, side)
+        iz = _clamp(int(round(z * side)), 0, side)
+        return (ix << (2 * self._base_order)) | (iy << self._base_order) | iz
+
     def record(self, x: float, y: float, z: float, t_norm: float) -> None:
         """Record a point insertion for density tracking.
 
         Call this after each insert to keep density estimates current.
+        ``t_norm`` is accepted for API compatibility but does not affect
+        the density key (density is per 3D spatial cell).
         """
-        cell_id = hilbert_encode(x, y, z, t_norm, resolution_order=self._base_order)
+        del t_norm  # time is marginalised out of the density key
+        cell_id = self._spatial_cell_id(x, y, z)
         self._cell_counts[cell_id] += 1
         self._total_points += 1
 
@@ -134,21 +162,29 @@ class AdaptiveResolution:
             )
             self._cache_set(cell_id, self._base_order + escalation)
 
-    def resolution_for(self, x: float, y: float, z: float, t_norm: float) -> int:
+    def resolution_for(self, x: float, y: float, z: float, t_norm: float = 0.0) -> int:
         """Return the recommended Hilbert resolution for a coordinate.
 
-        Returns the base resolution unless the region is dense, in which
-        case it returns an escalated resolution.
+        Returns the base resolution unless the spatial region is dense, in
+        which case it returns an escalated resolution.  ``t_norm`` is
+        accepted for API compatibility but ignored: the probe is keyed on
+        the 3D spatial cell, so record-time and query-time lookups agree
+        regardless of their timestamps.
         """
-        cell_id = hilbert_encode(x, y, z, t_norm, resolution_order=self._base_order)
+        del t_norm
+        cell_id = self._spatial_cell_id(x, y, z)
         if cell_id in self._resolution_cache:
             self._resolution_cache.move_to_end(cell_id)
             return self._resolution_cache[cell_id]
         return self._base_order
 
-    def cell_density(self, x: float, y: float, z: float, t_norm: float) -> int:
-        """Return the current point count for the cell containing the coordinate."""
-        cell_id = hilbert_encode(x, y, z, t_norm, resolution_order=self._base_order)
+    def cell_density(self, x: float, y: float, z: float, t_norm: float = 0.0) -> int:
+        """Return the current point count for the spatial cell containing the coordinate.
+
+        ``t_norm`` is accepted for API compatibility but ignored.
+        """
+        del t_norm
+        cell_id = self._spatial_cell_id(x, y, z)
         return self._cell_counts.get(cell_id, 0)
 
     def stats(self) -> DensityStats:

@@ -25,7 +25,9 @@ try:
 
     _RUST_AVAILABLE = True
 except ImportError:
-    _rust = None  # type: ignore[assignment]
+    # No fallback assignment: every use of _rust is guarded by
+    # _RUST_AVAILABLE (same pattern as loci/temporal/sharding.py), which
+    # keeps mypy happy both with and without the extension installed.
     _RUST_AVAILABLE = False
 
 # The Rust extension packs 4D Hilbert distances into a u64, so it only

@@ -25,6 +25,7 @@ Notes on the local engine:
 
 from __future__ import annotations
 
+import contextlib
 import math
 import uuid
 from unittest import mock
@@ -37,6 +38,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from loci.async_client import AsyncLociClient
 from loci.client import LociClient
 from loci.schema import WorldState
+from loci.temporal.consolidation import ConsolidationPolicy
 from loci.temporal.retention import RetentionPolicy
 
 VECTOR_SIZE = 8
@@ -509,3 +511,158 @@ class TestAsyncClient:
         assert {s.id for s in context} == set(ids)
         traj = await client.get_trajectory(ids[150], steps_back=n, steps_forward=n)
         assert len(traj) == n
+
+
+# ---------------------------------------------------------------------------
+# 10. Memory consolidation end-to-end (real engine, injected timestamps)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _pinned_now(module: str, ts_ms: int):
+    """Pin the client module's wall clock (maintenance + decay) to *ts_ms*."""
+    with mock.patch(f"{module}.time.time", return_value=ts_ms / 1000.0):
+        yield
+
+
+def _scene_planar(scene: str, i: int) -> list[float]:
+    """Unit vectors clustered per scene: scene 'a' near theta=0, 'b' near 1.5."""
+    base = {"a": 0.0, "b": 1.5}[scene]
+    return _planar(base + 0.02 * i)
+
+
+class TestConsolidation:
+    """Insert 10 epochs x 2 scenes x 5 states, advancing the pinned clock.
+
+    With raw_window_epochs=2 and summary_epoch_ratio=4, epochs 0-7 end up
+    consolidated into loci_sum_0 (epochs 0-3) and loci_sum_1 (epochs 4-7),
+    leaving epochs 8 and 9 raw.
+    """
+
+    N_EPOCHS = 10
+    STATES_PER_SCENE_PER_EPOCH = 5
+    POLICY = ConsolidationPolicy(raw_window_epochs=2, summary_epoch_ratio=4, max_states_per_scene=3)
+
+    def _fill(self, store: QdrantClient) -> tuple[LociClient, dict[int, list[str]]]:
+        client = _make_client(store, consolidation_policy=self.POLICY)
+        ids_by_epoch: dict[int, list[str]] = {}
+        for e in range(self.N_EPOCHS):
+            for scene in ("a", "b"):
+                for i in range(self.STATES_PER_SCENE_PER_EPOCH):
+                    ts = e * EPOCH_MS + i * 100
+                    with _pinned_now("loci.client", ts):
+                        sid = client.insert(
+                            _state(timestamp_ms=ts, scene_id=scene, vector=_scene_planar(scene, i))
+                        )
+                    ids_by_epoch.setdefault(e, []).append(sid)
+        return client, ids_by_epoch
+
+    def test_raw_beyond_window_dropped_summaries_bounded(self, store):
+        client, _ = self._fill(store)
+
+        names = {c.name for c in store.get_collections().collections}
+        assert names == {"loci_8", "loci_9", "loci_sum_0", "loci_sum_1"}
+        assert client._list_active_epochs() == [8, 9]
+
+        # Bounded: at most max_states_per_scene per scene per coarse
+        # collection, every summary flagged as consolidated.
+        summary_points = 0
+        for name in ("loci_sum_0", "loci_sum_1"):
+            points, _ = store.scroll(name, limit=100)
+            assert 0 < len(points) <= 2 * self.POLICY.max_states_per_scene
+            assert all(p.payload["metadata"]["consolidated"] is True for p in points)
+            summary_points += len(points)
+
+        # Total resident points stay bounded: 200 inserted, <= 20 raw + 12 summaries.
+        raw_points = sum(len(store.scroll(f"loci_{e}", limit=100)[0]) for e in (8, 9))
+        assert raw_points == 2 * 2 * self.STATES_PER_SCENE_PER_EPOCH
+        assert raw_points + summary_points <= 20 + 12
+
+    def test_old_data_findable_via_summaries(self, store):
+        client, _ = self._fill(store)
+        old_window = (0, 4 * EPOCH_MS - 1)  # epochs 0-3, all raw collections dropped
+        with _pinned_now("loci.client", 9 * EPOCH_MS + 400):
+            results = client.query(_scene_planar("a", 0), time_window_ms=old_window, limit=10)
+        assert results
+        for s in results:
+            assert s.metadata["consolidated"] is True
+            assert old_window[0] <= s.timestamp_ms <= old_window[1]
+            assert s.scene_id in {"a", "b"}
+            assert s.metadata["source_count"] >= 1
+
+    def test_recent_data_returns_raw(self, store):
+        client, ids_by_epoch = self._fill(store)
+        recent_window = (8 * EPOCH_MS, 10 * EPOCH_MS)
+        with _pinned_now("loci.client", 9 * EPOCH_MS + 400):
+            results = client.query(_scene_planar("a", 0), time_window_ms=recent_window, limit=20)
+        assert results
+        raw_ids = set(ids_by_epoch[8]) | set(ids_by_epoch[9])
+        for s in results:
+            assert not s.metadata.get("consolidated")
+            assert s.id in raw_ids
+
+    def test_unwindowed_query_spans_raw_and_summaries(self, store):
+        client, _ = self._fill(store)
+        with _pinned_now("loci.client", 9 * EPOCH_MS + 400):
+            results = client.query(_scene_planar("a", 0), limit=50)
+        flags = {bool(s.metadata.get("consolidated")) for s in results}
+        assert flags == {True, False}
+
+    def test_trajectory_ignores_summaries(self, store):
+        client, ids_by_epoch = self._fill(store)
+        anchor_id = ids_by_epoch[9][0]  # scene "a", epoch 9
+        trajectory = client.get_trajectory(anchor_id, steps_back=100, steps_forward=100)
+        assert trajectory
+        for s in trajectory:
+            assert not s.metadata.get("consolidated")
+            assert s.timestamp_ms >= 8 * EPOCH_MS  # only raw epochs remain
+
+
+class TestAsyncConsolidation:
+    @pytest.mark.asyncio
+    async def test_consolidation_end_to_end(self):
+        store = _ServerLikeAsyncQdrantClient(location=":memory:")
+        policy = ConsolidationPolicy(
+            raw_window_epochs=1, summary_epoch_ratio=2, max_states_per_scene=2
+        )
+        client = _make_async_client(store, consolidation_policy=policy)
+        ids_by_epoch: dict[int, list[str]] = {}
+        for e in range(4):
+            for i in range(3):
+                ts = e * EPOCH_MS + i * 100
+                with _pinned_now("loci.async_client", ts):
+                    sid = await client.insert(
+                        _state(timestamp_ms=ts, scene_id="s", vector=_planar(0.05 * (3 * e + i)))
+                    )
+                ids_by_epoch.setdefault(e, []).append(sid)
+
+        # raw_window_epochs=1 keeps only the current epoch raw; epochs 0-1
+        # fold into loci_sum_0 and epoch 2 into loci_sum_1.
+        names = {c.name for c in (await store.get_collections()).collections}
+        assert names == {"loci_3", "loci_sum_0", "loci_sum_1"}
+        assert client._list_active_epochs() == [3]
+
+        for name in ("loci_sum_0", "loci_sum_1"):
+            points, _ = await store.scroll(name, limit=100)
+            assert 0 < len(points) <= policy.max_states_per_scene
+            assert all(p.payload["metadata"]["consolidated"] is True for p in points)
+
+        # Old data findable via summaries within a time window.
+        with _pinned_now("loci.async_client", 3 * EPOCH_MS + 200):
+            old = await client.query(_planar(0.0), time_window_ms=(0, 2 * EPOCH_MS - 1), limit=10)
+        assert old
+        assert all(s.metadata["consolidated"] is True for s in old)
+
+        # Recent data stays raw; trajectory ignores summaries.
+        with _pinned_now("loci.async_client", 3 * EPOCH_MS + 200):
+            recent = await client.query(
+                _planar(0.05 * 9), time_window_ms=(3 * EPOCH_MS, 4 * EPOCH_MS - 1), limit=10
+            )
+        assert recent
+        assert all(not s.metadata.get("consolidated") for s in recent)
+        assert {s.id for s in recent} == set(ids_by_epoch[3])
+
+        traj = await client.get_trajectory(ids_by_epoch[3][0], steps_back=50, steps_forward=50)
+        assert traj
+        assert all(not s.metadata.get("consolidated") for s in traj)
+        assert all(s.timestamp_ms >= 3 * EPOCH_MS for s in traj)

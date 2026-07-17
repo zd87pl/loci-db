@@ -35,11 +35,12 @@
 Direction set by [RFC-0001](docs/RFC-0001-memory-for-world-models.md)
 ("the memory system for world models"): invest above the filter layer.
 
-- [x] Memory consolidation v1 — episodic→semantic aging on `LocalLociClient`
+- [x] Memory consolidation v1 — episodic→semantic aging on all three clients
       (`ConsolidationPolicy`; RFC-0001 R1)
 - [x] MCP server — spatial memory for agents (`loci-stdb[mcp]`, `loci-mcp`;
       RFC-0001 P2)
-- [ ] Consolidation for the Qdrant clients + multi-tier fidelity curves
+- [x] Consolidation for the Qdrant clients (sync + async)
+- [ ] Multi-tier consolidation fidelity curves (raw → k-centroids → scene digest)
 - [ ] Conformal novelty — false-alarm-rate guarantees (RFC-0001 R2)
 - [ ] World-model memory benchmark suite (RFC-0001 R3)
 - [ ] Adaptive query planner: Hilbert range-runs vs buckets vs naive filters

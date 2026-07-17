@@ -9,7 +9,7 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **Memory consolidation** (RFC-0001 R1, v1 for `LocalLociClient`): a
+- **Memory consolidation** (RFC-0001 R1, all three clients): a
   `ConsolidationPolicy` that summarizes epochs older than a raw window into
   per-scene centroid states stored in coarse summary collections instead of
   deleting them. Queries include summaries transparently (marked with

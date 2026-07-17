@@ -33,6 +33,14 @@ from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
+from loci.temporal.consolidation import (
+    ConsolidationPolicy,
+    consolidate_states,
+    epochs_to_consolidate,
+    is_summary_collection,
+    summary_coarse_range,
+    summary_collection_name,
+)
 from loci.temporal.decay import DEFAULT_DECAY_LAMBDA, apply_decay
 from loci.temporal.retention import RetentionManager, RetentionPolicy
 from loci.temporal.sharding import collection_name, epoch_id
@@ -92,6 +100,17 @@ class LociClient:
         distance: Distance metric — ``"cosine"``, ``"dot"``, or ``"euclidean"``.
         max_retries: Maximum number of retry attempts for transient Qdrant failures.
         retry_backoff: Base delay in seconds for exponential backoff between retries.
+        retention_policy: Optional policy that purges expired raw epochs.
+        consolidation_policy: Optional policy that summarises raw epochs
+            leaving the raw window into coarse ``loci_sum_*`` collections,
+            then drops their raw collections (episodic-to-semantic memory
+            aging).  Works standalone or combined with ``retention_policy``;
+            when both are set, consolidation runs first on each maintenance
+            pass and retention's purge applies to whatever raw epochs remain.
+            Summary collections are never purged or re-consolidated by
+            retention.  Note: a retention policy tighter than the raw window
+            (fewer than ``raw_window_epochs + 1`` epochs retained) drops raw
+            epochs before consolidation can fold them.
     """
 
     def __init__(
@@ -110,6 +129,7 @@ class LociClient:
         collection_prefix: str = "",
         base_url: str | None = None,
         retention_policy: RetentionPolicy | None = None,
+        consolidation_policy: ConsolidationPolicy | None = None,
     ) -> None:
         if epoch_size_ms <= 0:
             raise ValueError(f"epoch_size_ms must be positive, got {epoch_size_ms}")
@@ -167,6 +187,11 @@ class LociClient:
             if retention_policy is not None
             else None
         )
+        self._consolidation_policy = consolidation_policy
+        # Epochs already folded into a summary collection but whose raw
+        # collection drop failed (guards against double-counting the same
+        # epoch's states on the retry of the drop).
+        self._consolidated_epochs: set[int] = set()
 
     def _col_name(self, ep: int) -> str:
         """Return the Qdrant collection name for an epoch, applying the tenant namespace prefix."""
@@ -537,6 +562,19 @@ class LociClient:
         if _epoch_ids is not None:
             epochs = [ep for ep in epochs if ep in _epoch_ids]
 
+        epoch_collections = [
+            (e, self._col_name(e)) for e in epochs if self._col_name(e) in self._known_collections
+        ]
+        # Summary collections join the fan-out transparently: time-windowed
+        # queries include only those whose coarse range overlaps the window,
+        # unwindowed queries include all.  A ``None`` epoch marks a summary
+        # collection — it has no single raw epoch, so the Hilbert pre-filter
+        # is skipped and spatial bounds rely on the exact post-filter.
+        search_targets: list[tuple[int | None, str]] = list(epoch_collections)
+        search_targets.extend(
+            (None, col) for col in self._summary_search_collections(time_window_ms, _epoch_ids)
+        )
+
         # Over-fetch per shard whenever post-search filtering (spatial exact
         # match, min_confidence) or decay re-ranking can reorder/drop hits;
         # otherwise per-shard truncation could evict the true top-k.
@@ -547,13 +585,9 @@ class LociClient:
         all_results: list[dict] = []
         shards_tried = 0
         shards_failed = 0
-        for ep in epochs:
-            col = self._col_name(ep)
-            if col not in self._known_collections:
-                continue
-
+        for ep, col in search_targets:
             must_conditions: list = []
-            if spatial_bounds is not None:
+            if spatial_bounds is not None and ep is not None:
                 query_resolution = choose_query_resolution(
                     self._hilbert,
                     self._adaptive,
@@ -793,7 +827,7 @@ class LociClient:
             return [anchor]
 
         all_states: list[WorldState] = []
-        for col in list(self._known_collections):
+        for col in self._raw_collections():
             try:
                 points = self._scroll_all(
                     collection=col,
@@ -867,7 +901,7 @@ class LociClient:
         )
 
         context: list[WorldState] = []
-        for col in list(self._known_collections):
+        for col in self._raw_collections():
             try:
                 points = self._scroll_all(
                     collection=col,
@@ -902,6 +936,8 @@ class LociClient:
     # ------------------------------------------------------------------
 
     def _maybe_purge(self) -> None:
+        """Run epoch maintenance: consolidation first, then retention purge."""
+        self._maybe_consolidate(int(time.time() * 1000))
         if self._retention is None:
             return
         try:
@@ -921,6 +957,112 @@ class LociClient:
             self._known_collections.discard(name)
             with self._locks_mutex:
                 self._collection_locks.pop(name, None)
+
+    def _maybe_consolidate(self, now_ms: int) -> None:
+        """Fold raw epochs that left the raw window into summary collections."""
+        policy = self._consolidation_policy
+        if policy is None:
+            return
+        stale = epochs_to_consolidate(
+            self._list_active_epochs(),
+            now_ms=now_ms,
+            epoch_size_ms=self._epoch_size_ms,
+            policy=policy,
+        )
+        for ep in stale:
+            try:
+                self._consolidate_epoch(ep, policy)
+            except Exception:
+                logger.warning("Consolidation failed for epoch %d", ep, exc_info=True)
+
+    def _consolidate_epoch(self, ep: int, policy: ConsolidationPolicy) -> None:
+        """Fold one raw epoch into its summary collection, then drop it.
+
+        The coarse collection's existing summaries are combined with the
+        epoch's raw states and re-consolidated, keeping the collection at
+        ``max_states_per_scene`` states per scene.  Mirrors the retention
+        flow: the raw collection is deleted and forgotten from
+        ``_known_collections`` so a late insert simply recreates it.  The
+        raw collection's lock serialises concurrent maintenance passes.
+        """
+        raw_col = self._col_name(ep)
+        sum_col = summary_collection_name(ep, self._epoch_size_ms, policy, self._collection_prefix)
+        with self._locks_mutex:
+            lock = self._collection_locks.setdefault(raw_col, threading.Lock())
+        with lock:
+            if raw_col not in self._known_collections:
+                return  # another worker already consolidated this epoch
+            if ep not in self._consolidated_epochs:
+                combined: list[WorldState] = []
+                for col in (sum_col, raw_col):
+                    if col not in self._known_collections:
+                        continue
+                    for pt in self._scroll_all(collection=col, with_vectors=True):
+                        vec = pt.vector
+                        if isinstance(vec, dict):
+                            vec = list(vec.values())[0] if vec else []
+                        combined.append(self._payload_to_state(pt.payload, pt.id, vec))
+                summaries = consolidate_states(combined, policy, seed=ep)
+                if sum_col in self._known_collections:
+                    self._qdrant.delete_collection(sum_col)
+                    self._forget_collections([sum_col])
+                if summaries:
+                    self._ensure_collection(sum_col)
+                    # Summaries bypass epoch routing and carry no Hilbert payload;
+                    # spatial queries reach them via the exact post-filter on x/y/z.
+                    points = [
+                        PointStruct(
+                            id=str(uuid.uuid4()),
+                            vector=s.vector,
+                            payload=self._state_to_payload(s, {}),
+                        )
+                        for s in summaries
+                    ]
+                    self._retry(self._qdrant.upsert, collection_name=sum_col, points=points)
+                self._consolidated_epochs.add(ep)
+            self._qdrant.delete_collection(raw_col)
+            self._forget_collections([raw_col])
+            self._consolidated_epochs.discard(ep)
+        logger.info("Consolidated epoch %d into %s", ep, sum_col)
+
+    def _summary_search_collections(
+        self,
+        time_window_ms: tuple[int, int] | None,
+        epoch_ids: set[int] | None,
+    ) -> list[str]:
+        """Summary collections to include in a query fan-out.
+
+        Time-windowed queries keep only collections whose coarse time range
+        overlaps the window; unwindowed queries keep all.  An explicit
+        ``epoch_ids`` restriction (funnel narrowing) keeps only collections
+        whose coarse range covers at least one requested epoch.
+        """
+        policy = self._consolidation_policy
+        if policy is None:
+            return []
+        matched: list[tuple[int, str]] = []
+        for col in self._known_collections:
+            coarse = is_summary_collection(col, self._collection_prefix)
+            if coarse is None:
+                continue
+            if time_window_ms is not None:
+                t_min, t_max = summary_coarse_range(coarse, policy, self._epoch_size_ms)
+                if t_max < time_window_ms[0] or t_min > time_window_ms[1]:
+                    continue
+            if epoch_ids is not None and not any(
+                ep // policy.summary_epoch_ratio == coarse for ep in epoch_ids
+            ):
+                continue
+            matched.append((coarse, col))
+        return [col for _, col in sorted(matched)]
+
+    def _raw_collections(self) -> list[str]:
+        """Known collections excluding summaries (for trajectory/causal scans)."""
+        return sorted(
+            col
+            for col in self._known_collections
+            if is_summary_collection(col, self._collection_prefix) is None
+        )
 
     def _normalise_time(self, timestamp_ms: int, ep: int) -> float:
         """Map a timestamp to [0, 1] within its epoch."""

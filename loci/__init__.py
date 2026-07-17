@@ -7,9 +7,11 @@ from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
 from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import DensityStats
 from loci.spatial.hilbert import HilbertIndex, SpatialBounds
+from loci.temporal.consolidation import ConsolidationPolicy
 
 __all__ = [
     "AsyncLociClient",
+    "ConsolidationPolicy",
     "DensityStats",
     "HilbertIndex",
     "LociClient",

@@ -32,6 +32,12 @@ if TYPE_CHECKING:
 _YOLO_CONF_THRESHOLD = 0.65
 # If fewer than this many objects are detected, try VLM enrichment
 _MIN_DETECTIONS_FOR_NO_VLM = 1
+# Stage 2 (ADR-5): skepticism multiplier applied to VLM confidence when no
+# raw YOLO detection with the same label corroborates the VLM position
+_VLM_UNCORROBORATED_PENALTY = 0.6
+# Minimum IoU between the VLM position and a same-label YOLO detection
+# for the YOLO detection to count as corroboration
+_VLM_CORROBORATION_IOU = 0.3
 
 # YOLO-World model (open-vocabulary). Override with YOLO_MODEL env var.
 _YOLO_MODEL = os.environ.get("YOLO_MODEL", "yolov8l-worldv2.pt")
@@ -39,12 +45,41 @@ _YOLO_MODEL = os.environ.get("YOLO_MODEL", "yolov8l-worldv2.pt")
 # Default open-vocabulary class list for assistive use.
 # Users can update at runtime via PUT /api/detection/classes.
 DEFAULT_CLASSES: list[str] = [
-    "person", "keys", "wallet", "phone", "laptop", "cup", "bottle",
-    "bag", "backpack", "glasses", "remote control", "charger",
-    "headphones", "AirPods", "watch", "book", "pen", "medicine",
-    "cane", "shoe", "jacket", "umbrella", "food container",
-    "water bottle", "mug", "plate", "bowl", "fork", "knife", "spoon",
-    "chair", "table", "door", "cat", "dog",
+    "person",
+    "keys",
+    "wallet",
+    "phone",
+    "laptop",
+    "cup",
+    "bottle",
+    "bag",
+    "backpack",
+    "glasses",
+    "remote control",
+    "charger",
+    "headphones",
+    "AirPods",
+    "watch",
+    "book",
+    "pen",
+    "medicine",
+    "cane",
+    "shoe",
+    "jacket",
+    "umbrella",
+    "food container",
+    "water bottle",
+    "mug",
+    "plate",
+    "bowl",
+    "fork",
+    "knife",
+    "spoon",
+    "chair",
+    "table",
+    "door",
+    "cat",
+    "dog",
 ]
 
 
@@ -53,12 +88,12 @@ class Detection:
     """A single object detection from a camera frame."""
 
     label: str
-    cx: float           # normalized [0, 1] — center x in frame
-    cy: float           # normalized [0, 1] — center y in frame
-    width: float        # normalized bbox width
-    height: float       # normalized bbox height
+    cx: float  # normalized [0, 1] — center x in frame
+    cy: float  # normalized [0, 1] — center y in frame
+    width: float  # normalized bbox width
+    height: float  # normalized bbox height
     confidence: float
-    source: str = "yolo"   # "yolo" | "vlm"
+    source: str = "yolo"  # "yolo" | "vlm"
     depth_m: float | None = None  # LiDAR depth in meters (None if unavailable)
 
     def to_dict(self) -> dict:
@@ -98,7 +133,7 @@ class SceneIngestion:
         self._memory = memory
         self._vlm = vlm_client
         self._use_vlm_fallback = use_vlm_fallback
-        self._model = None   # lazy-loaded YOLO model
+        self._model = None  # lazy-loaded YOLO model
         self._classes: list[str] = list(classes or DEFAULT_CLASSES)
         self._is_world_model = "world" in _YOLO_MODEL.lower()
         self._server_capture_task: asyncio.Task | None = None
@@ -117,12 +152,14 @@ class SceneIngestion:
             return
         try:
             from ultralytics import YOLO
+
             self._model = YOLO(_YOLO_MODEL)
             if self._is_world_model:
                 self._model.set_classes(self._classes)
                 logger.info(
                     "YOLO-World loaded (%s) with %d classes",
-                    _YOLO_MODEL, len(self._classes),
+                    _YOLO_MODEL,
+                    len(self._classes),
                 )
             else:
                 logger.info("YOLO model loaded (%s)", _YOLO_MODEL)
@@ -177,11 +214,17 @@ class SceneIngestion:
                     cy = ((y1 + y2) / 2) / h
                     bw = (x2 - x1) / w
                     bh = (y2 - y1) / h
-                    detections.append(Detection(
-                        label=label, cx=cx, cy=cy,
-                        width=bw, height=bh,
-                        confidence=conf, source="yolo",
-                    ))
+                    detections.append(
+                        Detection(
+                            label=label,
+                            cx=cx,
+                            cy=cy,
+                            width=bw,
+                            height=bh,
+                            confidence=conf,
+                            source="yolo",
+                        )
+                    )
             return detections
         except Exception as e:
             logger.error("YOLO inference error: %s", e)
@@ -203,6 +246,29 @@ class SceneIngestion:
         box_area = box_size * box_size
         union_area = 2 * box_area - inter_area
         return inter_area / union_area if union_area > 0 else 0.0
+
+    def _calibrate_vlm_confidence(
+        self,
+        label: str,
+        cx: float,
+        cy: float,
+        raw_conf: float,
+        yolo_detections: list[Detection],
+    ) -> float:
+        """Stage 2 (ADR-5): apply the skepticism multiplier to VLM confidence.
+
+        A VLM detection is corroborated when a raw YOLO detection with the
+        same label overlaps it (IoU > ``_VLM_CORROBORATION_IOU``). When no
+        YOLO detection corroborates, the VLM confidence is multiplied by
+        ``_VLM_UNCORROBORATED_PENALTY``.
+        """
+        yolo_corroborated = any(
+            d.label == label and self._iou(cx, cy, d.cx, d.cy) > _VLM_CORROBORATION_IOU
+            for d in yolo_detections
+        )
+        if yolo_corroborated:
+            return raw_conf
+        return raw_conf * _VLM_UNCORROBORATED_PENALTY
 
     def _update_consensus(
         self,
@@ -235,7 +301,8 @@ class SceneIngestion:
 
         # Find entries that spatially overlap with the new detection
         matching_idxs = [
-            i for i, (bcx, bcy, _, _ts) in enumerate(buf)
+            i
+            for i, (bcx, bcy, _, _ts) in enumerate(buf)
             if self._iou(cx, cy, bcx, bcy) > self.consensus_iou_threshold
         ]
 
@@ -264,9 +331,7 @@ class SceneIngestion:
             buf.append((cx, cy, confidence, timestamp_ms))
 
     @staticmethod
-    def _lookup_depth(
-        cx: float, cy: float, depth_samples: dict[str, float] | None
-    ) -> float | None:
+    def _lookup_depth(cx: float, cy: float, depth_samples: dict[str, float] | None) -> float | None:
         """Estimate depth at (cx, cy) by interpolating the nearest LiDAR grid sample.
 
         The depth_samples dict maps 3x3 grid keys (tl, tc, tr, ml, mc, mr, bl, bc, br)
@@ -275,9 +340,15 @@ class SceneIngestion:
         if not depth_samples:
             return None
         grid_positions = {
-            "tl": (0.25, 0.25), "tc": (0.5, 0.25), "tr": (0.75, 0.25),
-            "ml": (0.25, 0.5),  "mc": (0.5, 0.5),  "mr": (0.75, 0.5),
-            "bl": (0.25, 0.75), "bc": (0.5, 0.75), "br": (0.75, 0.75),
+            "tl": (0.25, 0.25),
+            "tc": (0.5, 0.25),
+            "tr": (0.75, 0.25),
+            "ml": (0.25, 0.5),
+            "mc": (0.5, 0.5),
+            "mr": (0.75, 0.5),
+            "bl": (0.25, 0.75),
+            "bc": (0.5, 0.75),
+            "br": (0.75, 0.75),
         }
         best_key = None
         best_dist = float("inf")
@@ -329,9 +400,6 @@ class SceneIngestion:
                 raw_yolo = await asyncio.get_event_loop().run_in_executor(
                     None, self._run_yolo, image_bytes, 0.01
                 )
-                raw_by_label: dict[str, list[Detection]] = {}
-                for d in raw_yolo:
-                    raw_by_label.setdefault(d.label, []).append(d)
 
                 for obj in vlm_results:
                     lbl = obj["label"]
@@ -341,23 +409,22 @@ class SceneIngestion:
                     vlm_cx = obj.get("cx", 0.5)
                     vlm_cy = obj.get("cy", 0.5)
 
-                    # Stage 2: apply skepticism multiplier when YOLO sees nothing for this label
-                    yolo_corroborated = any(
-                        self._iou(vlm_cx, vlm_cy, d.cx, d.cy) > 0.3
-                        for d in raw_by_label.get(lbl, [])
+                    # Stage 2: skepticism multiplier when YOLO sees nothing for this label
+                    final_conf = self._calibrate_vlm_confidence(
+                        lbl, vlm_cx, vlm_cy, raw_conf, raw_yolo
                     )
-                    if not yolo_corroborated:
-                        raw_conf *= 0.6
 
-                    vlm_detections.append(Detection(
-                        label=lbl,
-                        cx=vlm_cx,
-                        cy=vlm_cy,
-                        width=width,
-                        height=height,
-                        confidence=raw_conf,
-                        source="vlm",
-                    ))
+                    vlm_detections.append(
+                        Detection(
+                            label=lbl,
+                            cx=vlm_cx,
+                            cy=vlm_cy,
+                            width=width,
+                            height=height,
+                            confidence=final_conf,
+                            source="vlm",
+                        )
+                    )
             except Exception as e:
                 logger.warning("VLM scene description failed: %s", e)
 
@@ -400,9 +467,7 @@ class SceneIngestion:
         if self._capturing:
             return
         self._capturing = True
-        self._server_capture_task = asyncio.create_task(
-            self._capture_loop(camera_index, fps)
-        )
+        self._server_capture_task = asyncio.create_task(self._capture_loop(camera_index, fps))
         logger.info("Server-side camera capture started (camera=%d, fps=%.1f)", camera_index, fps)
 
     async def stop_capture(self) -> None:

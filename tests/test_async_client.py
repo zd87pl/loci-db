@@ -124,9 +124,27 @@ async def test_ensure_collection_propagates_500(mock_async_qdrant):
 
 @pytest.mark.asyncio
 async def test_insert_returns_id(async_client, mock_async_qdrant):
+    import uuid
+
     result = await async_client.insert(_make_state())
     assert isinstance(result, str)
-    assert len(result) == 32
+    # Canonical hyphenated UUID so IDs round-trip through real Qdrant servers.
+    assert len(result) == 36
+    assert str(uuid.UUID(result)) == result
+
+
+@pytest.mark.asyncio
+async def test_insert_rejects_wrong_vector_dimension(async_client, mock_async_qdrant):
+    with pytest.raises(ValueError, match="dimension"):
+        await async_client.insert(_make_state(vector=[1.0, 2.0]))
+    mock_async_qdrant.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_insert_batch_rejects_wrong_vector_dimension(async_client, mock_async_qdrant):
+    with pytest.raises(ValueError, match="dimension"):
+        await async_client.insert_batch([_make_state(), _make_state(vector=[1.0])])
+    mock_async_qdrant.upsert.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -147,18 +165,16 @@ async def test_insert_routes_to_correct_collection(async_client, mock_async_qdra
 @pytest.mark.asyncio
 async def test_find_latest_predecessor_paginates_scroll_results(async_client, mock_async_qdrant):
     async_client._known_collections = {"loci_0"}
+    async_client._discovered = True
 
-    page_1 = []
-    for i in range(256):
+    def _point(i: int):
         point = MagicMock()
         point.id = f"p{i}"
-        page_1.append(point)
+        point.payload = {"timestamp_ms": i}
+        return point
 
-    page_2 = []
-    for i in range(256, 300):
-        point = MagicMock()
-        point.id = f"p{i}"
-        page_2.append(point)
+    page_1 = [_point(i) for i in range(256)]
+    page_2 = [_point(i) for i in range(256, 300)]
 
     mock_async_qdrant.scroll.side_effect = [
         (page_1, "page-2"),
@@ -169,6 +185,28 @@ async def test_find_latest_predecessor_paginates_scroll_results(async_client, mo
 
     assert predecessor == ("p299", "loci_0")
     assert mock_async_qdrant.scroll.call_args_list[1].kwargs["offset"] == "page-2"
+
+
+@pytest.mark.asyncio
+async def test_find_latest_predecessor_unordered_pages(async_client, mock_async_qdrant):
+    """The latest predecessor is chosen by timestamp, not page position."""
+    async_client._known_collections = {"loci_0"}
+    async_client._discovered = True
+
+    def _point(pid: str, ts: int):
+        point = MagicMock()
+        point.id = pid
+        point.payload = {"timestamp_ms": ts}
+        return point
+
+    points = [_point("a", 100), _point("latest", 900), _point("b", 500)]
+    mock_async_qdrant.scroll.side_effect = [(points, None)]
+
+    predecessor = await async_client._find_latest_predecessor("scene_a", 20_000)
+
+    assert predecessor == ("latest", "loci_0")
+    # Ordered scrolls break Qdrant pagination; must scroll unordered.
+    assert mock_async_qdrant.scroll.call_args.kwargs.get("order_by") is None
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +414,114 @@ async def test_adaptive_query_uses_finer_hilbert_field(mock_async_qdrant):
     filt = mock_async_qdrant.query_points.call_args.kwargs["query_filter"]
     keys = {condition.key for condition in filt.must}
     assert "hilbert_r8" in keys
+
+
+# ---------------------------------------------------------------------------
+# min_confidence and discovery
+# ---------------------------------------------------------------------------
+
+
+def _confidence_hit(i: int, confidence: float = 1.0) -> MagicMock:
+    hit = MagicMock()
+    hit.score = 0.9 - i * 0.01
+    hit.id = f"hit{i}"
+    hit.vector = [1.0, 0.0, 0.0, 0.0]
+    hit.payload = {
+        "x": 0.5,
+        "y": 0.5,
+        "z": 0.5,
+        "timestamp_ms": 10_000,
+        "scene_id": "s1",
+        "scale_level": "patch",
+        "confidence": confidence,
+    }
+    return hit
+
+
+@pytest.mark.asyncio
+async def test_min_confidence_pushed_down_and_overfetched(async_client, mock_async_qdrant):
+    await async_client.insert(_make_state())
+
+    qr = MagicMock()
+    qr.points = [_confidence_hit(i) for i in range(10)]
+    mock_async_qdrant.query_points = AsyncMock(return_value=qr)
+
+    results = await async_client.query(
+        vector=[1.0, 0.0, 0.0, 0.0],
+        time_window_ms=(10_000, 14_999),
+        limit=5,
+        min_confidence=0.5,
+    )
+
+    # More qualifying matches than limit → the full limit is returned.
+    assert len(results) == 5
+
+    kwargs = mock_async_qdrant.query_points.call_args.kwargs
+    assert kwargs["limit"] == 15
+    conf_conditions = [
+        c for c in kwargs["query_filter"].must if getattr(c, "key", None) == "confidence"
+    ]
+    assert len(conf_conditions) == 1
+    assert conf_conditions[0].range.gte == 0.5
+
+
+def _mock_collections_response(names: list[str]) -> MagicMock:
+    response = MagicMock()
+    cols = []
+    for name in names:
+        col = MagicMock()
+        col.name = name
+        cols.append(col)
+    response.collections = cols
+    return response
+
+
+@pytest.mark.asyncio
+async def test_insert_then_query_sees_preexisting_collections(async_client, mock_async_qdrant):
+    mock_async_qdrant.get_collections = AsyncMock(
+        return_value=_mock_collections_response(["loci_5"])
+    )
+
+    await async_client.insert(_make_state(timestamp_ms=10_000))  # creates loci_2
+    await async_client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(25_000, 29_999))
+
+    assert "loci_5" in async_client._known_collections
+    searched = {c.kwargs["collection_name"] for c in mock_async_qdrant.query_points.call_args_list}
+    assert "loci_5" in searched
+
+
+@pytest.mark.asyncio
+async def test_rediscovers_when_window_epoch_unknown(async_client, mock_async_qdrant):
+    mock_async_qdrant.get_collections = AsyncMock(
+        return_value=_mock_collections_response(["loci_2"])
+    )
+    await async_client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(10_000, 14_999))
+    assert mock_async_qdrant.get_collections.await_count == 1
+
+    mock_async_qdrant.get_collections = AsyncMock(
+        return_value=_mock_collections_response(["loci_2", "loci_9"])
+    )
+    await async_client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(45_000, 49_999))
+
+    assert mock_async_qdrant.get_collections.await_count == 1
+    searched = {c.kwargs["collection_name"] for c in mock_async_qdrant.query_points.call_args_list}
+    assert "loci_9" in searched
+
+
+@pytest.mark.asyncio
+async def test_shard_failure_logged_at_warning(async_client, mock_async_qdrant, caplog):
+    import logging
+
+    await async_client.insert(_make_state(timestamp_ms=3000))  # loci_0
+    await async_client.insert(_make_state(timestamp_ms=8000))  # loci_1
+    mock_async_qdrant.query_points = AsyncMock(side_effect=RuntimeError("shard down"))
+
+    with caplog.at_level(logging.WARNING, logger="loci.async_client"):
+        results = await async_client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
+
+    assert results == []
+    assert any("shard down" in rec.message for rec in caplog.records)
+    assert any("All 2 shard searches failed" in rec.message for rec in caplog.records)
 
 
 # ---------------------------------------------------------------------------

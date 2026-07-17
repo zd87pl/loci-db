@@ -1,7 +1,7 @@
 """Shared fixtures for cloud API integration tests.
 
-Tests run against a local FastAPI test client with mocked Qdrant and Supabase.
-Set LOCI_INTEGRATION=true to run against live staging services (requires env vars).
+Tests run against a local FastAPI test client with mocked Qdrant and Supabase —
+no live services are contacted.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ os.environ.setdefault("QDRANT_API_KEY", "test-qdrant-key")
 os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost/test")
 os.environ.setdefault("LOCI_VECTOR_SIZE", "4")  # tiny vectors for speed
 os.environ.setdefault("LOCI_DEV_MODE", "true")
+# Small body cap so the 413 middleware can be exercised without multi-MB bodies.
+os.environ.setdefault("LOCI_MAX_BODY_BYTES", "65536")
 
 VECTOR_SIZE = int(os.environ["LOCI_VECTOR_SIZE"])
 TEST_NAMESPACE = "test_ns_abc"

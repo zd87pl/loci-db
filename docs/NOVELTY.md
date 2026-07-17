@@ -20,7 +20,7 @@
 
 **What LOCI adds:** A single 4D Hilbert space-filling curve maps (x, y, z, t_normalized) to a single integer. Spatial queries become a single `MatchAny` filter on one indexed integer field instead of 3-4 independent range filters.
 
-**Why it matters:** Reduces spatial pre-filtering from O(n_dims) index traversals to a single set-membership test. For tight spatial queries at N=100k, this yields 5-20x query speedup.
+**Why it matters (measured):** The single-integer filter replaces O(n_dims) index traversals with one set-membership test — but this does **not** translate into a raw spatial speedup at the scales measured so far. On the checked-in benchmark (`benchmarks/results/latest.json`, N=1,000-10,000 against a live Qdrant, 512-dim), naive float-range filtering is 3.7-4.9x *faster* on pure tight-spatial queries (scenario A). Where the Hilbert pre-filter pays off is in combination with temporal shard pruning: on tight spatial + temporal queries (scenario C), LOCI is ~2x faster than naive Qdrant at N=10,000 (22.6ms vs 44.9ms p50) at 0.99 recall@10. The honest value proposition is the combined spatiotemporal query path — plus predict-then-retrieve and the zero-infrastructure in-memory mode — not spatial filtering in isolation.
 
 ### 2. Multi-Resolution Overlap
 

@@ -18,8 +18,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from loci.schema import ScoredWorldState
+
 if TYPE_CHECKING:
-    from loci.schema import ScoredWorldState, WorldState
+    from loci.schema import WorldState
 
 
 @dataclass
@@ -28,8 +30,11 @@ class PredictRetrieveResult:
 
     Attributes:
         results: WorldStates ranked by combined score.
-        prediction_novelty: 0.0 = well-known situation (strong historical match),
-            1.0 = novel situation (no historical analog found).
+        prediction_novelty: ``1.0 - best_cosine`` where ``best_cosine`` is the
+            highest cosine similarity (clamped to [0, 1]) between the predicted
+            vector and any retrieved state's stored vector. 0.0 = an essentially
+            exact historical match, 1.0 = no analog (orthogonal/opposed matches
+            or an empty result set). Absolute and metric-independent.
         predicted_vector: The predicted future embedding (if return_prediction=True).
         retrieval_latency_ms: Time spent on the retrieval query.
         predictor_call_ms: Time spent calling the predictor function.
@@ -52,18 +57,39 @@ def rerank_prediction_candidates(
     alpha: float,
     limit: int,
     use_temporal_proximity: bool = False,
+    predicted_vector: list[float] | None = None,
+    time_window_ms: tuple[int, int] | None = None,
 ) -> tuple[list[WorldState], float]:
-    """Re-rank scored retrieval candidates and return the best match score."""
+    """Re-rank scored retrieval candidates and return the best match score.
+
+    Ranking blends normalised backend scores with temporal proximity. When
+    *use_temporal_proximity* is set, proximity is measured against the midpoint
+    of *time_window_ms* (scaled by its half-width) when an explicit window is
+    given, otherwise against ``now_ms + future_horizon_ms / 2``.
+
+    The returned best score is the highest clamped cosine similarity between
+    *predicted_vector* and any candidate's stored vector — an absolute match
+    quality suited to novelty scoring, independent of the backend's score
+    scale and of the ranking above. When *predicted_vector* is omitted, the
+    best combined ranking score is returned instead (legacy behaviour).
+    """
     if not candidates:
         return [], 0.0
 
     vector_scores = _normalize_prediction_scores([candidate.score for candidate in candidates])
-    mid_ms = now_ms + future_horizon_ms // 2
+    if time_window_ms is not None:
+        start_ms, end_ms = time_window_ms
+        center_ms = (start_ms + end_ms) / 2
+        half_width_ms = (end_ms - start_ms) / 2
+    else:
+        center_ms = now_ms + future_horizon_ms / 2
+        half_width_ms = future_horizon_ms / 2
+
     combined: list[tuple[float, float, WorldState]] = []
     for candidate, vector_sim in zip(candidates, vector_scores, strict=True):
-        if use_temporal_proximity and future_horizon_ms > 0:
-            t_dist = abs(candidate.state.timestamp_ms - mid_ms)
-            temporal_prox = max(0.0, 1.0 - t_dist / (future_horizon_ms / 2))
+        if use_temporal_proximity and half_width_ms > 0:
+            t_dist = abs(candidate.state.timestamp_ms - center_ms)
+            temporal_prox = max(0.0, 1.0 - t_dist / half_width_ms)
             score = alpha * vector_sim + (1.0 - alpha) * temporal_prox
         else:
             score = vector_sim
@@ -71,7 +97,12 @@ def rerank_prediction_candidates(
         combined.append((score, candidate.decayed_score, candidate.state))
 
     combined.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    best_score = combined[0][0]
+    if predicted_vector is not None:
+        best_score = max(
+            _clamped_cosine(predicted_vector, candidate.state.vector) for candidate in candidates
+        )
+    else:
+        best_score = combined[0][0]
     results = [state for _, _, state in combined[:limit]]
     return results, best_score
 
@@ -99,6 +130,52 @@ def _sigmoid(score: float) -> float:
     return 1.0 / (1.0 + math.exp(-bounded))
 
 
+def _cosine(a: Any, b: Any) -> float:
+    """Cosine similarity; 0.0 for missing, empty, mismatched or zero-norm vectors."""
+    if a is None or b is None or len(a) != len(b) or len(a) == 0:
+        return 0.0
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for x, y in zip(a, b, strict=True):
+        dot += x * y
+        norm_a += x * x
+        norm_b += y * y
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 0.0
+    return dot / math.sqrt(norm_a * norm_b)
+
+
+def _clamped_cosine(a: Any, b: Any) -> float:
+    return max(0.0, min(1.0, _cosine(a, b)))
+
+
+def _validate_predicted_vector(predicted: Any, expected_len: int) -> None:
+    """Reject malformed predictor output before it can poison novelty scoring."""
+    if isinstance(predicted, (str, bytes)) or not hasattr(predicted, "__len__"):
+        raise ValueError(
+            f"predictor_fn returned {type(predicted).__name__}, expected a sequence of floats"
+        )
+    if len(predicted) == 0:
+        raise ValueError("predictor_fn returned an empty vector")
+    if len(predicted) != expected_len:
+        raise ValueError(
+            f"predictor_fn returned a vector of length {len(predicted)}, "
+            f"expected {expected_len} to match context_vector"
+        )
+    for idx, value in enumerate(predicted):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"predictor_fn returned non-numeric value {value!r} at index {idx}"
+            ) from None
+        if not math.isfinite(numeric):
+            raise ValueError(
+                f"predictor_fn returned non-finite value {value!r} (NaN/inf) at index {idx}"
+            )
+
+
 class PredictThenRetrieve:
     """The core novelty: use a world model to predict future state,
     then retrieve historical states matching that prediction.
@@ -107,9 +184,13 @@ class PredictThenRetrieve:
     - novelty ~ 0.0 → "I've seen this before" → use retrieved experience
     - novelty ~ 1.0 → "This is new territory" → alert, proceed carefully
 
+    Novelty is absolute: ``1.0 - best cosine similarity`` between the
+    prediction and any retrieved state's stored vector, so it is comparable
+    across backends and distance metrics.
+
     When a :class:`~loci.retrieval.novelty.NoveltyCalibrator` is supplied,
     novelty scores are calibrated against a running historical distribution
-    rather than using a raw heuristic.
+    rather than using the raw cosine heuristic.
     """
 
     def __init__(self, client: Any, calibrator: Any = None) -> None:
@@ -132,17 +213,21 @@ class PredictThenRetrieve:
         """Run the predict-then-retrieve pipeline.
 
         Pipeline:
-        1. Call predictor_fn(context_vector) → predicted_vector (timed)
+        1. Call predictor_fn(context_vector) → predicted_vector (timed,
+           validated: finite floats, same dimension as context_vector)
         2. Query store with predicted_vector, filtered by spatial bounds
            and by search_time_window_ms only when explicitly provided
         3. Score results: alpha * vector_sim + (1-alpha) * temporal_proximity
-           when a time window is explicit; otherwise rank by vector similarity
-        4. Compute prediction_novelty from best match score
+           when a time window is explicit (proximity centred on the window
+           midpoint); otherwise rank by vector similarity
+        4. Compute prediction_novelty as 1 - best cosine similarity between
+           the prediction and any retrieved state's stored vector
 
         Args:
             context_vector: Current-state embedding vector.
             predictor_fn: Maps embedding → predicted future embedding.
-                Called exactly once.
+                Called exactly once. Must return a finite float vector with
+                the same dimension as ``context_vector`` (ValueError otherwise).
             future_horizon_ms: How far into the future to search (ms).
             current_position: Optional (x, y, z) for spatial filtering.
             current_timestamp_ms: Current time in ms (defaults to now).
@@ -166,6 +251,7 @@ class PredictThenRetrieve:
         t0 = time.perf_counter()
         predicted_vector = predictor_fn(context_vector)
         predictor_call_ms = (time.perf_counter() - t0) * 1000
+        _validate_predicted_vector(predicted_vector, len(context_vector))
 
         # Step 2: Build query parameters.  The default is historical analog
         # search across stored memories; callers can opt into a concrete
@@ -184,10 +270,11 @@ class PredictThenRetrieve:
                 "z_max": min(1.0, z + spatial_search_radius),
             }
 
-        # Step 3: Retrieve
+        # Step 3: Retrieve — a single query, timed end to end.  Prefer the
+        # scored API; fall back to plain query for duck-typed clients.
         t1 = time.perf_counter()
+        raw_candidates: list[ScoredWorldState] | None = None
         query_scored = getattr(self._client, "query_scored", None)
-        raw_candidates: list[ScoredWorldState] = []
         if callable(query_scored):
             scored_response = query_scored(
                 vector=predicted_vector,
@@ -197,52 +284,42 @@ class PredictThenRetrieve:
             )
             if isinstance(scored_response, list):
                 raw_candidates = scored_response
+        if raw_candidates is None:
+            raw_results = (
+                self._client.query(
+                    vector=predicted_vector,
+                    spatial_bounds=spatial_bounds,
+                    time_window_ms=time_window,
+                    limit=limit * 2,
+                )
+                or []
+            )
+            # No backend scores here: score by actual cosine similarity to
+            # the prediction, never by rank position.
+            raw_candidates = []
+            for ws in raw_results:
+                sim = _clamped_cosine(predicted_vector, ws.vector)
+                raw_candidates.append(ScoredWorldState(state=ws, score=sim, decayed_score=sim))
         retrieval_latency_ms = (time.perf_counter() - t1) * 1000
 
-        # Step 4: Combined scoring
-        best_score = 0.0
-        if raw_candidates:
-            results, best_score = rerank_prediction_candidates(
-                raw_candidates,
-                now_ms=now_ms,
-                future_horizon_ms=future_horizon_ms,
-                alpha=alpha,
-                limit=limit,
-                use_temporal_proximity=search_time_window_ms is not None,
-            )
-        else:
-            raw_results = self._client.query(
-                vector=predicted_vector,
-                spatial_bounds=spatial_bounds,
-                time_window_ms=time_window,
-                limit=limit * 2,
-            )
-            if raw_results:
-                mid_ms = now_ms + future_horizon_ms // 2
-                scored = []
-                for i, ws in enumerate(raw_results):
-                    vector_sim = max(0.0, 1.0 - i / max(len(raw_results), 1))
-                    if search_time_window_ms is not None and future_horizon_ms > 0:
-                        t_dist = abs(ws.timestamp_ms - mid_ms)
-                        temporal_prox = max(0.0, 1.0 - t_dist / (future_horizon_ms / 2))
-                        combined = alpha * vector_sim + (1.0 - alpha) * temporal_prox
-                    else:
-                        combined = vector_sim
+        # Step 4: Combined ranking + absolute novelty
+        results, best_score = rerank_prediction_candidates(
+            raw_candidates,
+            now_ms=now_ms,
+            future_horizon_ms=future_horizon_ms,
+            alpha=alpha,
+            limit=limit,
+            use_temporal_proximity=search_time_window_ms is not None,
+            predicted_vector=predicted_vector,
+            time_window_ms=search_time_window_ms,
+        )
 
-                    scored.append((combined, ws))
-
-                scored.sort(key=lambda x: x[0], reverse=True)
-                results = [ws for _, ws in scored[:limit]]
-                best_score = scored[0][0] if scored else 0.0
-            else:
-                results = []
-                best_score = 0.0
-
-        # Calibrate novelty if a calibrator is attached
+        # Calibrate novelty if a calibrator is attached.  Score first so the
+        # current sample is judged against history that excludes it.
         if self._calibrator is not None:
-            self._calibrator.observe(best_score)
             prediction_novelty = self._calibrator.calibrated_novelty(best_score)
             novelty_samples = len(self._calibrator)
+            self._calibrator.observe(best_score)
         else:
             prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
             novelty_samples = 0

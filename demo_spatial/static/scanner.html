@@ -253,6 +253,18 @@ async function init() {
   setInterval(updateAges, 2000);
 }
 
+// Escape untrusted strings (object labels come from VLM output and the
+// unauthenticated detection-classes API) before embedding in innerHTML.
+function escapeHtml(value) {
+  if (value == null) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // ---------------------------------------------------------------------------
 // Server connection
 // ---------------------------------------------------------------------------
@@ -699,7 +711,7 @@ function updateUI() {
       const age = obj.age_seconds || 0;
       const cls = age < 15 ? 'recent' : 'aged';
       const depthStr = obj.depth ? ` ${obj.depth.toFixed(1)}m` : '';
-      return `<div class="obj-chip ${cls}"><span class="chip-dot"></span>${obj.label}${depthStr}</div>`;
+      return `<div class="obj-chip ${cls}"><span class="chip-dot"></span>${escapeHtml(obj.label)}${depthStr}</div>`;
     }).join('');
 }
 

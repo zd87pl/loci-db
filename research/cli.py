@@ -10,7 +10,8 @@ Usage::
     # Pipe content directly
     echo "def add(a, b): return a+b" | python -m research.cli run --context "Python function"
 
-    # Use a code test runner (runs pytest after writing each variant)
+    # Use a code test runner (each variant is written into a temporary
+    # copy of --work-dir and pytest runs there; the real tree is untouched)
     python -m research.cli run --input src/module.py \\
         --runner code \\
         --test-cmd "pytest tests/ -q" \\
@@ -32,26 +33,57 @@ def cli() -> None:
 
 
 @cli.command()
-@click.option("--input", "-i", "input_path", type=click.Path(exists=True), default=None,
-              help="Path to the concept file.  Reads stdin if not provided.")
+@click.option(
+    "--input",
+    "-i",
+    "input_path",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to the concept file.  Reads stdin if not provided.",
+)
 @click.option("--context", "-c", default="", help="Optional background context for the Analyzer.")
-@click.option("--variants", "-n", default=5, show_default=True,
-              help="Number of optimization variants to generate.")
-@click.option("--runner", type=click.Choice(["llm", "code", "metric"]), default="llm",
-              show_default=True, help="Which test runner to use.")
-@click.option("--test-cmd", default="pytest --tb=short -q",
-              help="Test command for the 'code' runner.")
-@click.option("--work-dir", type=click.Path(), default=None,
-              help="Working directory for the 'code' runner.")
-@click.option("--output", "-o", type=click.Path(), default=None,
-              help="Write full JSON result to this path.")
-@click.option("--save-winner", type=click.Path(), default=None,
-              help="Write the winning variant content to this path.")
+@click.option(
+    "--variants",
+    "-n",
+    default=5,
+    show_default=True,
+    help="Number of optimization variants to generate.",
+)
+@click.option(
+    "--runner",
+    type=click.Choice(["llm", "code", "metric"]),
+    default="llm",
+    show_default=True,
+    help="Which test runner to use.",
+)
+@click.option(
+    "--test-cmd", default="pytest --tb=short -q", help="Test command for the 'code' runner."
+)
+@click.option(
+    "--work-dir",
+    type=click.Path(),
+    default=None,
+    help="Project root for the 'code' runner (copied to a temporary "
+    "workspace for each variant; the real tree is never modified).",
+)
+@click.option(
+    "--output", "-o", type=click.Path(), default=None, help="Write full JSON result to this path."
+)
+@click.option(
+    "--save-winner",
+    type=click.Path(),
+    default=None,
+    help="Write the winning variant content to this path.",
+)
 @click.option("--analyzer-model", default="claude-opus-4-6", show_default=True)
 @click.option("--optimizer-model", default="claude-opus-4-6", show_default=True)
 @click.option("--judge-model", default="claude-opus-4-6", show_default=True)
-@click.option("--runner-model", default="claude-haiku-4-5-20251001", show_default=True,
-              help="Model for the LLM runner (only used when --runner=llm).")
+@click.option(
+    "--runner-model",
+    default="claude-haiku-4-5-20251001",
+    show_default=True,
+    help="Model for the LLM runner (only used when --runner=llm).",
+)
 def run(
     input_path: str | None,
     context: str,
@@ -90,11 +122,19 @@ def run(
             test_cmd=test_cmd,
             work_dir=work_dir or str(Path(input_path).parent),
         )
-    else:
+    else:  # runner == "metric"
+        # MetricRunner needs Python callables (a metrics dict) and cannot be
+        # constructed from CLI flags. Fail loudly rather than silently
+        # substituting the paid LLM runner.
         click.echo(
-            f"Runner '{runner}' requires custom setup — falling back to LLM runner.", err=True
+            "Error: --runner=metric cannot be configured from the command line — "
+            "it requires Python metric functions. Use the API instead:\n"
+            "    from research.pipeline import ResearchPipeline\n"
+            "    from research.runners.metric import MetricRunner\n"
+            "    ResearchPipeline(runner=MetricRunner(metrics={'name': fn}))",
+            err=True,
         )
-        test_runner = LLMRunner(model=runner_model)
+        raise SystemExit(1)
 
     pipeline = ResearchPipeline(
         runner=test_runner,

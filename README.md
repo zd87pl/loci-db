@@ -90,15 +90,26 @@ Once running, insert and query world states via the HTTP API:
 # Health check
 curl http://localhost:8000/health
 
-# Insert a world state (512-dim vector)
-curl -X POST http://localhost:8000/insert \
-  -H 'Content-Type: application/json' \
-  -d '{"x":0.5,"y":0.3,"z":0.8,"timestamp_ms":1700000000000,"vector":[0.1],"scene_id":"s1"}'
+# Insert a world state. The vector length must match the server's
+# LOCI_VECTOR_SIZE (512 in docker-compose.yml) — wrong-length vectors are
+# rejected with HTTP 422, so the payload is generated rather than hand-typed:
+python3 -c 'import json; print(json.dumps({
+    "x": 0.5, "y": 0.3, "z": 0.8,
+    "timestamp_ms": 1700000000000,
+    "vector": [0.1] * 512,
+    "scene_id": "s1"}))' \
+  | curl -X POST http://localhost:8000/insert \
+      -H 'Content-Type: application/json' -d @-
 
-# Query (spatial + time window)
-curl -X POST http://localhost:8000/query \
-  -H 'Content-Type: application/json' \
-  -d '{"vector":[0.1],"x_min":0.0,"x_max":1.0,"limit":10}'
+# Query by vector similarity. Spatial bounds and the time window are optional —
+# omit them to search everything:
+python3 -c 'import json; print(json.dumps({
+    "vector": [0.1] * 512,
+    "x_min": 0.0, "x_max": 1.0, "y_min": 0.0, "y_max": 1.0,
+    "z_min": 0.0, "z_max": 1.0,
+    "limit": 10}))' \
+  | curl -X POST http://localhost:8000/query \
+      -H 'Content-Type: application/json' -d @-
 ```
 
 Interactive API docs: `http://localhost:8000/docs`
@@ -230,18 +241,32 @@ ws = adapter.from_numpy(embedding, position, ts, scene_id)
 
 ## Performance
 
-**Raw spatiotemporal query latency: ~75µs p50** (label-filtered, 100 objects, 128-dim, Apple Silicon).
+All numbers below come straight from `benchmarks/results/retrieval_latest.json`
+(in-memory `LocalLociClient` backend, 128-dim vectors, 500 queries per scenario,
+seed 42, Apple Silicon / arm64, Python 3.14). Latency depends heavily on query
+type: **label-filtered retrieval (a `scene_id` keyword filter with no spatial or
+temporal bounds — the demo path) runs at ~78µs p50 at N=100**, while spatial
+bounding-box queries are dominated by the exact geometric post-filter and take
+tens to hundreds of milliseconds at these dataset sizes.
 
 | N objects | Query type | P50 | P99 |
 |--:|:--|--:|--:|
-| 100 | Label-filtered (demo path) | 75µs | 124µs |
-| 100 | Vector-only ANN | 212µs | 217µs |
-| 100 | Temporal shard pruning | 156µs | 188µs |
-| 500 | Label-filtered (demo path) | 259µs | 281µs |
-| 1,000 | Label-filtered (demo path) | 469µs | 514µs |
-| 1,000 | Vector-only ANN | 1.86ms | 2.08ms |
+| 100 | Label-filtered (`scene_id` keyword, no spatial/temporal bounds) | 78µs | 101µs |
+| 100 | Vector-only ANN | 195µs | 252µs |
+| 100 | Spatial + temporal window | 40.0ms | 43.6ms |
+| 100 | Spatial bounding box | 97.5ms | 108.0ms |
+| 1,000 | Label-filtered | 479µs | 524µs |
+| 1,000 | Vector-only ANN | 1.67ms | 1.92ms |
+| 1,000 | Spatial + temporal window | 297ms | 309ms |
+| 1,000 | Spatial bounding box | 580ms | 636ms |
 
-Insert throughput: **~59,000 states/s** (in-memory backend, 128-dim vectors).
+Adding a temporal window to a spatial query roughly halves its cost through
+epoch shard pruning (40.0ms vs 97.5ms p50 at N=100), but the exact spatial
+post-filter — the authoritative geometric check — dominates spatial query time
+in the pure-Python in-memory backend. Accelerating that path is the motivation
+for the optional native Rust primitives in `loci-core/`.
+
+Insert throughput: **~60,000-67,000 states/s** (in-memory backend, 128-dim vectors).
 
 Run the retrieval benchmark on your hardware:
 

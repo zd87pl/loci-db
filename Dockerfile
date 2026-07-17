@@ -2,7 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "loci-stdb>=0.3.0" "fastapi[standard]>=0.100.0" "uvicorn[standard]>=0.24.0"
+# Build from the working tree, NOT PyPI: installing loci-stdb from PyPI here
+# would silently pin the container to the last published release while running
+# HEAD's server.py against it (a mismatch that broke /insert in the past).
+# README.md must be copied because pyproject declares it as the package readme.
+COPY pyproject.toml README.md ./
+COPY loci/ ./loci/
+RUN pip install --no-cache-dir . "fastapi[standard]>=0.100.0" "uvicorn[standard]>=0.24.0"
 
 COPY server.py /app/server.py
 

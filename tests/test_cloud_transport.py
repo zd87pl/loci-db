@@ -57,6 +57,25 @@ def test_insert_payload_has_all_eight_keys():
     assert payload["confidence"] == 0.5
 
 
+def test_insert_payload_includes_metadata_when_set():
+    state = WorldState(
+        x=0.1,
+        y=0.2,
+        z=0.3,
+        timestamp_ms=1000,
+        vector=[0.0],
+        scene_id="s",
+        metadata={"label": "doorway", "height_m": 2.1},
+    )
+    payload = _insert_payload(state)
+    assert payload["metadata"] == {"label": "doorway", "height_m": 2.1}
+
+
+def test_insert_payload_omits_empty_metadata():
+    state = WorldState(x=0.1, y=0.2, z=0.3, timestamp_ms=1000, vector=[0.0], scene_id="s")
+    assert "metadata" not in _insert_payload(state)
+
+
 # ── _query_payload ───────────────────────────────────────────────────────────
 
 
@@ -170,6 +189,38 @@ def test_parse_query_results_missing_scene_id_defaults_empty():
     assert results[0].scene_id == ""
 
 
+def test_parse_query_results_parses_metadata_scale_level_confidence():
+    payload = {
+        "results": [
+            {
+                "id": "p4",
+                "x": 0.1,
+                "y": 0.2,
+                "z": 0.3,
+                "timestamp_ms": 5,
+                "scale_level": "frame",
+                "confidence": 0.7,
+                "metadata": {"label": "door"},
+            }
+        ]
+    }
+    results = _parse_query_results(payload)
+
+    assert results[0].scale_level == "frame"
+    assert results[0].confidence == 0.7
+    assert results[0].metadata == {"label": "door"}
+
+
+def test_parse_query_results_old_server_defaults():
+    """Responses from servers without the new fields fall back to defaults."""
+    payload = {"results": [{"id": "p5", "x": 0.1, "y": 0.2, "z": 0.3, "timestamp_ms": 5}]}
+    results = _parse_query_results(payload)
+
+    assert results[0].scale_level == "patch"
+    assert results[0].confidence == 1.0
+    assert results[0].metadata == {}
+
+
 # ── CloudTransport._request scheme validation ────────────────────────────────
 
 
@@ -232,3 +283,66 @@ def test_query_parses_results_over_mocked_urlopen():
     assert hits[0].id == "pA"
     assert hits[0].x == 0.5
     assert hits[0].vector == [0.4, 0.5]
+
+
+def test_metadata_round_trip_over_mocked_http():
+    """Metadata is sent on insert and parsed back from query results."""
+    transport = CloudTransport(base_url="https://api.example.com", api_key="loci_x")
+    sent_bodies: list[dict] = []
+
+    def _capturing_urlopen(response_body: dict):
+        class _FakeResp:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+            def read(self_inner):
+                return json.dumps(response_body).encode()
+
+        def _urlopen(req, timeout=None):
+            sent_bodies.append(json.loads(req.data.decode()))
+            return _FakeResp()
+
+        return _urlopen
+
+    state = WorldState(
+        x=0.1,
+        y=0.2,
+        z=0.3,
+        timestamp_ms=1000,
+        vector=[0.0, 1.0],
+        scene_id="s",
+        scale_level="frame",
+        confidence=0.6,
+        metadata={"label": "doorway"},
+    )
+    with patch("urllib.request.urlopen", _capturing_urlopen({"id": "p1"})):
+        transport.insert(state)
+
+    assert sent_bodies[0]["metadata"] == {"label": "doorway"}
+    assert sent_bodies[0]["scale_level"] == "frame"
+    assert sent_bodies[0]["confidence"] == 0.6
+
+    response = {
+        "results": [
+            {
+                "id": "p1",
+                "x": 0.1,
+                "y": 0.2,
+                "z": 0.3,
+                "timestamp_ms": 1000,
+                "scene_id": "s",
+                "scale_level": "frame",
+                "confidence": 0.6,
+                "metadata": {"label": "doorway"},
+            }
+        ]
+    }
+    with patch("urllib.request.urlopen", _capturing_urlopen(response)):
+        hits = transport.query(vector=[0.0, 1.0], limit=1)
+
+    assert hits[0].metadata == {"label": "doorway"}
+    assert hits[0].scale_level == "frame"
+    assert hits[0].confidence == 0.6

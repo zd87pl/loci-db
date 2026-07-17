@@ -82,12 +82,12 @@ class ObjectObservation:
     """A single tracked observation of a physical object."""
 
     label: str
-    cx: float       # normalized [0, 1] — horizontal position in camera frame
-    cy: float       # normalized [0, 1] — vertical position in camera frame
+    cx: float  # normalized [0, 1] — horizontal position in camera frame
+    cy: float  # normalized [0, 1] — vertical position in camera frame
     confidence: float
     timestamp_ms: int
     state_id: str
-    depth_m: float | None = None   # LiDAR depth in meters (None if 2D only)
+    depth_m: float | None = None  # LiDAR depth in meters (None if 2D only)
 
     @property
     def age_seconds(self) -> float:
@@ -211,8 +211,12 @@ class SpatialMemory:
         merged_state_id = self._try_merge(normalized_label, cx, cy, confidence, ts, z_normalized)
         if merged_state_id is not None:
             obs = ObjectObservation(
-                label=label, cx=cx, cy=cy,
-                confidence=confidence, timestamp_ms=ts, state_id=merged_state_id,
+                label=label,
+                cx=cx,
+                cy=cy,
+                confidence=confidence,
+                timestamp_ms=ts,
+                state_id=merged_state_id,
                 depth_m=depth_m,
             )
             self._latest[normalized_label] = obs
@@ -231,8 +235,12 @@ class SpatialMemory:
         )
         state_id = self._client.insert(state)
         obs = ObjectObservation(
-            label=label, cx=cx, cy=cy,
-            confidence=confidence, timestamp_ms=ts, state_id=state_id,
+            label=label,
+            cx=cx,
+            cy=cy,
+            confidence=confidence,
+            timestamp_ms=ts,
+            state_id=state_id,
             depth_m=depth_m,
         )
         self._latest[label.strip().lower()] = obs
@@ -250,8 +258,15 @@ class SpatialMemory:
     ) -> str | None:
         """Find a recent high-IoU record for scene_id and merge if found.
 
-        Returns the existing state_id after updating it in-place, or None
-        if no suitable candidate was found (caller should insert a new record).
+        The matched record is deleted and the merged observation is re-inserted
+        through the client's insert path so the Hilbert payload fields and the
+        epoch collection are recomputed for the merged position/timestamp
+        (an in-place payload update would leave stale hilbert_r* fields and
+        strand the point in the old epoch shard, breaking region and
+        time-window queries for objects that drift via successive merges).
+
+        Returns the new state_id of the merged record, or None if no suitable
+        candidate was found (caller should insert a new record).
         """
         cutoff_ms = ts - self.dedup_window_ms
         recent = self.where_is(scene_id, limit=20)
@@ -266,19 +281,33 @@ class SpatialMemory:
             merged_cx = (obs.confidence * obs.cx + confidence * cx) / total_conf
             merged_cy = (obs.confidence * obs.cy + confidence * cy) / total_conf
             merged_conf = max(obs.confidence, confidence)
-            # Update the record in-place via the underlying store
-            for col in list(self._client._known_collections):
-                results = self._client._store.retrieve(col, [obs.state_id])
-                if results:
-                    self._client._store.set_payload(col, obs.state_id, {
-                        "x": merged_cx,
-                        "y": merged_cy,
-                        "z": z_normalized,
-                        "confidence": merged_conf,
-                        "timestamp_ms": ts,
-                    })
-                    return obs.state_id
+            if not self._delete_point(obs.state_id):
+                continue
+            merged_state = WorldState(
+                x=merged_cx,
+                y=merged_cy,
+                z=z_normalized,
+                timestamp_ms=ts,
+                vector=_object_embedding(scene_id, merged_cx, merged_cy),
+                scene_id=scene_id,
+                confidence=merged_conf,
+            )
+            return self._client.insert(merged_state)
         return None
+
+    def _delete_point(self, state_id: str) -> bool:
+        """Remove a point from whichever epoch collection holds it.
+
+        MemoryStore has no public per-point delete, so this reaches into the
+        store's collection map directly. Returns True if the point was found
+        and removed.
+        """
+        store = self._client._store
+        for col in list(self._client._known_collections):
+            collection = store._collections.get(col)
+            if collection is not None and collection.points.pop(state_id, None) is not None:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Read
@@ -322,7 +351,8 @@ class SpatialMemory:
         observations = [
             ObjectObservation(
                 label=r.scene_id or label,
-                cx=r.x, cy=r.y,
+                cx=r.x,
+                cy=r.y,
                 confidence=r.confidence,
                 timestamp_ms=r.timestamp_ms,
                 state_id=r.id,
@@ -365,13 +395,16 @@ class SpatialMemory:
         for r in results:
             if r.scene_id not in seen_labels:
                 seen_labels.add(r.scene_id)
-                observations.append(ObjectObservation(
-                    label=r.scene_id or "unknown",
-                    cx=r.x, cy=r.y,
-                    confidence=r.confidence,
-                    timestamp_ms=r.timestamp_ms,
-                    state_id=r.id,
-                ))
+                observations.append(
+                    ObjectObservation(
+                        label=r.scene_id or "unknown",
+                        cx=r.x,
+                        cy=r.y,
+                        confidence=r.confidence,
+                        timestamp_ms=r.timestamp_ms,
+                        state_id=r.id,
+                    )
+                )
         return observations
 
     def current_objects(self) -> list[ObjectObservation]:

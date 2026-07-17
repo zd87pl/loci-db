@@ -11,7 +11,7 @@
 
 **Please do not open a public GitHub issue for security vulnerabilities.**
 
-To report a security issue, open a [GitHub Security Advisory](https://github.com/zd87pl/loci-db/security/advisories/new) (preferred), or email the maintainers directly with a description of the issue and steps to reproduce.
+To report a security issue, use GitHub private vulnerability reporting: open a [GitHub Security Advisory](https://github.com/zd87pl/loci-db/security/advisories/new) with a description of the issue and steps to reproduce. Reports filed there are visible only to the maintainers.
 
 We will acknowledge your report within **48 hours** and aim to release a fix within **14 days** for critical issues, depending on complexity.
 

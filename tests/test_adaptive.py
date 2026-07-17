@@ -90,3 +90,32 @@ class TestAdaptiveResolution:
         ar.record(0.1, 0.1, 0.1, 0.1)
 
         assert ar.resolution_for(0.5, 0.5, 0.5, 0.5) > ar.resolution_for(0.1, 0.1, 0.1, 0.1)
+
+    def test_density_marginalises_over_time(self):
+        """Points sharing a spatial cell aggregate regardless of epoch-relative time.
+
+        The escalation threshold is per *spatial* cell: keying on the 4D
+        cell would spread these 5 points across distinct time bins and
+        never trigger escalation.
+        """
+        ar = AdaptiveResolution(base_order=4, max_order=6, density_threshold=5)
+        for i in range(5):
+            ar.record(0.5, 0.5, 0.5, i / 5)  # 5 distinct time bins at p=4
+        assert ar.cell_density(0.5, 0.5, 0.5, 0.0) == 5
+        assert ar.resolution_for(0.5, 0.5, 0.5, 0.99) == 5  # escalated
+
+    def test_query_probe_agrees_across_time(self):
+        """resolution_for returns the same answer for any t_norm probe."""
+        ar = AdaptiveResolution(base_order=4, max_order=6, density_threshold=5)
+        for _ in range(5):
+            ar.record(0.5, 0.5, 0.5, 0.1)
+        resolutions = {ar.resolution_for(0.5, 0.5, 0.5, t / 10) for t in range(11)}
+        assert resolutions == {5}
+
+    def test_stats_counts_spatial_cells_not_time_bins(self):
+        ar = AdaptiveResolution(base_order=4, max_order=6, density_threshold=100)
+        for i in range(8):
+            ar.record(0.5, 0.5, 0.5, i / 8)
+        s = ar.stats()
+        assert s.num_cells == 1  # one spatial cell despite 8 time bins
+        assert s.max_density == 8

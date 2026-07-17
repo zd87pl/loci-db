@@ -7,7 +7,10 @@ COPY demo/requirements.txt /app/demo/requirements.txt
 RUN pip install --no-cache-dir -r demo/requirements.txt
 
 # Copy LOCI source and install from local source
+# README.md is required: pyproject declares it as the package readme and
+# hatchling aborts the build if it is missing.
 COPY pyproject.toml /app/pyproject.toml
+COPY README.md /app/README.md
 COPY loci/ /app/loci/
 RUN pip install --no-cache-dir .
 

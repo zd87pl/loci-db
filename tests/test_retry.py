@@ -37,6 +37,42 @@ class TestIsTransient:
     def test_regular_exception_not_transient(self):
         assert _is_transient(ValueError("bad value")) is False
 
+    def test_qdrant_wrapped_httpx_connect_error_is_transient(self):
+        """qdrant-client wraps httpx transport failures; they must be retried."""
+        import httpx
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        exc = ResponseHandlingException(httpx.ConnectError("connection refused"))
+        assert _is_transient(exc) is True
+
+    def test_qdrant_wrapped_read_timeout_is_transient(self):
+        import httpx
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        exc = ResponseHandlingException(httpx.ReadTimeout("timed out"))
+        assert _is_transient(exc) is True
+
+    def test_qdrant_wrapped_non_transient_source_not_transient(self):
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        exc = ResponseHandlingException(ValueError("bad payload"))
+        assert _is_transient(exc) is False
+
+    def test_bare_httpx_transport_error_is_transient(self):
+        import httpx
+
+        assert _is_transient(httpx.ConnectError("boom")) is True
+
+    def test_retries_wrapped_connect_error_then_succeeds(self):
+        import httpx
+        from qdrant_client.http.exceptions import ResponseHandlingException
+
+        exc = ResponseHandlingException(httpx.ConnectError("refused"))
+        fn = MagicMock(side_effect=[exc, "ok"])
+        wrapped = with_retry(max_retries=2, backoff_base=0.01)(fn)
+        assert wrapped() == "ok"
+        assert fn.call_count == 2
+
 
 class TestWithRetry:
     def test_succeeds_first_try(self):

@@ -40,3 +40,34 @@ def test_world_model_harness_markdown_contains_headline() -> None:
 
     assert "LOCI World-Model Harness" in markdown
     assert "prediction-grounded retrieval reduced future-step error" in markdown
+
+
+def _synthetic_result(baseline_error: int, predicted_error: int) -> dict:
+    return {
+        "config": {"trace_points": 80, "horizon_steps": 4, "horizon_ms": 400, "vector_dim": 16},
+        "historical_analog": {"top_step_error": 0},
+        "prediction_grounded_retrieval": {
+            "baseline_step_error": baseline_error,
+            "predicted_step_error": predicted_error,
+        },
+        "novelty": {"familiar_median": 0.1, "novel_corner": 0.95, "novelty_gap": 0.85},
+        "trajectory": {"states": 21},
+    }
+
+
+def test_format_markdown_headline_reduced() -> None:
+    markdown = format_markdown(_synthetic_result(baseline_error=3, predicted_error=0))
+    assert "reduced future-step error from 3 to 0" in markdown
+
+
+def test_format_markdown_headline_increased() -> None:
+    markdown = format_markdown(_synthetic_result(baseline_error=1, predicted_error=3))
+    assert "increased future-step error from 1 to 3" in markdown
+    assert "reduced" not in markdown
+
+
+def test_format_markdown_headline_unchanged() -> None:
+    markdown = format_markdown(_synthetic_result(baseline_error=2, predicted_error=2))
+    assert "left future-step error unchanged at 2" in markdown
+    assert "reduced" not in markdown
+    assert "increased" not in markdown

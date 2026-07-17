@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -100,6 +102,8 @@ class TestEnsureCollection:
         c._qdrant = mock_qdrant
         c._vector_size = 4
         c._known_collections = set()
+        c._collection_locks = {}
+        c._locks_mutex = threading.Lock()
 
         c._ensure_collection("loci_0")
         mock_qdrant.create_collection.assert_not_called()
@@ -119,9 +123,51 @@ class TestEnsureCollection:
         c._qdrant = mock_qdrant
         c._vector_size = 4
         c._known_collections = set()
+        c._collection_locks = {}
+        c._locks_mutex = threading.Lock()
 
         with pytest.raises(UnexpectedResponse):
             c._ensure_collection("loci_0")
+
+    def test_create_conflict_treated_as_success(self, client, mock_qdrant):
+        """A concurrent-writer 409 on create_collection should not raise."""
+        import httpx
+        from qdrant_client.http.exceptions import UnexpectedResponse
+
+        mock_qdrant.create_collection.side_effect = UnexpectedResponse(
+            status_code=409,
+            reason_phrase="Conflict",
+            content=b"already exists",
+            headers=httpx.Headers(),
+        )
+
+        client._ensure_collection("loci_0")
+
+        assert "loci_0" in client._known_collections
+        # The race winner creates the indexes, not us.
+        mock_qdrant.create_payload_index.assert_not_called()
+
+    def test_concurrent_threads_race_single_create(self, client, mock_qdrant):
+        """Two threads racing _ensure_collection must not double-create."""
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def _run():
+            barrier.wait()
+            try:
+                client._ensure_collection("loci_7")
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_run) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        assert mock_qdrant.create_collection.call_count == 1
+        assert "loci_7" in client._known_collections
 
     def test_creates_scale_level_index(self, client, mock_qdrant):
         """scale_level should get a KEYWORD payload index."""
@@ -143,7 +189,22 @@ class TestInsert:
         state = _make_state()
         result = client.insert(state)
         assert isinstance(result, str)
-        assert len(result) == 32  # uuid4 hex
+        # Canonical hyphenated UUID so IDs round-trip through real Qdrant
+        # servers (which serialise UUID point IDs in hyphenated form).
+        assert len(result) == 36
+        assert str(uuid.UUID(result)) == result
+
+    def test_rejects_wrong_vector_dimension(self, client, mock_qdrant):
+        state = _make_state(vector=[1.0, 2.0, 3.0])  # client has vector_size=4
+        with pytest.raises(ValueError, match="dimension"):
+            client.insert(state)
+        mock_qdrant.upsert.assert_not_called()
+
+    def test_batch_rejects_wrong_vector_dimension(self, client, mock_qdrant):
+        states = [_make_state(), _make_state(vector=[1.0])]
+        with pytest.raises(ValueError, match="dimension"):
+            client.insert_batch(states)
+        mock_qdrant.upsert.assert_not_called()
 
     def test_does_not_mutate_input(self, client, mock_qdrant):
         state = _make_state()
@@ -183,18 +244,16 @@ class TestInsert:
 
     def test_find_latest_predecessor_paginates_scroll_results(self, client, mock_qdrant):
         client._known_collections = {"loci_0"}
+        client._discovered = True
 
-        page_1 = []
-        for i in range(256):
+        def _point(i: int):
             point = MagicMock()
             point.id = f"p{i}"
-            page_1.append(point)
+            point.payload = {"timestamp_ms": i}
+            return point
 
-        page_2 = []
-        for i in range(256, 300):
-            point = MagicMock()
-            point.id = f"p{i}"
-            page_2.append(point)
+        page_1 = [_point(i) for i in range(256)]
+        page_2 = [_point(i) for i in range(256, 300)]
 
         mock_qdrant.scroll.side_effect = [
             (page_1, "page-2"),
@@ -205,6 +264,27 @@ class TestInsert:
 
         assert predecessor == ("p299", "loci_0")
         assert mock_qdrant.scroll.call_args_list[1].kwargs["offset"] == "page-2"
+
+    def test_find_latest_predecessor_unordered_pages(self, client, mock_qdrant):
+        """The latest predecessor is chosen by timestamp, not page position."""
+        client._known_collections = {"loci_0"}
+        client._discovered = True
+
+        def _point(pid: str, ts: int):
+            point = MagicMock()
+            point.id = pid
+            point.payload = {"timestamp_ms": ts}
+            return point
+
+        # Unordered scroll: latest timestamp arrives mid-page.
+        points = [_point("a", 100), _point("latest", 900), _point("b", 500)]
+        mock_qdrant.scroll.side_effect = [(points, None)]
+
+        predecessor = client._find_latest_predecessor("scene_a", 20_000)
+
+        assert predecessor == ("latest", "loci_0")
+        # Ordered scrolls break Qdrant pagination; must scroll unordered.
+        assert mock_qdrant.scroll.call_args.kwargs.get("order_by") is None
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +517,297 @@ class TestQuery:
         assert results[0].score == pytest.approx(0.42)
         assert results[0].decayed_score == pytest.approx(0.42)
         assert results[0].state.id == "abc123"
+
+
+# ---------------------------------------------------------------------------
+# Collection discovery
+# ---------------------------------------------------------------------------
+
+
+def _mock_collections_response(names: list[str]) -> MagicMock:
+    response = MagicMock()
+    cols = []
+    for name in names:
+        col = MagicMock()
+        col.name = name
+        cols.append(col)
+    response.collections = cols
+    return response
+
+
+class TestDiscovery:
+    def test_insert_then_query_sees_preexisting_collections(self, client, mock_qdrant):
+        """_ensure_collection populating the cache must not suppress discovery."""
+        mock_qdrant.get_collections.return_value = _mock_collections_response(["loci_5"])
+
+        client.insert(_make_state(timestamp_ms=10_000))  # creates loci_2
+        client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(25_000, 29_999))
+
+        assert "loci_5" in client._known_collections
+        searched = {c.kwargs["collection_name"] for c in mock_qdrant.query_points.call_args_list}
+        assert "loci_5" in searched
+
+    def test_rediscovers_when_window_epoch_unknown(self, client, mock_qdrant):
+        """A query for an unknown epoch re-runs discovery for that call."""
+        mock_qdrant.get_collections.return_value = _mock_collections_response(["loci_2"])
+        client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(10_000, 14_999))
+        assert mock_qdrant.get_collections.call_count == 1
+
+        # Another writer creates loci_9; a query covering epoch 9 must find it.
+        mock_qdrant.get_collections.return_value = _mock_collections_response(["loci_2", "loci_9"])
+        client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(45_000, 49_999))
+
+        assert mock_qdrant.get_collections.call_count == 2
+        searched = {c.kwargs["collection_name"] for c in mock_qdrant.query_points.call_args_list}
+        assert "loci_9" in searched
+
+    def test_discovery_merges_instead_of_replacing(self, client, mock_qdrant):
+        client._known_collections = {"loci_1"}
+        client._discovered = False
+        mock_qdrant.get_collections.return_value = _mock_collections_response(["loci_3"])
+
+        client._discover_collections()
+
+        assert client._known_collections == {"loci_1", "loci_3"}
+
+
+# ---------------------------------------------------------------------------
+# min_confidence
+# ---------------------------------------------------------------------------
+
+
+class TestMinConfidence:
+    def _hit(self, i: int, confidence: float = 1.0) -> MagicMock:
+        hit = MagicMock()
+        hit.score = 0.9 - i * 0.01
+        hit.id = f"hit{i}"
+        hit.vector = [1.0, 0.0, 0.0, 0.0]
+        hit.payload = {
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 10_000,
+            "scene_id": "s1",
+            "scale_level": "patch",
+            "confidence": confidence,
+        }
+        return hit
+
+    def test_min_confidence_pushed_down_and_overfetched(self, client, mock_qdrant):
+        client.insert(_make_state())
+
+        qr = MagicMock()
+        qr.points = [self._hit(i) for i in range(10)]
+        mock_qdrant.query_points.return_value = qr
+
+        results = client.query(
+            vector=[1.0, 0.0, 0.0, 0.0],
+            time_window_ms=(10_000, 14_999),
+            limit=5,
+            min_confidence=0.5,
+        )
+
+        # More qualifying matches than limit → the full limit is returned.
+        assert len(results) == 5
+
+        kwargs = mock_qdrant.query_points.call_args.kwargs
+        # Overfetch beyond limit so the post-filter cannot starve results.
+        assert kwargs["limit"] == 15
+        conf_conditions = [
+            c for c in kwargs["query_filter"].must if getattr(c, "key", None) == "confidence"
+        ]
+        assert len(conf_conditions) == 1
+        assert conf_conditions[0].range.gte == 0.5
+
+    def test_min_confidence_filters_low_confidence(self, client, mock_qdrant):
+        client.insert(_make_state())
+
+        qr = MagicMock()
+        qr.points = [self._hit(0, confidence=0.2), self._hit(1, confidence=0.9)]
+        mock_qdrant.query_points.return_value = qr
+
+        results = client.query(
+            vector=[1.0, 0.0, 0.0, 0.0],
+            time_window_ms=(10_000, 14_999),
+            limit=5,
+            min_confidence=0.5,
+        )
+        assert [r.id for r in results] == ["hit1"]
+
+
+# ---------------------------------------------------------------------------
+# Decay-aware overfetch
+# ---------------------------------------------------------------------------
+
+
+class TestDecayOverfetch:
+    def test_decay_active_triggers_overfetch(self, mock_qdrant):
+        client = LociClient(
+            qdrant_url="http://fake:6333",
+            epoch_size_ms=5000,
+            vector_size=4,
+            decay_lambda=1e-3,
+        )
+        client.insert(_make_state())
+        client.query(vector=[1.0, 0.0, 0.0, 0.0], time_window_ms=(10_000, 14_999), limit=5)
+        assert mock_qdrant.query_points.call_args.kwargs["limit"] == 15
+
+    def test_no_overfetch_without_filters_or_decay(self, client, mock_qdrant):
+        client.insert(_make_state())
+        client.query(vector=[1.0, 0.0, 0.0, 0.0], time_window_ms=(10_000, 14_999), limit=5)
+        assert mock_qdrant.query_points.call_args.kwargs["limit"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Trajectory anchor ID normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestTrajectoryIdNormalisation:
+    def test_hyphenless_anchor_matches_hyphenated_server_ids(self, client, mock_qdrant):
+        """Real Qdrant returns canonical hyphenated UUIDs; hex IDs must match."""
+        canonical = "0e864cb1-9b3c-4713-9f44-0a3a4e0e6f13"
+        hyphenless = canonical.replace("-", "")
+
+        def _pt(pid: str, ts: int):
+            point = MagicMock()
+            point.id = pid
+            point.vector = [1.0, 0.0, 0.0, 0.0]
+            point.payload = {
+                "x": 0.5,
+                "y": 0.5,
+                "z": 0.5,
+                "timestamp_ms": ts,
+                "scene_id": "s1",
+                "scale_level": "patch",
+                "confidence": 1.0,
+            }
+            return point
+
+        client._known_collections = {"loci_2"}
+        client._discovered = True
+        mock_qdrant.retrieve.return_value = [_pt(canonical, 10_050)]
+        mock_qdrant.scroll.return_value = (
+            [_pt("11111111-2222-3333-4444-555555555555", 10_000), _pt(canonical, 10_050)],
+            None,
+        )
+
+        traj = client.get_trajectory(hyphenless, steps_back=1, steps_forward=1)
+
+        # Anchor matched → both states returned, not just the anchor fallback.
+        assert len(traj) == 2
+
+
+# ---------------------------------------------------------------------------
+# Shard failure logging
+# ---------------------------------------------------------------------------
+
+
+class TestShardFailureLogging:
+    def test_partial_shard_failure_logged_at_warning(self, client, mock_qdrant, caplog):
+        client.insert(_make_state(timestamp_ms=3000))  # loci_0
+        client.insert(_make_state(timestamp_ms=8000))  # loci_1
+
+        good = MagicMock()
+        good.points = []
+        mock_qdrant.query_points.side_effect = [RuntimeError("shard down"), good]
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="loci.client"):
+            results = client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
+
+        assert results == []
+        assert any(
+            "loci_0" in rec.message and "shard down" in rec.message for rec in caplog.records
+        )
+
+    def test_all_shards_failed_summary_warning(self, client, mock_qdrant, caplog):
+        client.insert(_make_state(timestamp_ms=3000))
+        client.insert(_make_state(timestamp_ms=8000))
+        mock_qdrant.query_points.side_effect = RuntimeError("shard down")
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="loci.client"):
+            results = client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
+
+        assert results == []
+        assert any("All 2 shard searches failed" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# close() / context manager
+# ---------------------------------------------------------------------------
+
+
+class TestClose:
+    def test_close_delegates_to_qdrant(self, client, mock_qdrant):
+        client.close()
+        mock_qdrant.close.assert_called_once()
+
+    def test_context_manager_closes(self, mock_qdrant):
+        with LociClient(qdrant_url="http://fake:6333", vector_size=4) as client:
+            assert isinstance(client, LociClient)
+        mock_qdrant.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Retention cache invalidation
+# ---------------------------------------------------------------------------
+
+
+class TestRetentionCache:
+    def test_purged_collections_forgotten_and_recreatable(self, mock_qdrant):
+        from loci.temporal.retention import RetentionPolicy
+
+        client = LociClient(
+            qdrant_url="http://fake:6333",
+            epoch_size_ms=5000,
+            vector_size=4,
+            decay_lambda=0.0,
+            retention_policy=RetentionPolicy(max_epochs=1),
+        )
+        client.insert(_make_state(timestamp_ms=1000))  # loci_0
+        client.insert(_make_state(timestamp_ms=6000))  # loci_1 → loci_0 purged
+
+        assert "loci_0" not in client._known_collections
+        assert "loci_0" not in client._collection_locks
+
+        # A late insert into the purged epoch recreates the collection.
+        mock_qdrant.create_collection.reset_mock()
+        client.insert(_make_state(timestamp_ms=2000))
+        created = {
+            c.kwargs["collection_name"] for c in mock_qdrant.create_collection.call_args_list
+        }
+        assert "loci_0" in created
+
+
+# ---------------------------------------------------------------------------
+# spatial_resolution constructor parameter
+# ---------------------------------------------------------------------------
+
+
+class TestSpatialResolution:
+    def test_spatial_resolution_used_for_payload_keys(self, mock_qdrant):
+        client = LociClient(
+            qdrant_url="http://fake:6333",
+            vector_size=4,
+            spatial_resolution=6,
+        )
+        client.insert(_make_state())
+        payload = mock_qdrant.upsert.call_args.kwargs["points"][0].payload
+        assert "hilbert_r6" in payload
+        assert "hilbert_r4" not in payload
+
+    def test_explicit_resolutions_win(self, mock_qdrant):
+        client = LociClient(
+            qdrant_url="http://fake:6333",
+            vector_size=4,
+            spatial_resolution=6,
+            resolutions=[5, 9],
+        )
+        assert client._hilbert.resolutions == [5, 9]
 
 
 # ---------------------------------------------------------------------------

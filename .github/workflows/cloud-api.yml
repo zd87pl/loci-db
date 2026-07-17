@@ -20,13 +20,15 @@ on:
       - "pyproject.toml"
       - ".github/workflows/cloud-api.yml"
 
+permissions:
+  contents: read
+
 jobs:
+  # Deploy gates on this job, so it must catch everything a bad loci/ change
+  # can break: the cloud API suite alone is not enough — a library regression
+  # that passes cloud/tests but fails the library suite must never auto-deploy.
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: cloud/api
-
     steps:
       - uses: actions/checkout@v4
 
@@ -36,11 +38,10 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install cloud API dependencies
-        run: pip install -r requirements.txt httpx pytest pytest-asyncio
-
-      - name: Install loci library (for imports)
-        run: pip install -e ../../
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install -r cloud/api/requirements.txt
 
       - name: Run cloud API tests
         env:
@@ -50,7 +51,16 @@ jobs:
           LOCI_VECTOR_SIZE: "4"
           LOCI_DEV_MODE: "true"
           PYTHONPATH: "${{ github.workspace }}/cloud/api"
-        run: pytest ../../cloud/tests -v --tb=short
+        run: pytest cloud/tests -v --tb=short
+
+      - name: Run library test suite
+        run: pytest tests/ -v --tb=short
+
+      - name: Lint
+        run: ruff check loci/ cloud/
+
+      - name: Type-check
+        run: mypy loci/
 
   deploy:
     needs: test

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -32,11 +33,35 @@ from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
-from loci.temporal.decay import apply_decay
+from loci.temporal.decay import DEFAULT_DECAY_LAMBDA, apply_decay
 from loci.temporal.retention import RetentionManager, RetentionPolicy
-from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.temporal.sharding import collection_name, epoch_id
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_id(point_id: object) -> str:
+    """Normalise a point ID for comparison.
+
+    Real Qdrant servers canonicalise UUID point IDs into lowercase hyphenated
+    form, while historic Loci clients generated hyphen-less ``uuid4().hex``
+    IDs. Comparing normalised forms keeps both representations matching.
+    """
+    return str(point_id).lower().replace("-", "")
+
+
+def _is_already_exists_error(exc: Exception) -> bool:
+    """Return True for Qdrant 'collection already exists' create conflicts."""
+    if getattr(exc, "status_code", None) == 409:
+        return True
+    return "already exists" in str(exc).lower()
+
+
+def _point_timestamp(point: Any) -> int:
+    """Timestamp of a scrolled Qdrant point (0 when payload is missing)."""
+    payload = getattr(point, "payload", None) or {}
+    return int(payload.get("timestamp_ms", 0))
+
 
 _EXACT_FILTER_OVERFETCH = 3
 _SCROLL_PAGE_SIZE = 256
@@ -58,9 +83,12 @@ class LociClient:
     Args:
         qdrant_url: URL of the Qdrant instance (e.g. ``"http://localhost:6333"``).
         epoch_size_ms: Width of each temporal shard in milliseconds.
-        spatial_resolution: Hilbert curve resolution order (bits per dimension).
+        spatial_resolution: Hilbert curve resolution order (bits per dimension)
+            used as the default (coarsest) query resolution. Ignored when an
+            explicit ``resolutions`` list is provided — ``resolutions`` wins.
         vector_size: Dimensionality of the embedding vectors.
-        decay_lambda: Temporal decay rate for recency weighting.
+        decay_lambda: Temporal decay rate for recency weighting (per ms;
+            defaults to a one-hour half-life).
         distance: Distance metric — ``"cosine"``, ``"dot"``, or ``"euclidean"``.
         max_retries: Maximum number of retry attempts for transient Qdrant failures.
         retry_backoff: Base delay in seconds for exponential backoff between retries.
@@ -72,7 +100,7 @@ class LociClient:
         epoch_size_ms: int = 5000,
         spatial_resolution: int = 4,
         vector_size: int = 512,
-        decay_lambda: float = 1e-4,
+        decay_lambda: float = DEFAULT_DECAY_LAMBDA,
         distance: str = "cosine",
         adaptive: bool = False,
         max_retries: int = 3,
@@ -111,7 +139,16 @@ class LociClient:
         self._retry_backoff = retry_backoff
         self._collection_prefix = collection_prefix
         self._known_collections: set[str] = set()
-        self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
+        self._discovered = False
+        self._collection_locks: dict[str, threading.Lock] = {}
+        self._locks_mutex = threading.Lock()
+        # Explicit resolutions win; otherwise spatial_resolution becomes the
+        # coarsest (default) query resolution alongside the finer defaults.
+        self._hilbert = HilbertIndex(
+            resolutions=resolutions
+            if resolutions is not None
+            else sorted({spatial_resolution, 8, 12})
+        )
         self._adaptive = (
             AdaptiveResolution(
                 base_order=self._hilbert.resolutions[0],
@@ -152,9 +189,14 @@ class LociClient:
     # Collection management
     # ------------------------------------------------------------------
 
-    def _discover_collections(self) -> None:
-        """Populate _known_collections from Qdrant (for read-only clients)."""
-        if self._known_collections:
+    def _discover_collections(self, force: bool = False) -> None:
+        """Merge Qdrant's collection listing into _known_collections.
+
+        Runs once per client by default; pass ``force=True`` to refresh (used
+        when a query targets an epoch this client has not seen yet, e.g. one
+        created by another writer).
+        """
+        if self._discovered and not force:
             return
         prefix = f"{self._collection_prefix}loci_" if self._collection_prefix else "loci_"
         try:
@@ -162,53 +204,104 @@ class LociClient:
             for col in response.collections:
                 if col.name.startswith(prefix):
                     self._known_collections.add(col.name)
+            self._discovered = True
         except Exception:
             logger.debug("Failed to discover collections", exc_info=True)
 
+    def _refresh_for_window(self, first_ep: int, last_ep: int) -> None:
+        """Re-run discovery when part of a requested epoch window is unknown."""
+        known = sum(1 for ep in self._list_active_epochs() if first_ep <= ep <= last_ep)
+        if known < (last_ep - first_ep + 1):
+            self._discover_collections(force=True)
+
+    def _epochs_intersecting(self, first_ep: int, last_ep: int) -> list[int]:
+        """Known epochs within [first_ep, last_ep] without materialising the range."""
+        return [ep for ep in self._list_active_epochs() if first_ep <= ep <= last_ep]
+
+    def _validate_vector(self, vector: list[float]) -> None:
+        if len(vector) != self._vector_size:
+            raise ValueError(f"vector has dimension {len(vector)}, expected {self._vector_size}")
+
     def _ensure_collection(self, name: str) -> None:
-        """Create a Qdrant collection if it does not already exist (idempotent)."""
+        """Create a Qdrant collection if it does not already exist.
+
+        Idempotent and thread-safe: a per-collection lock serialises the
+        check-then-create within this process, and a create conflict from a
+        concurrent external writer is treated as success.
+        """
         if name in self._known_collections:
             return
 
-        exists = False
-        try:
-            self._qdrant.get_collection(name)
-            exists = True
-        except UnexpectedResponse as exc:
-            if exc.status_code != 404:
-                raise
+        with self._locks_mutex:
+            lock = self._collection_locks.setdefault(name, threading.Lock())
+        with lock:
+            if name in self._known_collections:
+                return
 
-        if not exists:
-            self._qdrant.create_collection(
-                collection_name=name,
-                vectors_config=VectorParams(
-                    size=self._vector_size,
-                    distance=self._distance,
-                ),
-            )
-            for r in self._hilbert.resolutions:
+            exists = False
+            try:
+                self._qdrant.get_collection(name)
+                exists = True
+            except UnexpectedResponse as exc:
+                if exc.status_code != 404:
+                    raise
+            except ValueError as exc:
+                # qdrant-client's local (":memory:"/path) engine signals a
+                # missing collection with ValueError instead of an HTTP 404.
+                if "not found" not in str(exc).lower():
+                    raise
+
+            if not exists:
+                try:
+                    self._qdrant.create_collection(
+                        collection_name=name,
+                        vectors_config=VectorParams(
+                            size=self._vector_size,
+                            distance=self._distance,
+                        ),
+                    )
+                except Exception as exc:
+                    # A concurrent writer won the create race; treat as success
+                    # (the winner also creates the payload indexes).
+                    if not _is_already_exists_error(exc):
+                        raise
+                    exists = True
+
+            if not exists:
+                for r in self._hilbert.resolutions:
+                    self._qdrant.create_payload_index(
+                        collection_name=name,
+                        field_name=f"hilbert_r{r}",
+                        field_schema=PayloadSchemaType.INTEGER,
+                    )
                 self._qdrant.create_payload_index(
                     collection_name=name,
-                    field_name=f"hilbert_r{r}",
+                    field_name="timestamp_ms",
                     field_schema=PayloadSchemaType.INTEGER,
                 )
-            self._qdrant.create_payload_index(
-                collection_name=name,
-                field_name="timestamp_ms",
-                field_schema=PayloadSchemaType.INTEGER,
-            )
-            self._qdrant.create_payload_index(
-                collection_name=name,
-                field_name="scale_level",
-                field_schema=PayloadSchemaType.KEYWORD,
-            )
-            self._qdrant.create_payload_index(
-                collection_name=name,
-                field_name="scene_id",
-                field_schema=PayloadSchemaType.KEYWORD,
-            )
+                self._qdrant.create_payload_index(
+                    collection_name=name,
+                    field_name="scale_level",
+                    field_schema=PayloadSchemaType.KEYWORD,
+                )
+                self._qdrant.create_payload_index(
+                    collection_name=name,
+                    field_name="scene_id",
+                    field_schema=PayloadSchemaType.KEYWORD,
+                )
 
-        self._known_collections.add(name)
+            self._known_collections.add(name)
+
+    def close(self) -> None:
+        """Close the underlying Qdrant connection (no-op in cloud mode)."""
+        if self._cloud is None:
+            self._qdrant.close()
+
+    def __enter__(self) -> LociClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     # ------------------------------------------------------------------
     # Write
@@ -228,7 +321,8 @@ class LociClient:
         if self._cloud is not None:
             return self._cloud.insert(state)
 
-        point_id = uuid.uuid4().hex
+        self._validate_vector(state.vector)
+        point_id = str(uuid.uuid4())
 
         ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
         col = self._col_name(ep)
@@ -271,6 +365,11 @@ class LociClient:
         Returns:
             List of assigned IDs (same order as *states*).
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("insert_batch is not supported in cloud mode")
+        for state in states:
+            self._validate_vector(state.vector)
+
         groups: dict[str, list[PointStruct]] = {}
         id_by_index: dict[int, str] = {}
         scene_chains: dict[str, tuple[str, str]] = {}  # scene_id → (latest point_id, collection)
@@ -280,7 +379,7 @@ class LociClient:
         indexed = sorted(enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms))
 
         for orig_idx, state in indexed:
-            point_id = uuid.uuid4().hex
+            point_id = str(uuid.uuid4())
             id_by_index[orig_idx] = point_id
 
             ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
@@ -294,12 +393,18 @@ class LociClient:
 
             payload = self._state_to_payload(state, hilbert_ids)
 
-            # Causal link within the batch
-            if state.scene_id and state.scene_id in scene_chains:
-                prev_id, prev_col = scene_chains[state.scene_id]
-                payload["prev_state_id"] = prev_id
-                prev_collection_by_point[point_id] = prev_col
+            # Causal link within the batch; the first state per scene links to
+            # the latest predecessor already in the store (matching the
+            # sequential-insert behaviour).
             if state.scene_id:
+                if state.scene_id in scene_chains:
+                    prev_link: tuple[str, str] | None = scene_chains[state.scene_id]
+                else:
+                    prev_link = self._find_latest_predecessor(state.scene_id, state.timestamp_ms)
+                if prev_link is not None:
+                    prev_id, prev_col = prev_link
+                    payload["prev_state_id"] = prev_id
+                    prev_collection_by_point[point_id] = prev_col
                 scene_chains[state.scene_id] = (point_id, col)
 
             groups.setdefault(col, []).append(
@@ -408,19 +513,40 @@ class LociClient:
         overlap_factor: float = 1.2,
         min_confidence: float | None = None,
     ) -> list[ScoredWorldState]:
-        """Search for nearest neighbours and return scores alongside states."""
+        """Search for nearest neighbours and return scores alongside states.
+
+        Scores follow the higher-is-better convention for every distance
+        metric: raw Qdrant euclidean distances (smaller-is-better) are
+        negated at the boundary so decay re-ranking, cross-shard merging,
+        and truncation behave identically across metrics and backends.
+        """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("query_scored is not supported in cloud mode")
         self._discover_collections()
 
         if time_window_ms is not None:
             start_ms, end_ms = time_window_ms
-            epochs = epochs_in_range(start_ms, end_ms, self._epoch_size_ms)
+            first_ep = epoch_id(start_ms, self._epoch_size_ms)
+            last_ep = epoch_id(end_ms, self._epoch_size_ms)
+            # Refresh discovery when part of the window is unknown — another
+            # writer may have created those collections since discovery ran.
+            self._refresh_for_window(first_ep, last_ep)
+            epochs = self._epochs_intersecting(first_ep, last_ep)
         else:
             epochs = self._list_active_epochs()
         if _epoch_ids is not None:
             epochs = [ep for ep in epochs if ep in _epoch_ids]
 
-        shard_limit = limit * _EXACT_FILTER_OVERFETCH if spatial_bounds is not None else limit
+        # Over-fetch per shard whenever post-search filtering (spatial exact
+        # match, min_confidence) or decay re-ranking can reorder/drop hits;
+        # otherwise per-shard truncation could evict the true top-k.
+        needs_overfetch = (
+            spatial_bounds is not None or min_confidence is not None or self._decay_lambda > 0
+        )
+        shard_limit = limit * _EXACT_FILTER_OVERFETCH if needs_overfetch else limit
         all_results: list[dict] = []
+        shards_tried = 0
+        shards_failed = 0
         for ep in epochs:
             col = self._col_name(ep)
             if col not in self._known_collections:
@@ -455,9 +581,15 @@ class LociClient:
                     )
                 )
 
+            if min_confidence is not None:
+                must_conditions.append(
+                    FieldCondition(key="confidence", range=Range(gte=min_confidence))
+                )
+
             must_conditions.extend(extra_filter_to_conditions(_extra_payload_filter))
 
             query_filter = Filter(must=must_conditions) if must_conditions else None
+            shards_tried += 1
             try:
                 resp = self._retry(
                     self._qdrant.query_points,
@@ -468,18 +600,29 @@ class LociClient:
                     with_vectors=True,
                 )
                 hits = resp.points
-            except Exception:  # noqa: S112  # retry loop across shards
+            except Exception as exc:
+                shards_failed += 1
+                logger.warning("Search failed on shard %s: %s", col, exc)
                 continue
             for hit in hits:
+                score = float(hit.score)
+                if self._distance == Distance.EUCLID:
+                    # Qdrant returns raw euclidean distances (smaller is
+                    # better); negate so all downstream code sees
+                    # higher-is-better scores.
+                    score = -score
                 all_results.append(
                     {
-                        "score": hit.score,
+                        "score": score,
                         "timestamp_ms": hit.payload.get("timestamp_ms", 0),
                         "payload": hit.payload,
                         "vector": hit.vector,
                         "id": hit.id,
                     }
                 )
+
+        if shards_tried > 0 and shards_failed == shards_tried:
+            logger.warning("All %d shard searches failed; returning no results", shards_tried)
 
         if spatial_bounds is not None or time_window_ms is not None or min_confidence is not None:
             all_results = [
@@ -549,7 +692,19 @@ class LociClient:
         Returns:
             :class:`PredictRetrieveResult` when current_position is set,
             otherwise a plain list of :class:`WorldState`.
+
+        In cloud mode only the legacy path (plain query on the predicted
+        vector) is supported; ``current_position``, ``return_prediction``,
+        and ``calibrator`` require scored retrieval, which the cloud API
+        does not expose yet.
         """
+        if self._cloud is not None and (
+            current_position is not None or return_prediction or calibrator is not None
+        ):
+            raise CloudModeUnsupportedError(
+                "predict_and_retrieve with current_position, return_prediction, or "
+                "calibrator is not supported in cloud mode"
+            )
         if current_position is not None or return_prediction:
             ptr = PredictThenRetrieve(self, calibrator=calibrator)
             return ptr.retrieve(
@@ -594,6 +749,8 @@ class LociClient:
         Returns:
             List of :class:`WorldState` at the finest available scale.
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("funnel_query is not supported in cloud mode")
         from loci.retrieval.funnel import funnel_search
 
         return funnel_search(self, vector, spatial_bounds, time_window_ms, limit)
@@ -621,8 +778,15 @@ class LociClient:
         Returns:
             Ordered list of states from oldest to newest.
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("get_trajectory is not supported in cloud mode")
         self._discover_collections()
         anchor = self._get_state_by_id(state_id)
+        if anchor is None:
+            # The anchor may live in a collection created by another writer
+            # after our last discovery; refresh once and retry.
+            self._discover_collections(force=True)
+            anchor = self._get_state_by_id(state_id)
         if anchor is None:
             return []
         if not anchor.scene_id:
@@ -641,7 +805,6 @@ class LociClient:
                             ),
                         ]
                     ),
-                    order_by="timestamp_ms",
                     with_vectors=True,
                 )
                 for pt in points:
@@ -649,14 +812,16 @@ class LociClient:
                     if isinstance(vec, dict):
                         vec = list(vec.values())[0] if vec else []
                     all_states.append(self._payload_to_state(pt.payload, pt.id, vec))
-            except Exception:  # noqa: S112  # retry loop across epochs
+            except Exception as exc:
+                logger.warning("Trajectory scroll failed on shard %s: %s", col, exc)
                 continue
 
         # Sort by timestamp and find anchor position
         all_states.sort(key=lambda s: s.timestamp_ms)
         anchor_idx = None
+        target = _normalize_id(state_id)
         for i, s in enumerate(all_states):
-            if s.id == state_id:
+            if _normalize_id(s.id) == target:
                 anchor_idx = i
                 break
 
@@ -685,13 +850,21 @@ class LociClient:
         Returns:
             List of :class:`WorldState` sorted by timestamp.
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("get_causal_context is not supported in cloud mode")
         self._discover_collections()
         anchor = self._get_state_by_id(state_id)
+        if anchor is None:
+            self._discover_collections(force=True)
+            anchor = self._get_state_by_id(state_id)
         if anchor is None or not anchor.scene_id:
             return []
 
         t_min = anchor.timestamp_ms - window_ms
         t_max = anchor.timestamp_ms + window_ms
+        self._refresh_for_window(
+            epoch_id(t_min, self._epoch_size_ms), epoch_id(t_max, self._epoch_size_ms)
+        )
 
         context: list[WorldState] = []
         for col in list(self._known_collections):
@@ -710,7 +883,6 @@ class LociClient:
                             ),
                         ]
                     ),
-                    order_by="timestamp_ms",
                     with_vectors=True,
                 )
                 for pt in points:
@@ -718,7 +890,8 @@ class LociClient:
                     if isinstance(vec, dict):
                         vec = list(vec.values())[0] if vec else []
                     context.append(self._payload_to_state(pt.payload, pt.id, vec))
-            except Exception:  # noqa: S112  # retry loop across epochs
+            except Exception as exc:
+                logger.warning("Causal-context scroll failed on shard %s: %s", col, exc)
                 continue
 
         context.sort(key=lambda s: s.timestamp_ms)
@@ -732,13 +905,22 @@ class LociClient:
         if self._retention is None:
             return
         try:
-            self._retention.maybe_purge(
+            dropped = self._retention.maybe_purge(
                 active_epochs=self._list_active_epochs(),
                 now_ms=int(time.time() * 1000),
                 delete_fn=self._qdrant.delete_collection,
             )
+            self._forget_collections(dropped)
         except Exception as exc:
             logger.warning("Retention purge failed: %s", exc)
+
+    def _forget_collections(self, names: list[str]) -> None:
+        """Drop purged collections from local caches so a late insert into a
+        purged epoch simply recreates the collection."""
+        for name in names:
+            self._known_collections.discard(name)
+            with self._locks_mutex:
+                self._collection_locks.pop(name, None)
 
     def _normalise_time(self, timestamp_ms: int, ep: int) -> float:
         """Map a timestamp to [0, 1] within its epoch."""
@@ -803,7 +985,12 @@ class LociClient:
         return None
 
     def _find_latest_predecessor(self, scene_id: str, before_ms: int) -> tuple[str, str] | None:
-        """Find the most recent state in the same scene before a timestamp."""
+        """Find the most recent state in the same scene before a timestamp.
+
+        Scrolls unordered (server-side ordering breaks pagination) and picks
+        the max-timestamp point client-side. The scan is bounded per epoch
+        collection by the scene and timestamp filters.
+        """
         if not scene_id:
             return None
         self._discover_collections()
@@ -817,11 +1004,10 @@ class LociClient:
                             FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
                         ]
                     ),
-                    order_by="timestamp_ms",
                 )
                 if points:
-                    # Scroll returns ascending order; last item is the latest predecessor
-                    return str(points[-1].id), collection
+                    latest = max(points, key=_point_timestamp)
+                    return str(latest.id), collection
             except Exception:
                 logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
         return None
@@ -850,10 +1036,15 @@ class LociClient:
         *,
         collection: str,
         scroll_filter: Filter | None = None,
-        order_by: str | None = None,
         with_vectors: bool = False,
     ) -> list:
-        """Return the full ordered scroll result for a collection."""
+        """Return the full scroll result for a collection.
+
+        Scrolls unordered: Qdrant returns ``next_page_offset=None`` whenever
+        ``order_by`` is set (and rejects ``offset`` + ``order_by``), which
+        silently truncated ordered scrolls to a single page. Callers sort
+        client-side by ``timestamp_ms`` instead.
+        """
         offset: object | None = None
         all_points: list = []
         while True:
@@ -862,7 +1053,6 @@ class LociClient:
                 collection_name=collection,
                 scroll_filter=scroll_filter,
                 limit=_SCROLL_PAGE_SIZE,
-                order_by=order_by,
                 with_vectors=with_vectors,
                 offset=offset,
             )

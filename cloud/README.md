@@ -45,13 +45,17 @@ cloud/
 │   ├── 001_api_keys.sql          # api_keys + tenants schema
 │   ├── 002_rate_limits.sql       # Per-tenant rate_limit_rpm column
 │   ├── 003_rls.sql               # Row-Level Security (service-role only)
-│   └── 004_admin_keys.sql        # is_admin flag for /admin/* endpoints
+│   ├── 004_admin_keys.sql        # is_admin flag for /admin/* endpoints
+│   └── 005_namespace_check.sql   # CHECK constraint enforcing the namespace pattern
 ├── terraform/                    # Terraform scaffold (placeholder for future IaC)
 │   ├── main.tf
 │   └── variables.tf
 ├── tests/                        # Integration tests (mocked, CI-friendly)
 │   ├── conftest.py
 │   ├── test_api.py
+│   ├── test_admin.py
+│   ├── test_auth.py
+│   ├── test_generate_key.py
 │   └── pytest.ini
 └── docs/
     └── runbooks/
@@ -90,6 +94,8 @@ uvicorn server:app --reload
 | `DATABASE_URL` | Supabase Postgres connection string | Fly.io secret |
 | `LOCI_CORS_ORIGINS` | Comma-separated allowed origins | Fly.io secret |
 | `LOCI_DEV_MODE` | Enable Swagger/ReDoc UI (`true`/`false`) | Fly.io secret |
+| `LOCI_MAX_BODY_BYTES` | Max request body size, enforced with 413 (default 5 MB) | Fly.io env |
+| `LOCI_MAX_METADATA_BYTES` | Max `metadata` size JSON-serialized (default 16 KB) | Fly.io env |
 
 ## CI/CD
 
@@ -118,7 +124,13 @@ psql $DATABASE_URL < cloud/migrations/001_api_keys.sql
 psql $DATABASE_URL < cloud/migrations/002_rate_limits.sql
 psql $DATABASE_URL < cloud/migrations/003_rls.sql
 psql $DATABASE_URL < cloud/migrations/004_admin_keys.sql
+psql $DATABASE_URL < cloud/migrations/005_namespace_check.sql
 ```
+
+Migration 005 enforces the namespace-isolation pattern (`^[a-z0-9]{3,64}$`, no
+underscores) at the database layer. Before applying it, check for
+non-conforming rows (see the comment inside the migration) — the `VALIDATE
+CONSTRAINT` step fails safely if any exist.
 
 RLS is enabled on `api_keys`, `tenants`, `usage_events`, `usage_monthly`. The service role bypasses RLS; anonymous/public access is denied.
 

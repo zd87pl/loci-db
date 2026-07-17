@@ -6,7 +6,20 @@ that intersect it so we can use a ``MatchAny`` filter in Qdrant.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from loci.spatial.hilbert import _DEFAULT_ORDER, HilbertIndex, SpatialBounds
+
+
+@lru_cache(maxsize=32)
+def _index_for_order(order: int) -> HilbertIndex:
+    """Return a cached HilbertIndex for *order*.
+
+    HilbertIndex builds a 16^4-entry numpy LUT on first query (~350ms for
+    order 4); caching one instance per resolution means that cost is paid
+    at most once per process instead of on every expand_bounding_box call.
+    """
+    return HilbertIndex(resolutions=[order])
 
 
 def compute_bucket_id(
@@ -64,5 +77,5 @@ def expand_bounding_box(
         t_min=t_min,
         t_max=t_max,
     )
-    index = HilbertIndex(resolutions=[order])
+    index = _index_for_order(order)
     return index.query_buckets(bounds, resolution=order, overlap_factor=overlap_factor)

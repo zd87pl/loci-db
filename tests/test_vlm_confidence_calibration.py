@@ -43,13 +43,8 @@ def test_vlm_confidence_penalized_when_yolo_absent() -> None:
     memory.observe = MagicMock(return_value="state-id")
     ing = SceneIngestion(memory=memory, vlm_client=None, use_vlm_fallback=False)
 
-    vlm_raw_conf = 0.8
-    # No YOLO detections for this label → penalty applies
-    raw_yolo: list[Detection] = []
-
-    # Simulate the corroboration check directly
-    yolo_corroborated = any(ing._iou(0.5, 0.5, d.cx, d.cy) > 0.3 for d in raw_yolo)
-    final_conf = vlm_raw_conf * (1.0 if yolo_corroborated else 0.6)
+    # No YOLO detections at all → penalty applies
+    final_conf = ing._calibrate_vlm_confidence("cup", 0.5, 0.5, 0.8, [])
     assert abs(final_conf - 0.48) < 1e-6
 
 
@@ -59,15 +54,12 @@ def test_vlm_confidence_unpenalized_when_yolo_corroborates() -> None:
     memory.observe = MagicMock(return_value="state-id")
     ing = SceneIngestion(memory=memory, vlm_client=None, use_vlm_fallback=False)
 
-    vlm_raw_conf = 0.8
-    vlm_cx, vlm_cy = 0.5, 0.5
     # YOLO has a detection for this label at same position
     yolo_det = Detection(
         label="cup", cx=0.5, cy=0.5, width=0.1, height=0.1, confidence=0.3, source="yolo"
     )
 
-    yolo_corroborated = any(ing._iou(vlm_cx, vlm_cy, d.cx, d.cy) > 0.3 for d in [yolo_det])
-    final_conf = vlm_raw_conf * (1.0 if yolo_corroborated else 0.6)
+    final_conf = ing._calibrate_vlm_confidence("cup", 0.5, 0.5, 0.8, [yolo_det])
     # YOLO corroborates → no penalty
     assert abs(final_conf - 0.8) < 1e-6
 
@@ -78,19 +70,26 @@ def test_vlm_confidence_penalized_when_yolo_has_different_label() -> None:
     memory.observe = MagicMock(return_value="state-id")
     ing = SceneIngestion(memory=memory, vlm_client=None, use_vlm_fallback=False)
 
-    vlm_raw_conf = 0.8
-    vlm_cx, vlm_cy = 0.5, 0.5
-    vlm_label = "cup"
-    # YOLO detects "bottle" (different label) at same position — different label bucket
+    # YOLO detects "bottle" (different label) at same position — no corroboration for "cup"
     yolo_det = Detection(
         label="bottle", cx=0.5, cy=0.5, width=0.1, height=0.1, confidence=0.3, source="yolo"
     )
-    raw_by_label = {"bottle": [yolo_det]}  # label "cup" not present
 
-    yolo_corroborated = any(
-        ing._iou(vlm_cx, vlm_cy, d.cx, d.cy) > 0.3 for d in raw_by_label.get(vlm_label, [])
+    final_conf = ing._calibrate_vlm_confidence("cup", 0.5, 0.5, 0.8, [yolo_det])
+    assert abs(final_conf - 0.48) < 1e-6
+
+
+def test_vlm_confidence_penalized_when_yolo_same_label_far_away() -> None:
+    """VLM confidence is penalized if the same-label YOLO detection does not overlap."""
+    memory = MagicMock()
+    memory.observe = MagicMock(return_value="state-id")
+    ing = SceneIngestion(memory=memory, vlm_client=None, use_vlm_fallback=False)
+
+    yolo_det = Detection(
+        label="cup", cx=0.9, cy=0.9, width=0.1, height=0.1, confidence=0.3, source="yolo"
     )
-    final_conf = vlm_raw_conf * (1.0 if yolo_corroborated else 0.6)
+
+    final_conf = ing._calibrate_vlm_confidence("cup", 0.1, 0.1, 0.8, [yolo_det])
     assert abs(final_conf - 0.48) < 1e-6
 
 

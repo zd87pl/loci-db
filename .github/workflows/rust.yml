@@ -1,0 +1,37 @@
+name: Rust (loci-core)
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "loci-core/**"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "loci-core/**"
+      - ".github/workflows/rust.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: loci-core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        # SHA-pinned `stable` branch of dtolnay/rust-toolchain (resolved 2026-07-17).
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+
+      - name: Run tests
+        # --no-default-features drops the optional pyo3 `python` feature: it is
+        # built with pyo3's extension-module flag, which deliberately leaves
+        # Python symbols unresolved and cannot link a standalone test binary.
+        # The pure-Rust API (hilbert/spatial/temporal/novelty/batch) is what
+        # the unit and integration tests exercise.
+        run: cargo test --release --no-default-features

@@ -5,7 +5,7 @@
 ```
 ┌───────────────────────────────────────────────┐
 │              Application Layer                │
-│  LociClient / AsyncLociClient             │
+│  LociClient / AsyncLociClient / LocalLociClient│
 │  insert · query · predict_and_retrieve        │
 ├───────────────────────────────────────────────┤
 │              Retrieval Layer                  │
@@ -18,6 +18,7 @@
 ├───────────────────────────────────────────────┤
 │              Storage Layer                    │
 │  Qdrant (one collection per temporal epoch)   │
+│  MemoryStore (in-process, no infra needed)    │
 └───────────────────────────────────────────────┘
 ```
 
@@ -34,6 +35,9 @@ Collections are created lazily on first insert.  Payload indices:
 | `scene_id`     | KEYWORD   | Causal chains and funnel narrowing |
 
 Distance metric is configurable: `cosine` (default), `dot`, or `euclidean`.
+
+`LocalLociClient` swaps Qdrant for **`MemoryStore`**, an in-process backend
+with the same epoch/Hilbert layout — no external infrastructure required.
 
 ### Layer 2: Indexing & Routing
 
@@ -69,15 +73,20 @@ epochs and scene IDs are carried forward between stages so finer passes do not
 re-scan unrelated shards. Always returns results at the finest available granularity.
 
 **temporal decay** — Re-ranks results using exponential decay:
-`score = similarity × exp(-λ × age_ms)`.  Configurable via `decay_lambda`.
+`score = similarity × exp(-λ × age_ms)`.  λ defaults to
+`DEFAULT_DECAY_LAMBDA`, a **one-hour half-life**; derive custom rates from a
+half-life with `loci.temporal.decay.lambda_from_half_life()` rather than
+setting the per-millisecond `decay_lambda` directly.
 
 ### Layer 4: Application
 
-Two client implementations share identical APIs:
+Three client implementations share identical APIs:
 
 - **`LociClient`** — Synchronous.  Sequential shard iteration.
 - **`AsyncLociClient`** — Asynchronous.  Parallel shard fan-out via
   `asyncio.gather`.  Async-safe collection creation with per-collection locks.
+- **`LocalLociClient`** — Synchronous, backed by the in-process `MemoryStore`.
+  Zero infrastructure: no Qdrant server needed.
 
 Both support:
 - `insert()` / `insert_batch()` — with automatic causal linking within scenes
@@ -108,7 +117,9 @@ query(vector, bounds, time_window)
 
 predict_and_retrieve(context_vector, predictor_fn, horizon)
   → predicted = predictor_fn(context_vector)
-  → query(predicted, time_window=[now, now+horizon])
+  → query(predicted) — searches ALL stored history for analogs by default;
+    an explicit search_time_window_ms=(start, end) restricts retrieval to an
+    absolute timestamp range (only useful for scheduled/future-dated states)
 ```
 
 ## Causal Linking
@@ -118,3 +129,22 @@ same `scene_id` and links `prev_state_id` / `next_state_id`.  On
 `insert_batch()`, states are sorted by `(scene_id, timestamp_ms)` and
 linked within the batch.  This enables `get_trajectory()` to walk the
 causal chain forward and backward from any anchor state.
+
+## Known Limitations and Planned Refactors
+
+Two structural issues are known and deliberately deferred; both are tracked
+in [ROADMAP.md](ROADMAP.md):
+
+1. **Unbounded collection growth.** One Qdrant collection per temporal epoch
+   means collection count grows linearly with wall-clock time — at the default
+   5-second epoch, roughly 17,000 collections per day of continuous ingest.
+   Operations that enumerate collections (shard routing, compaction, health
+   checks) are O(collections). Planned fix: migrate to payload-indexed epoch
+   IDs within a bounded set of collections, keeping the same epoch-pruned
+   query semantics.
+
+2. **Hand-maintained client parity.** `LociClient`, `AsyncLociClient`, and
+   `LocalLociClient` implement the same API surface with roughly 77% duplicated
+   logic, so every behavioral fix must be applied three times and parity drifts.
+   Planned fix: extract a shared core (query planning, filter construction,
+   result assembly) with thin sync/async/local transport shells.

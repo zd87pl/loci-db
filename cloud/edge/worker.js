@@ -51,8 +51,15 @@ export default {
 };
 
 /**
- * Forward the incoming request to the Fly.io upstream verbatim,
- * stripping the CF-specific host and rewriting the URL.
+ * Forward the incoming request to the Fly.io upstream, stripping the
+ * CF-specific host and rewriting the URL.
+ *
+ * Forwarding headers are NOT proxied verbatim: inbound X-Forwarded-For /
+ * Forwarded / X-Real-IP are client-controlled (anyone can send them), and the
+ * upstream uvicorn trusts X-Forwarded-For to derive the client IP for its
+ * per-IP auth-failure throttle. We strip them and re-set X-Forwarded-For from
+ * CF-Connecting-IP, which Cloudflare itself stamps with the real client IP
+ * and which clients cannot forge.
  */
 async function forwardToUpstream(request, env) {
   const upstream = env.UPSTREAM_URL;
@@ -63,9 +70,21 @@ async function forwardToUpstream(request, env) {
   const inboundUrl = new URL(request.url);
   const targetUrl = new URL(inboundUrl.pathname + inboundUrl.search, upstream);
 
+  const headers = new Headers(request.headers);
+  // Drop every client-controlled forwarding header before proxying.
+  headers.delete("X-Forwarded-For");
+  headers.delete("Forwarded");
+  headers.delete("X-Real-IP");
+  // CF-Connecting-IP is set by Cloudflare (not spoofable through the edge).
+  const clientIp = request.headers.get("CF-Connecting-IP");
+  if (clientIp) {
+    headers.set("X-Forwarded-For", clientIp);
+    headers.set("X-Real-IP", clientIp);
+  }
+
   const upstreamRequest = new Request(targetUrl.toString(), {
     method: request.method,
-    headers: request.headers,
+    headers,
     body: request.body,
     redirect: "follow",
   });

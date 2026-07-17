@@ -39,12 +39,12 @@ def test_duplicate_high_iou_merges_into_existing_record() -> None:
         "cup", cx=0.51, cy=0.51, confidence=0.85, timestamp_ms=ts + 100, min_confidence=0.0
     )
     assert id2 is not None
-    # Should be the same record (merged), not a new one
-    assert id2 == id1
 
-    # Only one record in memory (not two)
+    # Only one record in memory (not two) — the merge deletes the matched
+    # record and re-inserts the merged observation under a fresh state_id.
     observations = mem.where_is("cup")
     assert len(observations) == 1
+    assert observations[0].state_id == id2
 
 
 def test_unique_low_iou_inserts_as_new_record() -> None:
@@ -144,11 +144,79 @@ def test_legacy_records_default_to_nominal_dimensions() -> None:
     )
 
     assert id1 is not None
-    assert id2 == id1  # merged
+    assert id2 is not None
 
     observations = mem.where_is("glasses")
-    assert len(observations) == 1
+    assert len(observations) == 1  # merged into a single record
+    assert observations[0].state_id == id2
     assert all(obs.confidence >= 0.9 for obs in observations)
+
+
+# ---------------------------------------------------------------------------
+# Merge re-indexing test (regression)
+# ---------------------------------------------------------------------------
+
+
+def test_merge_recomputes_spatial_index_across_epochs() -> None:
+    """A merged record must be re-indexed for its merged position and timestamp.
+
+    Regression: _try_merge used to update x/y/z/confidence/timestamp_ms
+    in place, leaving stale hilbert_r* payload fields and stranding the
+    point in the epoch collection of its ORIGINAL timestamp. Objects that
+    drifted via successive merges then disappeared from region queries and
+    time-window queries. The fix deletes the matched record and re-inserts
+    through the client so Hilbert fields and epoch routing are recomputed.
+    """
+    mem = _make_memory(dedup_iou_threshold=0.5, dedup_window_ms=5000)
+    start_cx, cy = 0.2, 0.5
+    ts = 10_000  # epoch 2 (epoch_size_ms=5000)
+    first_id = mem.observe(
+        "keys", cx=start_cx, cy=cy, confidence=0.8, timestamp_ms=ts, min_confidence=0.0
+    )
+    assert first_id is not None
+
+    # Drift the object via successive merges: each new observation is offset
+    # +0.03 from the stored position (IoU ≈ 0.54 with the 0.1 proxy box, so
+    # it merges) and +1000ms (crosses epoch boundaries at 15s, 20s, 25s while
+    # staying inside the dedup window).
+    for _ in range(15):
+        current = mem.where_is("keys", limit=1)[0]
+        ts += 1000
+        state_id = mem.observe(
+            "keys",
+            cx=current.cx + 0.03,
+            cy=cy,
+            confidence=0.8,
+            timestamp_ms=ts,
+            min_confidence=0.0,
+        )
+        assert state_id is not None
+
+    # Every observation merged into a single record at the drifted position
+    all_obs = mem.where_is("keys", limit=20)
+    assert len(all_obs) == 1
+    final = all_obs[0]
+    assert final.timestamp_ms == ts
+    assert final.cx > start_cx + 0.15
+
+    # Region query at the NEW position finds the object...
+    found = mem.objects_in_region(final.cx - 0.05, final.cx + 0.05, cy - 0.05, cy + 0.05)
+    assert any(o.label == "keys" for o in found)
+
+    # ...and a region query at the OLD position does not.
+    stale = mem.objects_in_region(start_cx - 0.05, start_cx + 0.05, cy - 0.05, cy + 0.05)
+    assert not any(o.label == "keys" for o in stale)
+
+    # A time-window query around the merged timestamp finds it (the point
+    # must live in the epoch collection of the NEW timestamp).
+    from app.spatial_memory import _label_embedding
+
+    hits = mem._client.query(
+        vector=_label_embedding("keys"),
+        time_window_ms=(ts - 500, ts + 500),
+        limit=5,
+    )
+    assert any(h.scene_id == "keys" for h in hits)
 
 
 # ---------------------------------------------------------------------------

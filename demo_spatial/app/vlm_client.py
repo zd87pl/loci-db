@@ -19,6 +19,21 @@ import re
 
 logger = logging.getLogger(__name__)
 
+# Maximum length for object labels flowing through the pipeline
+MAX_LABEL_LENGTH = 64
+
+
+def sanitize_label(label: str) -> str:
+    """Server-side hygiene for untrusted labels (VLM output, user class lists).
+
+    Strips control/non-printable characters, collapses surrounding whitespace,
+    and caps the length at ``MAX_LABEL_LENGTH``. Returns an empty string when
+    nothing printable remains.
+    """
+    cleaned = "".join(ch for ch in label if ch.isprintable())
+    return cleaned.strip()[:MAX_LABEL_LENGTH].strip()
+
+
 _SCENE_PROMPT = """\
 You are a spatial scene analyzer helping a blind person track their belongings.
 
@@ -64,17 +79,16 @@ class VLMClient:
         self._openai_key = os.environ.get("OPENAI_API_KEY", "")
         self._google_key = os.environ.get("GOOGLE_API_KEY", "")
         self._model = os.environ.get("VLM_MODEL", "")
-        self._client = None   # lazy-init
+        self._client = None  # lazy-init
 
     def _get_openai_client(self):
         if self._client is None:
             try:
                 import openai
+
                 self._client = openai.AsyncOpenAI(api_key=self._openai_key)
             except ImportError as exc:
-                raise RuntimeError(
-                    "openai package not installed. Run: pip install openai"
-                ) from exc
+                raise RuntimeError("openai package not installed. Run: pip install openai") from exc
         return self._client
 
     @property
@@ -145,6 +159,7 @@ class VLMClient:
         """Use Gemini 2.5 Flash to describe the scene."""
         try:
             import google.generativeai as genai
+
             genai.configure(api_key=self._google_key)
             model_name = self._model or "gemini-2.5-flash-preview-04-17"
             model = genai.GenerativeModel(model_name)
@@ -152,6 +167,7 @@ class VLMClient:
             import io
 
             from PIL import Image
+
             img = Image.open(io.BytesIO(image_bytes))
 
             response = await model.generate_content_async([_SCENE_PROMPT, img])
@@ -223,10 +239,12 @@ class VLMClient:
         ]
         if image_bytes:
             b64 = base64.b64encode(image_bytes).decode()
-            user_content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-            })
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                }
+            )
 
         try:
             response = await client.chat.completions.create(
@@ -263,15 +281,20 @@ def _parse_vlm_response(raw: str) -> list[dict]:
         for obj in data:
             if not isinstance(obj, dict) or "label" not in obj:
                 continue
-            validated.append({
-                "label": str(obj.get("label", "object")).strip().lower(),
-                "cx": float(obj.get("cx", 0.5)),
-                "cy": float(obj.get("cy", 0.5)),
-                "width": float(obj.get("width", 0.3)),
-                "height": float(obj.get("height", 0.3)),
-                "confidence": float(obj.get("confidence", 0.50)),
-                "description": str(obj.get("description", "")),
-            })
+            label = sanitize_label(str(obj.get("label", "object")).strip().lower())
+            if not label:
+                continue
+            validated.append(
+                {
+                    "label": label,
+                    "cx": float(obj.get("cx", 0.5)),
+                    "cy": float(obj.get("cy", 0.5)),
+                    "width": float(obj.get("width", 0.3)),
+                    "height": float(obj.get("height", 0.3)),
+                    "confidence": float(obj.get("confidence", 0.50)),
+                    "description": str(obj.get("description", "")),
+                }
+            )
         return validated
     except (json.JSONDecodeError, TypeError, ValueError) as e:
         logger.warning("Failed to parse VLM response: %s — raw: %.200s", e, raw)

@@ -36,12 +36,6 @@ Repository = "https://github.com/zd87pl/loci-db"
 Issues = "https://github.com/zd87pl/loci-db/issues"
 
 [project.optional-dependencies]
-# Note: with uv this resolves to the local ./loci-core path via [tool.uv.sources]
-# below. With plain pip, `pip install .[native]` will look for loci-core on PyPI
-# (where it does not exist) — pip users should instead run `pip install -e ./loci-core`.
-native = [
-    "loci-core",
-]
 research = [
     "anthropic>=0.94.0",
     "click>=8.0",
@@ -64,12 +58,24 @@ dev = [
 [project.scripts]
 loci = "loci.cli:main"
 
+# The native Rust bindings are a local-only dependency GROUP (PEP 735), not a
+# published extra: `loci-core` is not registered on PyPI, so shipping it in
+# [project.optional-dependencies] would put an unregistered name in the
+# published metadata — a dependency-confusion vector where anyone squatting
+# the name gets code execution on `pip install "loci-stdb[native]"`.
+# Install with uv:  uv sync --group native   (resolves via [tool.uv.sources])
+# Install with pip: pip install -e ./loci-core
+[dependency-groups]
+native = [
+    "loci-core",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["loci"]
 
-# uv-specific: resolve the `native` extra's loci-core dependency to the local
+# uv-specific: resolve the `native` group's loci-core dependency to the local
 # Rust crate instead of PyPI. pip ignores this table; see the comment on the
-# `native` optional-dependency above for the pip equivalent.
+# `native` dependency group above for the pip equivalent.
 [tool.uv.sources]
 loci-core = { path = "loci-core", editable = true }
 
@@ -107,8 +113,8 @@ warn_unused_ignores = true
 module = [
     "qdrant_client.*",
     "hilbertcurve.*",
-    "segno.*",
-    "faster_whisper.*",
-    "edge_tts.*",
+    # Optional native Rust extension: not installed in environments without the
+    # `native` dependency group (e.g. the CI typecheck job) and ships no stubs.
+    "loci_core",
 ]
 ignore_missing_imports = true

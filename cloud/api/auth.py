@@ -88,6 +88,25 @@ _auth_fail_counter = FixedWindowCounter()
 
 
 def _client_ip(request: Request) -> str:
+    """Client IP for the auth-failure throttle — must not be client-spoofable.
+
+    Trust chain: end client → Cloudflare edge worker → Fly.io proxy → this app.
+
+    ``Fly-Client-IP`` is set (and overwritten) by Fly's proxy with the IP of
+    whatever peer connected to Fly. Because the app is only reachable through
+    Fly's proxy, end clients cannot forge it. Prefer it over
+    ``request.client.host``: uvicorn runs with ``--proxy-headers``, so
+    ``request.client.host`` is derived from ``X-Forwarded-For`` — trustworthy
+    only as long as the edge worker keeps stripping inbound forwarding headers
+    (see cloud/edge/worker.js). The Fly header is trustworthy regardless.
+
+    Fall back to ``request.client.host`` (the X-Forwarded-For-derived address,
+    or the raw socket peer) when the header is absent, e.g. in local dev or
+    tests.
+    """
+    fly_ip = request.headers.get("Fly-Client-IP")
+    if fly_ip:
+        return fly_ip
     return request.client.host if request.client else "unknown"
 
 

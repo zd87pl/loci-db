@@ -20,7 +20,7 @@ export LOCI_BASE_URL=https://api.loci.ai
 
 loci cloud keys create \
   --email app@example.com \
-  --namespace myapp_prod \
+  --namespace myappprod \
   --label "production"
 ```
 
@@ -30,7 +30,7 @@ Output (the raw key is shown **once** — save it immediately):
 === API key created ===
 Key ID    : 5bf1e7d9-...
 Tenant ID : 9a4de8f0-...
-Namespace : myapp_prod
+Namespace : myappprod
 Admin     : False
 Prefix    : loci_8fa3c21
 
@@ -55,7 +55,7 @@ curl -X POST https://api.loci.ai/admin/keys \
   -H "Content-Type: application/json" \
   -d '{
     "tenant_email": "app@example.com",
-    "namespace": "myapp_prod",
+    "namespace": "myappprod",
     "label": "production"
   }'
 ```
@@ -76,10 +76,15 @@ curl -X POST https://api.loci.ai/insert \
     "vector": [0.1, 0.2, ... 512 dims ...],
     "scene_id": "scene_001",
     "scale_level": "patch",
-    "confidence": 0.95
+    "confidence": 0.95,
+    "metadata": {"label": "doorway", "source": "lidar"}
   }'
 # → {"id": "7f3c8a4b..."}
 ```
+
+`metadata` is optional (defaults to `{}`): an arbitrary JSON object stored with
+the vector and returned verbatim by `/query`. It is capped at **16 KB
+JSON-serialized** — larger payloads are rejected with `422`.
 
 ### Python SDK — cloud mode
 
@@ -134,6 +139,29 @@ curl -X POST https://api.loci.ai/query \
     "limit": 10
   }'
 ```
+
+Each result item includes the stored `metadata`, `scale_level` and
+`confidence` alongside the coordinates:
+
+```json
+{
+  "results": [
+    {
+      "id": "7f3c8a4b...",
+      "x": 0.42, "y": 0.17, "z": 0.88,
+      "timestamp_ms": 1713628800000,
+      "scene_id": "scene_001",
+      "scale_level": "patch",
+      "confidence": 0.95,
+      "metadata": {"label": "doorway", "source": "lidar"},
+      "vector": [0.1, 0.2, "..."]
+    }
+  ]
+}
+```
+
+Pass `"include_vectors": false` to omit the (large) `vector` field from each
+result.
 
 ### Python SDK
 
@@ -204,7 +232,8 @@ affect other keys or tenants.
 | 403 | Forbidden | Non-admin key calling `/admin/*` |
 | 404 | Not Found | Key id does not exist (revoke) |
 | 409 | Conflict | Namespace already taken (`POST /admin/keys`) |
-| 422 | Unprocessable Entity | Validation error — see `detail` for field paths |
+| 413 | Payload Too Large | Request body exceeds `LOCI_MAX_BODY_BYTES` (default 5 MB) |
+| 422 | Unprocessable Entity | Validation error — see `detail` for field paths (e.g. `metadata` over 16 KB) |
 | 429 | Too Many Requests | Rate limit exceeded |
 | 503 | Service Unavailable | `/ready` returned degraded — check upstream health |
 

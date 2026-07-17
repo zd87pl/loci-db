@@ -5,10 +5,14 @@
 We evaluated 4 hypotheses for improving Hilbert-bucket vector search performance
 in LOCI-DB. **Two approaches are recommended for production adoption:**
 
-1. **Hypothesis A (Rust 4D Parallel Enumeration)**: 10-150x faster than the current
-   Python path. Drop-in replacement. Score: 22/25.
+1. **Hypothesis A (Rust 4D Enumeration)**: the **serial** implementation is
+   10-150x faster than the current Python path. Drop-in replacement. Score: 22/25.
+   (The rayon-parallel variant *loses* to serial by ~5x on small workloads — 173us
+   vs 34us at p=4 narrow — and gains only 1.3-1.6x on large ones; serial should be
+   the default.)
 2. **Hypothesis B (Hilbert Range Clustering)**: Lossless compression of bucket ID
-   sets into contiguous ranges. 2.9x-1.2M:1 compression ratio. Score: 23/25.
+   sets into contiguous ranges. 2.9x-37.5x on typical bounds; the 1.2M:1 headline
+   figure is a grid-aligned special case (see caveat below). Score: 23/25.
 
 Two approaches were rejected:
 - **Hypothesis C (Hierarchical Coarse-to-Fine)**: 1.5-11x slower than direct enumeration.
@@ -38,7 +42,9 @@ Two approaches were rejected:
 
 ### Range Clustering Compression (Hypothesis B)
 
-The standout finding: at high resolutions, Hilbert bucket IDs are highly clustered.
+Hilbert bucket IDs for contiguous boxes cluster into far fewer contiguous
+ranges than individual IDs, with the degree of clustering depending strongly
+on how the query bounds align to the Hilbert grid.
 
 | Resolution | Bucket IDs | Ranges | Compression |
 |-----------|-----------|--------|-------------|
@@ -47,10 +53,41 @@ The standout finding: at high resolutions, Hilbert bucket IDs are highly cluster
 | p=6 medium | 589,824 | 15,744 | 37.5x |
 | **p=8 narrow** | **16,777,216** | **14** | **1,198,373x** |
 
-This means a query that would send 16.7M individual IDs to Qdrant's MatchAny
-filter (far exceeding the 10K limit) can instead be expressed as just 14
-contiguous Range filters. This unlocks high-resolution queries that were
-previously impossible.
+In the p=8 narrow scenario, a query that would send 16.7M individual IDs to
+Qdrant's MatchAny filter (far exceeding the 10K limit) can instead be expressed
+as 14 contiguous Range filters — but see the caveat below before generalizing.
+
+#### Caveat: the p=8 result is a grid-alignment artifact, not a general property
+
+The 1.2M:1 compression at p=8 is specific to the single scenario tested and
+does **not** generalize:
+
+- **Why it happens**: the narrow bounds (0.4-0.6), after padding, quantize to
+  cells [96, 159] on each axis at p=8. Both edges are multiples of 32
+  (96 = 3x32, 160 = 5x32), so the query box decomposes exactly into 16
+  order-5 subcubes (2 per axis in 4D, each 32^4 cells). Every complete
+  subcube of a Hilbert curve is a single contiguous ID range, so the box
+  collapses to at most 16 ranges (14 after merging adjacent ones). This is a
+  power-of-2 grid-alignment coincidence of these particular bounds.
+- **Non-aligned bounds do not reproduce it**: at p=6, the narrow scenario
+  (an 18-cell-per-axis box, not subcube-aligned) yields 104,976 IDs in
+  11,726 ranges — only 9.0x, three orders of magnitude away from "a handful
+  of ranges". Generic bounds at p=8 should be expected to behave like the
+  p=4/p=6 rows (single-digit to double-digit compression), not like the
+  aligned row.
+- **Enumeration cost remains the binding constraint at p>=8**: ranges are
+  computed *after* enumerating all bucket IDs, and the judge's own scalability
+  scoring calls exhaustive enumeration intractable at p>=8 (19.5ms-517ms even
+  for the 3D Rust baseline; 4D is worse). Range clustering reduces filter
+  cardinality; it does not make p=8 enumeration affordable.
+
+Net: range clustering is a solid, lossless cardinality reduction (roughly
+3x-40x on measured non-aligned scenarios) that can bring some
+previously-over-limit queries under Qdrant's 10K filter cap when bounds
+happen to align well. It should not be read as "p=8 queries are now
+unlocked" — that requires first solving enumeration cost (e.g. deriving
+ranges directly from the box decomposition without per-cell enumeration,
+which the aligned case suggests is a promising follow-up).
 
 ## Code Artifacts
 

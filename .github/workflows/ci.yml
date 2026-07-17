@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -62,7 +65,10 @@ jobs:
           pip install mypy
 
       - name: Run mypy
-        run: mypy loci/ --ignore-missing-imports
+        # No --ignore-missing-imports: pyproject.toml handles untyped
+        # third-party modules with per-module overrides, so a genuinely
+        # missing/misspelled import fails the build instead of being silenced.
+        run: mypy loci/
 
   lint:
     runs-on: ubuntu-latest
@@ -97,8 +103,85 @@ jobs:
       - name: Install security scanners
         run: pip install bandit[toml] pip-audit
 
+      # The audit is only meaningful if the project's actual dependency tree is
+      # installed — auditing a bare scanner venv checks nothing.
+      - name: Install project dependencies (audit target)
+        run: |
+          pip install -e ".[dev]"
+          pip install -r cloud/api/requirements.txt
+
       - name: Run bandit (static security analysis)
         run: bandit -r loci/ cloud/api/ server.py -ll -ii
 
       - name: Audit dependencies for known CVEs
-        run: pip-audit --requirement <(pip freeze) --skip-editable
+        # Environment mode: audits every installed distribution (library + dev
+        # + cloud API deps). --skip-editable excludes the local loci-stdb
+        # checkout itself, which has no published metadata to audit.
+        run: pip-audit --skip-editable
+
+  # Regression net for the Docker quick start: build the root image from the
+  # working tree and prove /insert and /query actually work against Qdrant.
+  # LOCI_VECTOR_SIZE=8 keeps the JSON payloads tiny; the server validates
+  # vector length against this setting.
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image from working tree
+        run: docker build -t loci-smoke .
+
+      - name: Start Qdrant and LOCI
+        run: |
+          docker network create loci-smoke-net
+          docker run -d --name qdrant --network loci-smoke-net qdrant/qdrant:v1.18.3
+          docker run -d --name loci --network loci-smoke-net -p 8000:8000 \
+            -e QDRANT_URL=http://qdrant:6333 \
+            -e LOCI_VECTOR_SIZE=8 \
+            loci-smoke
+
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health; then
+              echo
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::LOCI API never became healthy"
+          exit 1
+
+      - name: Smoke test /insert
+        run: |
+          code=$(curl -s -o /tmp/insert.json -w '%{http_code}' \
+            -X POST http://localhost:8000/insert \
+            -H 'Content-Type: application/json' \
+            -d '{"x":0.5,"y":0.3,"z":0.8,"timestamp_ms":1700000000000,"vector":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8],"scene_id":"smoke"}')
+          cat /tmp/insert.json; echo
+          test "$code" = "200"
+
+      - name: Smoke test /query
+        # Retries a few times in case the freshly-upserted point is not yet
+        # visible to search; a non-200 status fails immediately.
+        run: |
+          for i in $(seq 1 5); do
+            code=$(curl -s -o /tmp/query.json -w '%{http_code}' \
+              -X POST http://localhost:8000/query \
+              -H 'Content-Type: application/json' \
+              -d '{"vector":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8],"limit":10}')
+            cat /tmp/query.json; echo
+            test "$code" = "200"
+            if python3 -c "import json, sys; sys.exit(0 if json.load(open('/tmp/query.json'))['results'] else 1)"; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::/query returned 200 but no results for the inserted state"
+          exit 1
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          docker logs loci || true
+          docker logs qdrant || true

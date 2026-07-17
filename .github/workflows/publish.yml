@@ -14,6 +14,11 @@ on:
           - pypi
           - testpypi
 
+# The publish jobs override this per-job with the id-token: write scope that
+# PyPI trusted publishing requires; everything else runs read-only.
+permissions:
+  contents: read
+
 jobs:
   # Releases are cut from refs whose CI may not have run (release events don't
   # wait for checks) — run the suite here so a red tree can never publish.
@@ -45,7 +50,22 @@ jobs:
           python-version: "3.12"
 
       - name: Install build
-        run: pip install build
+        run: pip install build hatchling
+
+      # A release tagged v0.4.0 that still says version = "0.3.0" in
+      # pyproject.toml would either publish the wrong version or shadow an
+      # existing one — fail fast instead.
+      - name: Verify release tag matches package version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="$(hatchling version)"
+          if [ "$version" != "${TAG#v}" ]; then
+            echo "::error::pyproject.toml version ($version) does not match release tag ($TAG)"
+            exit 1
+          fi
+          echo "Tag $TAG matches package version $version"
 
       - name: Build wheel and sdist
         run: python -m build

@@ -18,7 +18,7 @@ LOCI benchmarks compare four query methods against a brute-force ground truth to
 - **Positions:** (x, y, z) sampled uniformly from [0, 1]^3.
 - **Timestamps:** Uniformly distributed across a configurable time range.
 - **Scene IDs:** Assigned round-robin to simulate multi-agent scenarios.
-- **Sizes:** N ∈ {1,000, 10,000, 100,000} to show scaling behavior.
+- **Sizes:** N ∈ {1,000, 10,000} in the checked-in config (`benchmarks/results/latest.json` contains only these sizes; larger runs can be enabled for publication).
 
 ### Real Robot Data (Optional)
 - Trajectories from Orange Pi 5 robot demo.
@@ -36,12 +36,21 @@ For the `LOCI current` row, the checked-in benchmark applies the same decay-weig
 
 ## Benchmark Scenarios
 
-| Scenario | Description | Spatial Radius | Temporal Window | Expected LOCI Advantage |
+Measured results below are p50 latencies from `benchmarks/results/latest.json`
+(512-dim, live Qdrant, N=1,000 and N=10,000; no larger run has been recorded):
+
+| Scenario | Description | Spatial Radius | Temporal Window | Measured result (latest.json) |
 |---|---|---|---|---|
-| A | Tight spatial query | 0.05 | full | Strongest — 10-20x faster |
-| B | Wide spatial query | 0.5 | full | Moderate |
-| C | Combined spatial + temporal | 0.05 | tight | Strongest combined case |
-| D | Broader spatial radius, short time window | 0.3 | 1000ms | Retrieval stress test |
+| A | Tight spatial query | 0.05 | full | Naive Qdrant faster: LOCI 4.9x slower at N=1k (20.5ms vs 4.2ms), 3.7x slower at N=10k (162ms vs 44ms) |
+| B | Wide spatial query | 0.5 | full | Naive Qdrant much faster: LOCI 23x slower at N=1k, 16x slower at N=10k |
+| C | Combined spatial + temporal | 0.05 | tight | LOCI's best case: ~2x faster at N=10k (22.6ms vs 44.9ms, recall@10 0.99); still 2.1x slower at N=1k |
+| D | Broader spatial radius, short time window | 0.3 | 1000ms | Naive Qdrant faster: LOCI 7.9x slower at N=1k, 1.8x slower at N=10k |
+
+LOCI's relative performance improves with dataset size in every scenario, but
+the only measured win is the combined tight spatial + temporal case (C) at
+N=10,000 — where temporal shard pruning and the Hilbert pre-filter compose.
+Pure spatial filtering is not currently a speedup over naive float-range
+filters; see `docs/NOVELTY.md` for the honest framing of the value proposition.
 
 This benchmark script measures the retrieval path only. Scenario D is a broader-radius, short-window query, not the `predict_and_retrieve` API.
 

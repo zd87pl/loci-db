@@ -984,12 +984,14 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
-native = [
-    { name = "loci-core" },
-]
 research = [
     { name = "anthropic" },
     { name = "click" },
+]
+
+[package.dev-dependencies]
+native = [
+    { name = "loci-core" },
 ]
 
 [package.metadata]
@@ -1002,7 +1004,6 @@ requires-dist = [
     { name = "hilbertcurve", specifier = ">=2.0.5" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.0" },
-    { name = "loci-core", marker = "extra == 'native'", editable = "loci-core" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.5" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "numpy", specifier = ">=1.24.0" },
@@ -1013,7 +1014,10 @@ requires-dist = [
     { name = "qdrant-client", specifier = ">=1.7.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
 ]
-provides-extras = ["native", "research", "dev"]
+provides-extras = ["research", "dev"]
+
+[package.metadata.requires-dev]
+native = [{ name = "loci-core", editable = "loci-core" }]
 
 [[package]]
 name = "markdown-it-py"

@@ -35,6 +35,22 @@
 - [ ] Cross-scale causal linking
 - [ ] Scale-aware temporal decay
 
+## Deferred architecture refactors
+
+Known structural debts, documented in ARCHITECTURE.md ("Known Limitations and
+Planned Refactors"):
+
+- [ ] Bounded epoch storage — replace one-Qdrant-collection-per-epoch (which
+      grows unboundedly: ~17k collections/day at the default 5s epoch, with
+      O(collections) shard routing and compaction) with payload-indexed epoch
+      IDs inside a bounded collection set
+- [ ] Shared client core — extract common query planning, filter construction,
+      and result assembly to eliminate the ~77% duplicated logic across
+      `LociClient` / `AsyncLociClient` / `LocalLociClient`
+- [ ] loci-core distribution — register `loci-core` on PyPI and publish maturin
+      wheels (restoring a safe `[native]` extra), or commit to the local-only
+      dependency-group install path
+
 ## v1.0 — Production Ready
 
 - [ ] gRPC transport option

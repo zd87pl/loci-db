@@ -156,7 +156,6 @@ class RetentionManager:
 
         *delete_fn* may be a coroutine or a regular callable.
         """
-        import asyncio
         import inspect
 
         dropped: list[str] = []
@@ -181,7 +180,7 @@ class RetentionManager:
                     continue
             try:
                 del_result = delete_fn(col)
-                if asyncio.iscoroutine(del_result):
+                if inspect.isawaitable(del_result):
                     await del_result
                 dropped.append(col)
                 logger.info("Dropped expired collection %s (epoch %d)", col, ep)

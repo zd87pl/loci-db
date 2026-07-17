@@ -7,7 +7,7 @@ correct request payload, and maps responses back to :class:`WorldState`.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -110,10 +110,162 @@ def test_sync_query_unsupported_options_raise():
 
 def test_sync_local_mode_unchanged_shape():
     """Local-mode construction must not regress: qdrant_url is accepted positionally."""
-    # We only care that __init__ works without hitting Qdrant; construct with an
-    # unreachable URL and do not call any method that would hit the wire.
-    client = LociClient("http://localhost:6333", vector_size=4)
+    # Patch QdrantClient so constructing the client never opens a socket
+    # (the real constructor performs a version-compatibility check).
+    with patch("loci.client.QdrantClient"):
+        client = LociClient("http://localhost:6333", vector_size=4)
     assert client._cloud is None
+
+
+# ── Cloud-mode guards: unsupported methods raise, never AttributeError/[] ──
+
+
+def _predictor(vec: list[float]) -> list[float]:
+    return vec
+
+
+class TestSyncCloudGuards:
+    def test_insert_batch_raises(self):
+        client, _ = _make_sync_client()
+        state = WorldState(x=0.1, y=0.2, z=0.3, timestamp_ms=1000, vector=[0.0] * 4)
+        with pytest.raises(CloudModeUnsupportedError, match="insert_batch"):
+            client.insert_batch([state])
+
+    def test_query_scored_raises(self):
+        client, _ = _make_sync_client()
+        with pytest.raises(CloudModeUnsupportedError, match="query_scored"):
+            client.query_scored(vector=[0.0] * 4)
+
+    def test_get_trajectory_raises(self):
+        client, _ = _make_sync_client()
+        with pytest.raises(CloudModeUnsupportedError, match="get_trajectory"):
+            client.get_trajectory("some-id")
+
+    def test_get_causal_context_raises(self):
+        client, _ = _make_sync_client()
+        with pytest.raises(CloudModeUnsupportedError, match="get_causal_context"):
+            client.get_causal_context("some-id")
+
+    def test_funnel_query_raises(self):
+        client, _ = _make_sync_client()
+        with pytest.raises(CloudModeUnsupportedError, match="funnel_query"):
+            client.funnel_query(vector=[0.0] * 4)
+
+    def test_predict_and_retrieve_extended_path_raises(self):
+        client, _ = _make_sync_client()
+        with pytest.raises(CloudModeUnsupportedError, match="predict_and_retrieve"):
+            client.predict_and_retrieve(
+                context_vector=[0.0] * 4,
+                predictor_fn=_predictor,
+                current_position=(0.5, 0.5, 0.5),
+            )
+        with pytest.raises(CloudModeUnsupportedError, match="predict_and_retrieve"):
+            client.predict_and_retrieve(
+                context_vector=[0.0] * 4,
+                predictor_fn=_predictor,
+                return_prediction=True,
+            )
+
+    def test_predict_and_retrieve_legacy_path_works_via_query(self):
+        """The legacy path is a plain query and stays supported in cloud mode."""
+        client, transport = _make_sync_client()
+        transport._request = MagicMock(
+            return_value={
+                "results": [
+                    {"id": "p1", "x": 0.5, "y": 0.5, "z": 0.5, "timestamp_ms": 1, "scene_id": "s"}
+                ]
+            }
+        )
+        results = client.predict_and_retrieve(
+            context_vector=[0.0] * 4, predictor_fn=_predictor, limit=3
+        )
+        assert [state.id for state in results] == ["p1"]
+        assert transport._request.call_args.args[1] == "/query"
+
+
+class TestAsyncCloudGuards:
+    @staticmethod
+    def _make_async_client() -> AsyncLociClient:
+        return AsyncLociClient(base_url="https://api.example.com", api_key="loci_x", vector_size=4)
+
+    @pytest.mark.asyncio
+    async def test_insert_batch_raises(self):
+        client = self._make_async_client()
+        state = WorldState(x=0.1, y=0.2, z=0.3, timestamp_ms=1000, vector=[0.0] * 4)
+        with pytest.raises(CloudModeUnsupportedError, match="insert_batch"):
+            await client.insert_batch([state])
+
+    @pytest.mark.asyncio
+    async def test_query_scored_raises(self):
+        client = self._make_async_client()
+        with pytest.raises(CloudModeUnsupportedError, match="query_scored"):
+            await client.query_scored(vector=[0.0] * 4)
+
+    @pytest.mark.asyncio
+    async def test_get_trajectory_raises(self):
+        client = self._make_async_client()
+        with pytest.raises(CloudModeUnsupportedError, match="get_trajectory"):
+            await client.get_trajectory("some-id")
+
+    @pytest.mark.asyncio
+    async def test_get_causal_context_raises(self):
+        client = self._make_async_client()
+        with pytest.raises(CloudModeUnsupportedError, match="get_causal_context"):
+            await client.get_causal_context("some-id")
+
+    @pytest.mark.asyncio
+    async def test_funnel_query_raises(self):
+        client = self._make_async_client()
+        with pytest.raises(CloudModeUnsupportedError, match="funnel_query"):
+            await client.funnel_query(vector=[0.0] * 4)
+
+    @pytest.mark.asyncio
+    async def test_predict_and_retrieve_extended_path_raises(self):
+        client = self._make_async_client()
+        with pytest.raises(CloudModeUnsupportedError, match="predict_and_retrieve"):
+            await client.predict_and_retrieve(
+                context_vector=[0.0] * 4,
+                predictor_fn=_predictor,
+                current_position=(0.5, 0.5, 0.5),
+            )
+
+    @pytest.mark.asyncio
+    async def test_predict_and_retrieve_legacy_path_works_via_query(self):
+        client = self._make_async_client()
+
+        async def _fake_request(method, path, body=None):
+            assert path == "/query"
+            return {
+                "results": [
+                    {"id": "p9", "x": 0.5, "y": 0.5, "z": 0.5, "timestamp_ms": 1, "scene_id": "s"}
+                ]
+            }
+
+        client._cloud._request = _fake_request  # type: ignore[assignment]
+        results = await client.predict_and_retrieve(
+            context_vector=[0.0] * 4, predictor_fn=_predictor, limit=3
+        )
+        assert [state.id for state in results] == ["p9"]
+
+    @pytest.mark.asyncio
+    async def test_query_min_confidence_raises(self):
+        """Async mirrors the sync guard instead of silently ignoring the arg."""
+        client = self._make_async_client()
+        with pytest.raises(CloudModeUnsupportedError):
+            await client.query(vector=[0.0] * 4, min_confidence=0.5)
+
+    @pytest.mark.asyncio
+    async def test_query_passes_overlap_factor_through(self):
+        client = self._make_async_client()
+        captured: dict = {}
+
+        async def _fake_request(method, path, body=None):
+            captured.update(body or {})
+            return {"results": []}
+
+        client._cloud._request = _fake_request  # type: ignore[assignment]
+        await client.query(vector=[0.0] * 4, limit=1, overlap_factor=1.7)
+        assert captured["overlap_factor"] == 1.7
 
 
 # ── Async client ───────────────────────────────────────────────────────────

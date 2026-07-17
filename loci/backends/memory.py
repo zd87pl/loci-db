@@ -9,6 +9,7 @@ using vectorised numpy similarity.  Designed for:
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -70,15 +71,29 @@ class MemoryStore:
         """Insert or update points.
 
         Each dict must have ``id``, ``vector``, and ``payload`` keys.
+        Vectors and payloads are copied on write so later caller-side
+        mutation cannot corrupt stored points.
+
+        Raises:
+            ValueError: If any vector does not match the collection's
+                configured ``vector_size``.
         """
         col = self._collections[collection]
         for p in points:
-            col.points[p["id"]] = _Point(id=p["id"], vector=p["vector"], payload=dict(p["payload"]))
+            vector = list(p["vector"])
+            if len(vector) != col.vector_size:
+                raise ValueError(
+                    f"vector for point {p['id']!r} has dimension {len(vector)}, "
+                    f"expected {col.vector_size} for collection {collection!r}"
+                )
+            col.points[p["id"]] = _Point(
+                id=p["id"], vector=vector, payload=copy.deepcopy(p["payload"])
+            )
 
     def set_payload(self, collection: str, point_id: str, payload: dict) -> None:
         col = self._collections[collection]
         if point_id in col.points:
-            col.points[point_id].payload.update(payload)
+            col.points[point_id].payload.update(copy.deepcopy(payload))
 
     # ------------------------------------------------------------------
     # Read
@@ -92,7 +107,7 @@ class MemoryStore:
         for pid in ids:
             if pid in col.points:
                 p = col.points[pid]
-                results.append({"id": p.id, "vector": p.vector, "payload": p.payload})
+                results.append(_point_to_dict(p))
         return results
 
     def search(
@@ -114,7 +129,8 @@ class MemoryStore:
 
         Returns:
             List of ``{"id", "vector", "payload", "score"}`` dicts,
-            sorted by score descending.
+            sorted by score descending.  Scores are always
+            higher-is-better: euclidean distances are negated.
         """
         col = self._collections.get(collection)
         if col is None:
@@ -132,15 +148,7 @@ class MemoryStore:
         top_indices = np.argpartition(scores, -top_k)[-top_k:]
         top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
 
-        return [
-            {
-                "id": candidates[i].id,
-                "vector": candidates[i].vector,
-                "payload": candidates[i].payload,
-                "score": float(scores[i]),
-            }
-            for i in top_indices
-        ]
+        return [_point_to_dict(candidates[i], score=float(scores[i])) for i in top_indices]
 
     def scroll(
         self,
@@ -160,7 +168,7 @@ class MemoryStore:
         if order_by:
             candidates.sort(key=lambda p: p.payload.get(order_by, 0))
 
-        return [{"id": p.id, "vector": p.vector, "payload": p.payload} for p in candidates[:limit]]
+        return [_point_to_dict(p) for p in candidates[:limit]]
 
     @property
     def total_points(self) -> int:
@@ -169,6 +177,22 @@ class MemoryStore:
     def collection_count(self, name: str) -> int:
         col = self._collections.get(name)
         return len(col.points) if col else 0
+
+
+def _point_to_dict(p: _Point, score: float | None = None) -> dict:
+    """Return a defensive copy of a stored point.
+
+    Vectors and payloads are copied so callers cannot mutate stored state
+    through returned results (and vice versa).
+    """
+    result: dict[str, Any] = {
+        "id": p.id,
+        "vector": list(p.vector),
+        "payload": copy.deepcopy(p.payload),
+    }
+    if score is not None:
+        result["score"] = score
+    return result
 
 
 # ------------------------------------------------------------------

@@ -29,9 +29,9 @@ from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.filtering import exact_payload_match
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
-from loci.temporal.decay import apply_decay
+from loci.temporal.decay import DEFAULT_DECAY_LAMBDA, apply_decay
 from loci.temporal.retention import RetentionManager, RetentionPolicy
-from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.temporal.sharding import collection_name, epoch_id
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +64,12 @@ class LocalLociClient:
 
     Args:
         epoch_size_ms: Width of each temporal shard in milliseconds.
-        spatial_resolution: Hilbert curve resolution order.
+        spatial_resolution: Hilbert curve resolution order used as the
+            default (coarsest) query resolution. Ignored when an explicit
+            ``resolutions`` list is provided — ``resolutions`` wins.
         vector_size: Dimensionality of embedding vectors.
-        decay_lambda: Temporal decay rate.
+        decay_lambda: Temporal decay rate (per ms; defaults to a one-hour
+            half-life).
         distance: Distance metric — ``"cosine"``, ``"dot"``, or ``"euclidean"``.
     """
 
@@ -75,7 +78,7 @@ class LocalLociClient:
         epoch_size_ms: int = 5000,
         spatial_resolution: int = 4,
         vector_size: int = 512,
-        decay_lambda: float = 1e-4,
+        decay_lambda: float = DEFAULT_DECAY_LAMBDA,
         distance: str = "cosine",
         adaptive: bool = False,
         resolutions: list[int] | None = None,
@@ -95,7 +98,13 @@ class LocalLociClient:
         self._collection_prefix = collection_prefix
         self._known_collections: set[str] = set()
         self._last_query_stats: QueryStats | None = None
-        self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
+        # Explicit resolutions win; otherwise spatial_resolution becomes the
+        # coarsest (default) query resolution alongside the finer defaults.
+        self._hilbert = HilbertIndex(
+            resolutions=resolutions
+            if resolutions is not None
+            else sorted({spatial_resolution, 8, 12})
+        )
         self._adaptive = (
             AdaptiveResolution(
                 base_order=self._hilbert.resolutions[0],
@@ -155,7 +164,8 @@ class LocalLociClient:
 
     def insert(self, state: WorldState) -> str:
         """Insert a single WorldState. Input is not mutated."""
-        point_id = uuid.uuid4().hex
+        self._validate_vector(state.vector)
+        point_id = str(uuid.uuid4())
 
         ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
         col = self._col_name(ep)
@@ -182,6 +192,9 @@ class LocalLociClient:
 
     def insert_batch(self, states: list[WorldState]) -> list[str]:
         """Insert a batch with intra-batch causal linking. Input is not mutated."""
+        for state in states:
+            self._validate_vector(state.vector)
+
         id_by_index: dict[int, str] = {}
         scene_chains: dict[str, tuple[str, str]] = {}
         prev_collection_by_point: dict[str, str] = {}
@@ -190,7 +203,7 @@ class LocalLociClient:
         indexed = sorted(enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms))
 
         for orig_idx, state in indexed:
-            point_id = uuid.uuid4().hex
+            point_id = str(uuid.uuid4())
             id_by_index[orig_idx] = point_id
 
             ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
@@ -204,11 +217,18 @@ class LocalLociClient:
 
             payload = _state_to_payload(state, hilbert_ids)
 
-            if state.scene_id and state.scene_id in scene_chains:
-                prev_id, prev_col = scene_chains[state.scene_id]
-                payload["prev_state_id"] = prev_id
-                prev_collection_by_point[point_id] = prev_col
+            # Causal link within the batch; the first state per scene links to
+            # the latest predecessor already in the store (matching the
+            # sequential-insert behaviour).
             if state.scene_id:
+                if state.scene_id in scene_chains:
+                    prev_link: tuple[str, str] | None = scene_chains[state.scene_id]
+                else:
+                    prev_link = self._find_latest_predecessor(state.scene_id, state.timestamp_ms)
+                if prev_link is not None:
+                    prev_id, prev_col = prev_link
+                    payload["prev_state_id"] = prev_id
+                    prev_collection_by_point[point_id] = prev_col
                 scene_chains[state.scene_id] = (point_id, col)
 
             groups.setdefault(col, []).append(
@@ -278,13 +298,21 @@ class LocalLociClient:
         overlap_factor: float = 1.2,
         min_confidence: float | None = None,
     ) -> list[ScoredWorldState]:
-        """Search and return scored results for downstream reranking."""
+        """Search and return scored results for downstream reranking.
+
+        Scores follow the higher-is-better convention for every distance
+        metric (the memory backend negates euclidean distances), so decay
+        re-ranking, cross-shard merging, and truncation behave identically
+        across metrics and backends.
+        """
         t_start = time.perf_counter()
         stats = QueryStats()
 
         if time_window_ms is not None:
             start_ms, end_ms = time_window_ms
-            epochs = epochs_in_range(start_ms, end_ms, self._epoch_size_ms)
+            first_ep = epoch_id(start_ms, self._epoch_size_ms)
+            last_ep = epoch_id(end_ms, self._epoch_size_ms)
+            epochs = [ep for ep in self._list_active_epochs() if first_ep <= ep <= last_ep]
         else:
             epochs = self._list_active_epochs()
         if _epoch_ids is not None:
@@ -295,8 +323,13 @@ class LocalLociClient:
         ]
         stats.shards_searched = len(epoch_collections)
 
-        # Search across shards
-        shard_limit = limit * _EXACT_FILTER_OVERFETCH if spatial_bounds is not None else limit
+        # Search across shards; over-fetch whenever post-search filtering
+        # (spatial exact match, min_confidence) or decay re-ranking can
+        # reorder/drop hits, else per-shard truncation could evict the top-k.
+        needs_overfetch = (
+            spatial_bounds is not None or min_confidence is not None or self._decay_lambda > 0
+        )
+        shard_limit = limit * _EXACT_FILTER_OVERFETCH if needs_overfetch else limit
         all_results: list[dict] = []
         for ep, col in epoch_collections:
             payload_filter: dict = {}
@@ -323,6 +356,9 @@ class LocalLociClient:
 
             if time_window_ms is not None:
                 payload_filter["timestamp_ms"] = {"gte": start_ms, "lte": end_ms}
+
+            if min_confidence is not None:
+                payload_filter["confidence"] = {"gte": min_confidence}
 
             payload_filter.update(extra_filter_to_memory(_extra_payload_filter))
 
@@ -469,8 +505,9 @@ class LocalLociClient:
 
         all_states.sort(key=lambda s: s.timestamp_ms)
         anchor_idx = None
+        target = _normalize_id(state_id)
         for i, s in enumerate(all_states):
-            if s.id == state_id:
+            if _normalize_id(s.id) == target:
                 anchor_idx = i
                 break
 
@@ -518,13 +555,21 @@ class LocalLociClient:
         if self._retention is None:
             return
         try:
-            self._retention.maybe_purge(
+            dropped = self._retention.maybe_purge(
                 active_epochs=self._list_active_epochs(),
                 now_ms=int(time.time() * 1000),
                 delete_fn=self._store.delete_collection,
             )
+            # Forget purged collections so a late insert into a purged epoch
+            # simply recreates the collection instead of crashing.
+            for name in dropped:
+                self._known_collections.discard(name)
         except Exception as exc:
             logger.warning("Retention purge failed: %s", exc)
+
+    def _validate_vector(self, vector: list[float]) -> None:
+        if len(vector) != self._vector_size:
+            raise ValueError(f"vector has dimension {len(vector)}, expected {self._vector_size}")
 
     def _normalise_time(self, timestamp_ms: int, ep: int) -> float:
         epoch_start = ep * self._epoch_size_ms
@@ -592,6 +637,11 @@ class LocalLociClient:
 # ------------------------------------------------------------------
 # Shared payload helpers
 # ------------------------------------------------------------------
+
+
+def _normalize_id(point_id: object) -> str:
+    """Normalise a point ID for comparison (lowercase, hyphens stripped)."""
+    return str(point_id).lower().replace("-", "")
 
 
 def _state_to_payload(state: WorldState, hilbert_ids: dict[str, int]) -> dict:

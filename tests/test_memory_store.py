@@ -104,6 +104,86 @@ class TestUpsertRetrieve:
 
 
 # ---------------------------------------------------------------------------
+# Vector dimension validation
+# ---------------------------------------------------------------------------
+
+
+class TestDimensionValidation:
+    def test_upsert_rejects_wrong_dimension(self, store):
+        with pytest.raises(ValueError, match="dimension"):
+            store.upsert("test", [{"id": "a", "vector": [1.0, 2.0], "payload": {}}])
+        assert store.collection_count("test") == 0
+
+    def test_bad_vector_does_not_poison_search(self, store):
+        """One rejected insert must not break subsequent searches."""
+        store.upsert("test", [{"id": "a", "vector": _vec(1.0), "payload": {}}])
+        with pytest.raises(ValueError):
+            store.upsert("test", [{"id": "b", "vector": [1.0], "payload": {}}])
+        results = store.search("test", _vec(1.0), limit=5)
+        assert [r["id"] for r in results] == ["a"]
+
+
+# ---------------------------------------------------------------------------
+# Reference isolation (copy-on-write / copy-on-read)
+# ---------------------------------------------------------------------------
+
+
+class TestReferenceIsolation:
+    def test_caller_vector_mutation_does_not_corrupt_store(self, store):
+        vector = _vec(1.0)
+        store.upsert("test", [{"id": "a", "vector": vector, "payload": {}}])
+        vector[0] = 999.0
+
+        stored = store.retrieve("test", ["a"])[0]
+        assert stored["vector"] == [1.0, 0.0, 0.0, 0.0]
+
+    def test_caller_metadata_mutation_does_not_corrupt_store(self, store):
+        payload = {"metadata": {"label": "door"}}
+        store.upsert("test", [{"id": "a", "vector": _vec(1.0), "payload": payload}])
+        payload["metadata"]["label"] = "corrupted"
+
+        stored = store.retrieve("test", ["a"])[0]
+        assert stored["payload"]["metadata"] == {"label": "door"}
+
+    def test_mutating_retrieved_payload_does_not_corrupt_store(self, store):
+        store.upsert(
+            "test",
+            [{"id": "a", "vector": _vec(1.0), "payload": {"metadata": {"k": "v"}, "x": 1}}],
+        )
+        result = store.retrieve("test", ["a"])[0]
+        result["payload"]["x"] = 999
+        result["payload"]["metadata"]["k"] = "corrupted"
+        result["vector"][0] = 123.0
+
+        fresh = store.retrieve("test", ["a"])[0]
+        assert fresh["payload"]["x"] == 1
+        assert fresh["payload"]["metadata"] == {"k": "v"}
+        assert fresh["vector"] == [1.0, 0.0, 0.0, 0.0]
+
+    def test_mutating_search_and_scroll_results_does_not_corrupt_store(self, store):
+        store.upsert(
+            "test",
+            [{"id": "a", "vector": _vec(1.0), "payload": {"metadata": {"k": "v"}}}],
+        )
+        hit = store.search("test", _vec(1.0), limit=1)[0]
+        hit["payload"]["metadata"]["k"] = "corrupted"
+        scrolled = store.scroll("test")[0]
+        scrolled["payload"]["metadata"]["k"] = "also corrupted"
+
+        fresh = store.retrieve("test", ["a"])[0]
+        assert fresh["payload"]["metadata"] == {"k": "v"}
+
+    def test_set_payload_copies_input(self, store):
+        store.upsert("test", [{"id": "a", "vector": _vec(1.0), "payload": {}}])
+        update = {"metadata": {"k": "v"}}
+        store.set_payload("test", "a", update)
+        update["metadata"]["k"] = "corrupted"
+
+        fresh = store.retrieve("test", ["a"])[0]
+        assert fresh["payload"]["metadata"] == {"k": "v"}
+
+
+# ---------------------------------------------------------------------------
 # set_payload
 # ---------------------------------------------------------------------------
 

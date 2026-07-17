@@ -16,9 +16,16 @@ try:
 except ImportError:
     _RUST_AVAILABLE = False
 
+# Guard against accidentally materialising an astronomically large epoch list
+# (e.g. an all-time window with a 5-second epoch size is ~350M epochs).
+_MAX_EPOCHS_IN_RANGE = 10_000_000
+
 
 def epoch_id(timestamp_ms: int, epoch_size_ms: int) -> int:
     """Return the epoch index for a given timestamp.
+
+    Negative timestamps are clamped to 0 so both the Rust and Python
+    backends honour the documented non-negative contract.
 
     Args:
         timestamp_ms: Unix epoch timestamp in milliseconds.
@@ -27,6 +34,7 @@ def epoch_id(timestamp_ms: int, epoch_size_ms: int) -> int:
     Returns:
         Non-negative epoch index.
     """
+    timestamp_ms = max(0, timestamp_ms)
     if _RUST_AVAILABLE:
         return int(_rust.compute_epoch_id(timestamp_ms=timestamp_ms, epoch_size_ms=epoch_size_ms))
     return timestamp_ms // epoch_size_ms
@@ -53,6 +61,12 @@ def epochs_in_range(
 ) -> list[int]:
     """Return all epoch IDs that overlap a time window.
 
+    Negative bounds are clamped to 0 (matching :func:`epoch_id`). The
+    range is capped at ``_MAX_EPOCHS_IN_RANGE`` epochs: materialising a
+    wider window (e.g. an all-time query with a small ``epoch_size_ms``)
+    would exhaust memory. Callers with unbounded windows should intersect
+    ``epoch_id(start)..epoch_id(end)`` with their known epochs instead.
+
     Args:
         start_ms: Start of the time window (inclusive).
         end_ms: End of the time window (inclusive).
@@ -60,7 +74,20 @@ def epochs_in_range(
 
     Returns:
         Sorted list of epoch IDs.
+
+    Raises:
+        ValueError: If the window spans more than ``_MAX_EPOCHS_IN_RANGE``
+            epochs. Increase ``epoch_size_ms`` or narrow the window.
     """
+    start_ms = max(0, start_ms)
+    end_ms = max(0, end_ms)
+    first = epoch_id(start_ms, epoch_size_ms)
+    last = epoch_id(end_ms, epoch_size_ms)
+    if last - first + 1 > _MAX_EPOCHS_IN_RANGE:
+        raise ValueError(
+            f"time window spans {last - first + 1} epochs, exceeding the "
+            f"{_MAX_EPOCHS_IN_RANGE} cap; increase epoch_size_ms or narrow the window"
+        )
     if _RUST_AVAILABLE:
         return [
             int(x)
@@ -68,6 +95,4 @@ def epochs_in_range(
                 start_ms=start_ms, end_ms=end_ms, epoch_size_ms=epoch_size_ms
             )
         ]
-    first = epoch_id(start_ms, epoch_size_ms)
-    last = epoch_id(end_ms, epoch_size_ms)
     return list(range(first, last + 1))

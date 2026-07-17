@@ -15,9 +15,31 @@ T = TypeVar("T")
 # Exceptions considered transient (worth retrying)
 _TRANSIENT_CODES = {502, 503, 504, 429}
 
+# Optional dependencies: qdrant-client wraps httpx transport failures in
+# ResponseHandlingException (which has no status_code and a class name that
+# matches none of the keyword heuristics), so both must be handled explicitly.
+try:  # pragma: no cover - import guard
+    from qdrant_client.http.exceptions import ResponseHandlingException as _QdrantWrapped
+except ImportError:  # pragma: no cover
+    _QdrantWrapped = None
+
+try:  # pragma: no cover - import guard
+    import httpx as _httpx
+except ImportError:  # pragma: no cover
+    _httpx = None
+
 
 def _is_transient(exc: Exception) -> bool:
     """Check if an exception is likely transient and worth retrying."""
+    # qdrant_client wraps the underlying httpx transport error; unwrap it so
+    # connection failures against a restarting Qdrant are retried.
+    if _QdrantWrapped is not None and isinstance(exc, _QdrantWrapped):
+        source = getattr(exc, "source", None)
+        if isinstance(source, Exception):
+            return _is_transient(source)
+    # httpx transport failures (ConnectError, ReadTimeout, ...) are transient.
+    if _httpx is not None and isinstance(exc, _httpx.TransportError):
+        return True
     # qdrant_client raises UnexpectedResponse with a status_code attribute
     status = getattr(exc, "status_code", None)
     if status is not None and status in _TRANSIENT_CODES:

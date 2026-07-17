@@ -6,10 +6,12 @@ managed HTTP API instead of talking to a local Qdrant directly. Everything
 except the routing target (auth header, payload shape) is identical to the
 local path from the caller's point of view.
 
-Only ``insert`` and ``query`` are supported in cloud mode today. Other
-methods (trajectory, causal context, batch, predict_and_retrieve, funnel)
-raise :class:`CloudModeUnsupportedError` until the cloud API exposes matching
-endpoints.
+Only ``insert`` and ``query`` are supported in cloud mode today (plus the
+legacy ``predict_and_retrieve`` path, which is a plain query under the hood).
+Other methods (``insert_batch``, ``query_scored``, ``get_trajectory``,
+``get_causal_context``, ``funnel_query``, and the extended
+``predict_and_retrieve`` path) raise :class:`CloudModeUnsupportedError` until
+the cloud API exposes matching endpoints.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ class _CloudError(RuntimeError):
 
 
 def _insert_payload(state: WorldState) -> dict[str, Any]:
-    return {
+    payload = {
         "x": state.x,
         "y": state.y,
         "z": state.z,
@@ -43,6 +45,11 @@ def _insert_payload(state: WorldState) -> dict[str, Any]:
         "scale_level": state.scale_level,
         "confidence": state.confidence,
     }
+    # Only send metadata when present: newer servers store it, older servers
+    # ignore unknown fields, and omitting it keeps the wire format minimal.
+    if state.metadata:
+        payload["metadata"] = state.metadata
+    return payload
 
 
 def _query_payload(
@@ -74,6 +81,11 @@ def _query_payload(
 
 
 def _parse_query_results(payload: dict[str, Any]) -> list[WorldState]:
+    """Map cloud query result items to WorldStates.
+
+    ``scale_level``, ``confidence``, and ``metadata`` are parsed tolerantly:
+    older servers omit them, in which case the WorldState defaults apply.
+    """
     results = []
     for r in payload.get("results", []):
         results.append(
@@ -84,6 +96,9 @@ def _parse_query_results(payload: dict[str, Any]) -> list[WorldState]:
                 timestamp_ms=r["timestamp_ms"],
                 vector=r.get("vector", []),
                 scene_id=r.get("scene_id", ""),
+                scale_level=r.get("scale_level", "patch"),
+                confidence=r.get("confidence", 1.0),
+                metadata=r.get("metadata") or {},
                 id=str(r["id"]),
             )
         )

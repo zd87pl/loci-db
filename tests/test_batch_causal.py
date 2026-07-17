@@ -105,12 +105,14 @@ def test_batch_patches_next_links(client, mock_qdrant):
     assert "next_state_id" in call_kwargs["payload"]
 
 
-def test_batch_patches_cross_epoch_next_link_in_predecessor_collection(client, mock_qdrant):
+def test_batch_patches_cross_epoch_next_link_in_data_collection(client, mock_qdrant):
+    # The two states span a logical epoch boundary, but all raw points live
+    # in the single data collection — the next-link patch lands there.
     states = [_make(4_900), _make(5_100)]
     client.insert_batch(states)
 
     call_kwargs = mock_qdrant.set_payload.call_args.kwargs
-    assert call_kwargs["collection_name"] == "loci_0"
+    assert call_kwargs["collection_name"] == "loci_data"
 
 
 def test_batch_preserves_original_order(client, mock_qdrant):
@@ -123,19 +125,17 @@ def test_batch_preserves_original_order(client, mock_qdrant):
 
 def test_batch_links_first_state_to_stored_predecessor(client, mock_qdrant):
     """The earliest batch state per scene links to the latest stored state."""
-    # A predecessor for scene_a already exists in the store (loci_1).
+    # A predecessor for scene_a already exists in the data collection.
     stored = MagicMock()
     stored.id = "stored-pred"
     stored.payload = {"timestamp_ms": 9_000}
 
     def _scroll(collection_name=None, **kwargs):
-        if collection_name == "loci_1":
+        if collection_name == "loci_data":
             return ([stored], None)
         return ([], None)
 
     mock_qdrant.scroll.side_effect = _scroll
-    client._known_collections = {"loci_1"}
-    client._discovered = True
 
     states = [_make(10_000), _make(10_050)]
     client.insert_batch(states)
@@ -150,14 +150,14 @@ def test_batch_links_first_state_to_stored_predecessor(client, mock_qdrant):
     # … and the chain continues within the batch.
     assert all_points[1].payload["prev_state_id"] == all_points[0].id
 
-    # The stored predecessor's next link is patched in its own collection.
+    # The stored predecessor's next link is patched in the data collection.
     patched = [
         call.kwargs
         for call in mock_qdrant.set_payload.call_args_list
         if call.kwargs["points"] == ["stored-pred"]
     ]
     assert len(patched) == 1
-    assert patched[0]["collection_name"] == "loci_1"
+    assert patched[0]["collection_name"] == "loci_data"
     assert patched[0]["payload"]["next_state_id"] == all_points[0].id
 
 

@@ -16,10 +16,12 @@ from loci.local_client import LocalLociClient
 from loci.schema import WorldState
 from loci.temporal.consolidation import (
     ConsolidationPolicy,
+    coarse_id,
+    coarse_time_range,
     consolidate_states,
+    data_collection_name,
     epochs_to_consolidate,
-    is_summary_collection,
-    summary_coarse_range,
+    fold_cutoff_ms,
     summary_collection_name,
 )
 from loci.temporal.retention import RetentionPolicy
@@ -84,41 +86,55 @@ class TestConsolidationPolicy:
 
 
 # ---------------------------------------------------------------------------
-# Naming / range helpers
+# Layout / range helpers
 # ---------------------------------------------------------------------------
 
 
 class TestHelpers:
-    def test_summary_collection_name(self):
-        policy = ConsolidationPolicy(raw_window_epochs=2, summary_epoch_ratio=100)
-        assert summary_collection_name(0, EPOCH_MS, policy) == "loci_sum_0"
-        assert summary_collection_name(250, EPOCH_MS, policy) == "loci_sum_2"
-        assert summary_collection_name(250, EPOCH_MS, policy, prefix="t_") == "t_loci_sum_2"
+    def test_data_collection_name(self):
+        assert data_collection_name() == "loci_data"
+        assert data_collection_name(prefix="t_") == "t_loci_data"
 
-    def test_summary_coarse_range(self):
+    def test_summary_collection_name_is_constant(self):
+        # One summary collection per tenant — no coarse id in the name.
+        assert summary_collection_name() == "loci_summary"
+        assert summary_collection_name(prefix="t_") == "t_loci_summary"
+
+    def test_coarse_id(self):
+        policy = ConsolidationPolicy(raw_window_epochs=2, summary_epoch_ratio=100)
+        assert coarse_id(0, policy) == 0
+        assert coarse_id(99, policy) == 0
+        assert coarse_id(250, policy) == 2
+
+    def test_coarse_time_range(self):
         policy = ConsolidationPolicy(raw_window_epochs=2, summary_epoch_ratio=100)
         span = 100 * EPOCH_MS
-        assert summary_coarse_range(0, policy, EPOCH_MS) == (0, span - 1)
-        assert summary_coarse_range(2, policy, EPOCH_MS) == (2 * span, 3 * span - 1)
+        assert coarse_time_range(0, policy, EPOCH_MS) == (0, span - 1)
+        assert coarse_time_range(2, policy, EPOCH_MS) == (2 * span, 3 * span - 1)
 
     def test_range_matches_member_epochs(self):
         """Every epoch mapping to a coarse id has its timestamps inside the range."""
         policy = ConsolidationPolicy(raw_window_epochs=1, summary_epoch_ratio=4)
         for ep in range(12):
-            coarse = ep // 4
-            t_min, t_max = summary_coarse_range(coarse, policy, EPOCH_MS)
+            t_min, t_max = coarse_time_range(coarse_id(ep, policy), policy, EPOCH_MS)
             assert t_min <= ep * EPOCH_MS
             assert (ep + 1) * EPOCH_MS - 1 <= t_max
 
-    def test_is_summary_collection(self):
-        assert is_summary_collection("loci_sum_7") == 7
-        assert is_summary_collection("loci_sum_0") == 0
-        assert is_summary_collection("loci_42") is None
-        assert is_summary_collection("loci_sum_x") is None
-        assert is_summary_collection("other") is None
-        assert is_summary_collection("t_loci_sum_3", prefix="t_") == 3
-        assert is_summary_collection("t_loci_sum_3") is None
-        assert is_summary_collection("loci_sum_3", prefix="t_") is None
+    def test_fold_cutoff_parity_with_epochs_to_consolidate(self):
+        policy = ConsolidationPolicy(raw_window_epochs=2)
+        now_ms = 10 * EPOCH_MS + 100  # inside epoch 10
+        cutoff = fold_cutoff_ms(now_ms, EPOCH_MS, policy)
+        # Epochs <= now_epoch - raw_window fold; the cutoff is the start of
+        # the oldest epoch that stays raw.
+        assert cutoff == 9 * EPOCH_MS
+        stale = epochs_to_consolidate(
+            list(range(11)), now_ms=now_ms, epoch_size_ms=EPOCH_MS, policy=policy
+        )
+        assert stale == [ep for ep in range(11) if (ep + 1) * EPOCH_MS <= cutoff]
+
+    def test_fold_cutoff_clamped_at_beginning_of_time(self):
+        policy = ConsolidationPolicy(raw_window_epochs=5)
+        assert fold_cutoff_ms(2 * EPOCH_MS, EPOCH_MS, policy) == 0
 
     def test_epochs_to_consolidate(self):
         policy = ConsolidationPolicy(raw_window_epochs=2)
@@ -297,14 +313,31 @@ def _scene_vector(scene: str, i: int) -> list[float]:
     return [base[0], base[1], 0.01 * i, 0.0]
 
 
+def _raw_epochs(client: LocalLociClient) -> list[int]:
+    """Distinct logical epochs of the raw points in loci_data."""
+    hits = client.store.scroll(client._data_collection, limit=100_000)
+    return sorted({p["payload"]["timestamp_ms"] // client._epoch_size_ms for p in hits})
+
+
+def _summary_points(client: LocalLociClient, coarse: int | None = None) -> list[dict]:
+    """Summary points, optionally restricted to one coarse group's time range."""
+    policy = client._consolidation_policy
+    assert policy is not None
+    payload_filter = None
+    if coarse is not None:
+        t_min, t_max = coarse_time_range(coarse, policy, client._epoch_size_ms)
+        payload_filter = {"timestamp_ms": {"gte": t_min, "lte": t_max}}
+    return client.store.scroll(client._summary_collection, payload_filter, limit=100_000)
+
+
 def _build_client(
     retention_policy: RetentionPolicy | None = None,
 ) -> tuple[LocalLociClient, dict[int, list[str]]]:
     """Insert 10 epochs x 2 scenes x 5 states, advancing the pinned clock.
 
     With raw_window_epochs=2 and summary_epoch_ratio=4, epochs 0-7 end up
-    consolidated into loci_sum_0 (epochs 0-3) and loci_sum_1 (epochs 4-7),
-    leaving epochs 8 and 9 raw.
+    consolidated into loci_summary — coarse group 0 (epochs 0-3) and coarse
+    group 1 (epochs 4-7) — leaving epochs 8 and 9 raw in loci_data.
     """
     policy = ConsolidationPolicy(raw_window_epochs=2, summary_epoch_ratio=4, max_states_per_scene=3)
     client = LocalLociClient(
@@ -326,22 +359,31 @@ def _build_client(
 
 
 class TestClientConsolidation:
+    def test_exactly_two_collections(self):
+        client, _ = _build_client()
+        assert set(client.store._collections) == {"loci_data", "loci_summary"}
+
     def test_raw_epochs_beyond_window_dropped(self):
         client, _ = _build_client()
-        assert client._list_active_epochs() == [8, 9]
-        for e in range(8):
-            assert f"loci_{e}" not in client._known_collections
-            assert not client.store.collection_exists(f"loci_{e}")
+        assert _raw_epochs(client) == [8, 9]
+        # No raw point survives below the fold cutoff.
+        cutoff = 8 * EPOCH_MS
+        stale = client.store.scroll("loci_data", {"timestamp_ms": {"lt": cutoff}}, limit=100)
+        assert stale == []
 
-    def test_summary_collections_exist_and_bounded(self):
+    def test_summary_groups_exist_and_bounded(self):
         client, _ = _build_client()
-        assert client.store.collection_exists("loci_sum_0")
-        assert client.store.collection_exists("loci_sum_1")
-        # Bounded: at most max_states_per_scene per scene per coarse collection.
-        for name in ("loci_sum_0", "loci_sum_1"):
-            assert 0 < client.store.collection_count(name) <= 2 * 3
-            for point in client.store.scroll(name, limit=100):
+        assert client.store.collection_exists("loci_summary")
+        # Bounded: at most max_states_per_scene per scene per coarse group.
+        for coarse in (0, 1):
+            points = _summary_points(client, coarse)
+            assert 0 < len(points) <= 2 * 3
+            for point in points:
                 assert point["payload"]["metadata"]["consolidated"] is True
+        # The two coarse groups account for every summary point.
+        assert len(_summary_points(client, 0)) + len(_summary_points(client, 1)) == len(
+            _summary_points(client)
+        )
 
     def test_old_data_findable_via_summaries(self):
         client, _ = _build_client()
@@ -369,7 +411,7 @@ class TestClientConsolidation:
         for s in results:
             assert not s.metadata.get("consolidated")
             assert s.id in raw_ids
-        # No summary collection overlaps this window: 2 raw shards searched.
+        # Both collections are always searched: data + summary.
         assert client.last_query_stats.shards_searched == 2
 
     def test_unwindowed_query_spans_raw_and_summaries(self):
@@ -378,18 +420,18 @@ class TestClientConsolidation:
             results = client.query(vector=_scene_vector("a", 0), limit=50)
         flags = {bool(s.metadata.get("consolidated")) for s in results}
         assert flags == {True, False}
-        # 2 raw epochs + 2 summary collections in the fan-out.
-        assert client.last_query_stats.shards_searched == 4
+        # One search over loci_data plus one over loci_summary.
+        assert client.last_query_stats.shards_searched == 2
 
-    def test_time_window_prunes_summary_collections_by_coarse_range(self):
+    def test_time_window_selects_summaries_by_timestamp_range(self):
         client, _ = _build_client()
-        mid_window = (4 * EPOCH_MS, 8 * EPOCH_MS - 1)  # exactly coarse id 1
+        mid_window = (4 * EPOCH_MS, 8 * EPOCH_MS - 1)  # exactly coarse group 1
         with _now(9 * EPOCH_MS + 400):
             results = client.query(
                 vector=_scene_vector("b", 0), time_window_ms=mid_window, limit=10
             )
-        # Only loci_sum_1 overlaps; no raw epochs are inside the window.
-        assert client.last_query_stats.shards_searched == 1
+        # The window holds no raw points; the timestamp Range on the summary
+        # search selects exactly coarse group 1's summaries.
         assert results
         for s in results:
             assert s.metadata["consolidated"] is True
@@ -438,23 +480,16 @@ class TestClientConsolidation:
         # scene "a" must not be offered as causal predecessors.
         assert client._find_latest_predecessor("a", before_ms=8 * EPOCH_MS) is None
 
-    def test_list_active_epochs_ignores_summary_collections(self):
-        client, _ = _build_client()
-        assert "loci_sum_0" in client._known_collections
-        assert client._list_active_epochs() == [8, 9]
-
     def test_combined_retention_and_consolidation(self):
         # Retention must keep at least raw_window_epochs + 1 epochs, otherwise
-        # it drops raw epochs before consolidation can fold them.  With a
-        # compatible pairing, consolidation performs the epoch drops and
+        # it purges raw points before consolidation can fold them.  With a
+        # compatible pairing, consolidation performs the raw deletes and
         # retention acts as a backstop without ever touching summaries.
         client, _ = _build_client(retention_policy=RetentionPolicy(max_epochs=3))
-        assert client._list_active_epochs() == [8, 9]
-        for e in range(8):
-            assert not client.store.collection_exists(f"loci_{e}")
-        # Summary collections are never purged by retention.
-        assert client.store.collection_exists("loci_sum_0")
-        assert client.store.collection_exists("loci_sum_1")
+        assert _raw_epochs(client) == [8, 9]
+        # The summary collection is never purged by retention.
+        assert _summary_points(client, 0)
+        assert _summary_points(client, 1)
         with _now(9 * EPOCH_MS + 400):
             old = client.query(
                 vector=_scene_vector("a", 0), time_window_ms=(0, 4 * EPOCH_MS - 1), limit=10
@@ -465,43 +500,39 @@ class TestClientConsolidation:
     def test_late_insert_into_consolidated_epoch_is_refolded(self):
         client, _ = _build_client()
         source_count_before = sum(
-            p["payload"]["metadata"]["source_count"]
-            for p in client.store.scroll("loci_sum_0", limit=100)
+            p["payload"]["metadata"]["source_count"] for p in _summary_points(client, 0)
         )
-        # A straggler lands in long-gone epoch 0 while "now" stays recent: the
-        # recreated raw collection is folded back into loci_sum_0 immediately.
+        # A straggler lands in long-gone epoch 0 while "now" stays recent: it
+        # is folded back into coarse group 0 on the same maintenance pass.
         with _now(9 * EPOCH_MS + 400):
             client.insert(_state(100, scene="a", vector=_scene_vector("a", 0)))
-        assert client._list_active_epochs() == [8, 9]
-        assert client.store.collection_count("loci_sum_0") <= 2 * 3
+        assert _raw_epochs(client) == [8, 9]
+        assert len(_summary_points(client, 0)) <= 2 * 3
         source_count_after = sum(
-            p["payload"]["metadata"]["source_count"]
-            for p in client.store.scroll("loci_sum_0", limit=100)
+            p["payload"]["metadata"]["source_count"] for p in _summary_points(client, 0)
         )
         assert source_count_after == source_count_before + 1
 
     def test_summaries_deterministic_across_identical_builds(self):
         def _summary_snapshot(client: LocalLociClient) -> set[tuple]:
             points = []
-            for name in ("loci_sum_0", "loci_sum_1"):
-                for p in client.store.scroll(name, limit=100):
-                    payload = p["payload"]
-                    points.append(
-                        (
-                            name,
-                            payload["scene_id"],
-                            payload["timestamp_ms"],
-                            tuple(round(v, 12) for v in p["vector"]),
-                            payload["metadata"]["source_count"],
-                        )
+            for p in _summary_points(client):
+                payload = p["payload"]
+                points.append(
+                    (
+                        payload["scene_id"],
+                        payload["timestamp_ms"],
+                        tuple(round(v, 12) for v in p["vector"]),
+                        payload["metadata"]["source_count"],
                     )
+                )
             return set(points)
 
         first, _ = _build_client()
         second, _ = _build_client()
         assert _summary_snapshot(first) == _summary_snapshot(second)
 
-    def test_collection_prefix_summaries(self):
+    def test_collection_prefix(self):
         policy = ConsolidationPolicy(
             raw_window_epochs=1, summary_epoch_ratio=2, max_states_per_scene=2
         )
@@ -517,9 +548,10 @@ class TestClientConsolidation:
             with _now(ts):
                 client.insert(_state(ts, scene="a", vector=_scene_vector("a", e)))
         # raw_window_epochs=1 keeps only the current epoch raw.
-        assert client._list_active_epochs() == [3]
-        assert client.store.collection_exists("t_loci_sum_0")
-        assert client.store.collection_exists("t_loci_sum_1")
+        assert set(client.store._collections) == {"t_loci_data", "t_loci_summary"}
+        assert _raw_epochs(client) == [3]
+        assert _summary_points(client, 0)
+        assert _summary_points(client, 1)
         with _now(3 * EPOCH_MS + 50):
             old = client.query(
                 vector=_scene_vector("a", 0), time_window_ms=(0, 2 * EPOCH_MS - 1), limit=5
@@ -558,29 +590,32 @@ class TestBoundedMemory:
                     inserted += 1
         assert inserted == n_epochs * 2 * states_per_scene  # 1600
 
+        # Bounded collection set: exactly two collections, ever.
+        assert set(client.store._collections) == {"loci_data", "loci_summary"}
+
         # Raw window: epochs 197-199 survive (cutoff = 199 - 3 = 196).
-        assert client._list_active_epochs() == [197, 198, 199]
-        raw_points = sum(client.store.collection_count(f"loci_{e}") for e in (197, 198, 199))
+        assert _raw_epochs(client) == [197, 198, 199]
+        raw_points = client.store.collection_count("loci_data")
         assert raw_points == 3 * 2 * states_per_scene  # 24
 
-        summary_collections = sorted(
-            c for c in client._known_collections if c.startswith("loci_sum_")
+        # Epochs 0-196 span coarse ids 0-19: 20 coarse summary groups.
+        occupied = sorted(
+            {p["payload"]["timestamp_ms"] // (10 * epoch_ms) for p in _summary_points(client)}
         )
-        # Epochs 0-196 span coarse ids 0-19: 20 summary collections.
-        assert len(summary_collections) == 20
-        summary_points = sum(client.store.collection_count(c) for c in summary_collections)
-        # Each coarse collection holds <= 2 scenes * 2 states.
-        assert all(client.store.collection_count(c) <= 4 for c in summary_collections)
+        assert occupied == list(range(20))
+        # Each coarse group holds <= 2 scenes * 2 states.
+        for coarse in occupied:
+            assert len(_summary_points(client, coarse)) <= 4
+        summary_points = client.store.collection_count("loci_summary")
         assert summary_points <= 20 * 4
 
+        # Bounded POINT counts across the two collections.
         total = client.store.total_points
         assert total == raw_points + summary_points
         assert total <= 24 + 80  # 1600 inserted -> at most 104 resident
         # Nothing was silently lost: summarised source counts + raw = inserted.
         summarised_sources = sum(
-            p["payload"]["metadata"]["source_count"]
-            for c in summary_collections
-            for p in client.store.scroll(c, limit=1000)
+            p["payload"]["metadata"]["source_count"] for p in _summary_points(client)
         )
         assert summarised_sources + raw_points == inserted
 

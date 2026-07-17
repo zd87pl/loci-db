@@ -96,6 +96,42 @@ class MemoryStore:
             col.points[point_id].payload.update(copy.deepcopy(payload))
 
     # ------------------------------------------------------------------
+    # Delete
+    # ------------------------------------------------------------------
+
+    def delete_points(self, collection: str, ids: list[str]) -> int:
+        """Delete points by id.  Returns the number actually removed."""
+        col = self._collections.get(collection)
+        if col is None:
+            return 0
+        return sum(1 for pid in ids if col.points.pop(pid, None) is not None)
+
+    def delete_points_in_time_range(
+        self,
+        collection: str,
+        start_ms: int,
+        end_ms_exclusive: int,
+        *,
+        field: str = "timestamp_ms",
+    ) -> int:
+        """Delete points with ``start_ms <= payload[field] < end_ms_exclusive``.
+
+        Points missing *field* are never deleted.  Returns the number of
+        points removed (0 for a missing collection).
+        """
+        col = self._collections.get(collection)
+        if col is None:
+            return 0
+        doomed = [
+            pid
+            for pid, p in col.points.items()
+            if (value := p.payload.get(field)) is not None and start_ms <= value < end_ms_exclusive
+        ]
+        for pid in doomed:
+            del col.points[pid]
+        return len(doomed)
+
+    # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
 
@@ -161,13 +197,23 @@ class MemoryStore:
         if col is None:
             return []
 
+        if order_by is None:
+            # Unordered scrolls stop as soon as `limit` matches are found,
+            # so limit-1 probes (e.g. the consolidation staleness check)
+            # stay cheap on filtered scans.
+            results: list[dict] = []
+            for p in col.points.values():
+                if payload_filter and not _matches(p.payload, payload_filter):
+                    continue
+                results.append(_point_to_dict(p))
+                if len(results) >= limit:
+                    break
+            return results
+
         candidates = list(col.points.values())
         if payload_filter:
             candidates = [p for p in candidates if _matches(p.payload, payload_filter)]
-
-        if order_by:
-            candidates.sort(key=lambda p: p.payload.get(order_by, 0))
-
+        candidates.sort(key=lambda p: p.payload.get(order_by, 0))
         return [_point_to_dict(p) for p in candidates[:limit]]
 
     @property
@@ -177,6 +223,21 @@ class MemoryStore:
     def collection_count(self, name: str) -> int:
         col = self._collections.get(name)
         return len(col.points) if col else 0
+
+    def payload_value_range(self, collection: str, field: str) -> tuple[Any, Any] | None:
+        """Return ``(min, max)`` of a payload field across a collection.
+
+        Points missing *field* are skipped; returns ``None`` when nothing
+        carries the field (or the collection does not exist).  Cheap stats
+        helper — no point copies are made.
+        """
+        col = self._collections.get(collection)
+        if col is None:
+            return None
+        values = [v for p in col.points.values() if (v := p.payload.get(field)) is not None]
+        if not values:
+            return None
+        return min(values), max(values)
 
 
 def _point_to_dict(p: _Point, score: float | None = None) -> dict:

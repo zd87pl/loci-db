@@ -550,26 +550,38 @@ def memory_stats() -> dict[str, Any]:
     Returns:
         {"mode": "local"|"qdrant"|"cloud", "vector_size": int,
         "distance": str, "epoch_size_ms": int, "default_scene_id": str,
-        "total_states": int or "unknown", "epochs_known": int or "unknown"}.
+        "total_states": int or "unknown", "oldest_timestamp_ms": int or null,
+        "newest_timestamp_ms": int or null}.
         `total_states` is exact in local mode and "unknown" for backends
-        where counting is not cheap. Note: local mode is in-memory and
-        per-process — memories vanish when the server exits.
+        where counting is not cheap; the timestamp bounds span raw and
+        consolidated memories and are null when the memory is empty or the
+        backend cannot report them cheaply. Note: local mode is in-memory
+        and per-process — memories vanish when the server exits.
     """
     try:
         config = get_config()
         client = get_client()
 
         total_states: int | str = "unknown"
+        oldest_ms: int | None = None
+        newest_ms: int | None = None
         store = getattr(client, "_store", None)
         if store is not None:
             with contextlib.suppress(Exception):
                 total_states = int(store.total_points)  # property on MemoryStore
-
-        epochs_known: int | str = "unknown"
-        list_epochs = getattr(client, "_list_active_epochs", None)
-        if callable(list_epochs):
             with contextlib.suppress(Exception):
-                epochs_known = len(list_epochs())
+                # Bounded layout: one raw data collection plus one summary
+                # collection; min/max timestamp across both is the span.
+                for attr in ("_data_collection", "_summary_collection"):
+                    collection = getattr(client, attr, None)
+                    if collection is None:
+                        continue
+                    value_range = store.payload_value_range(collection, "timestamp_ms")
+                    if value_range is None:
+                        continue
+                    lo, hi = int(value_range[0]), int(value_range[1])
+                    oldest_ms = lo if oldest_ms is None else min(oldest_ms, lo)
+                    newest_ms = hi if newest_ms is None else max(newest_ms, hi)
 
         return {
             "mode": config.mode,
@@ -578,7 +590,8 @@ def memory_stats() -> dict[str, Any]:
             "epoch_size_ms": config.epoch_size_ms,
             "default_scene_id": config.default_scene_id,
             "total_states": total_states,
-            "epochs_known": epochs_known,
+            "oldest_timestamp_ms": oldest_ms,
+            "newest_timestamp_ms": newest_ms,
         }
     except Exception as exc:  # never leak a traceback to the model
         return _friendly(exc)

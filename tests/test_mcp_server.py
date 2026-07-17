@@ -320,18 +320,21 @@ class TestMemoryStats:
             "epoch_size_ms",
             "default_scene_id",
             "total_states",
-            "epochs_known",
+            "oldest_timestamp_ms",
+            "newest_timestamp_ms",
         }
         assert stats["mode"] == "local"
         assert stats["vector_size"] == VEC_SIZE
         assert stats["epoch_size_ms"] == 1000
         assert stats["total_states"] == 3
-        assert stats["epochs_known"] == 3  # timestamps 1000/2000/3000, 1s epochs
+        assert stats["oldest_timestamp_ms"] == 1_000
+        assert stats["newest_timestamp_ms"] == 3_000
 
     def test_empty_memory(self, local_env: None) -> None:
         stats = mcp_server.memory_stats()
         assert stats["total_states"] == 0
-        assert stats["epochs_known"] == 0
+        assert stats["oldest_timestamp_ms"] is None
+        assert stats["newest_timestamp_ms"] is None
 
 
 # ---------------------------------------------------------------------------

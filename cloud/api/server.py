@@ -536,11 +536,12 @@ def query(
 
 # ── Admin: API key management ─────────────────────────────────────────────
 
-# Namespaces must NOT contain underscores. Qdrant collections are named
-# ``{namespace}_loci_{epoch}`` and discovery matches on the ``{namespace}_loci_``
-# prefix; if underscores were allowed, namespace "foo" would match collections
-# belonging to namespace "foo_loci" (prefix "foo_loci_") — a cross-tenant read.
-# Restricting to lowercase alphanumerics makes the separator unambiguous.
+# Namespaces must NOT contain underscores. Each tenant owns exactly two
+# Qdrant collections, ``{namespace}_loci_data`` and ``{namespace}_loci_summary``;
+# if underscores were allowed, namespace "foo_loci" would name collections
+# ("foo_loci_loci_data") that shadow prefixes of other tenants' names — a
+# cross-tenant hazard. Restricting to lowercase alphanumerics makes the
+# namespace/collection separator unambiguous.
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]{3,64}$")
 
 

@@ -1,20 +1,26 @@
 """Memory consolidation — episodic-to-semantic aging of old epochs.
 
-Instead of deleting old raw epochs wholesale, they are summarised into a
-small number of per-scene centroid "summary states" stored in coarse summary
-collections (``loci_sum_{coarse_id}``).  Recent memory stays raw and
-high-fidelity; storage stays bounded while old data remains findable.
+Per tenant/store there are exactly two collections: raw data lives in
+``{prefix}loci_data`` and consolidated summaries live in
+``{prefix}loci_summary``.  Epochs (``timestamp_ms // epoch_size_ms``) are a
+purely logical concept: the unit of consolidation granularity and of
+Hilbert t-normalisation.  When a raw epoch leaves the raw window it is
+summarised into a small number of per-scene centroid "summary states" and
+its raw points are deleted.  Recent memory stays raw and high-fidelity;
+storage stays bounded while old data remains findable.
 
-One summary collection spans ``summary_epoch_ratio`` raw epochs
-(``coarse_id = raw_epoch_id // summary_epoch_ratio``).  When a raw epoch is
-folded in, the existing summaries for that coarse collection are combined
-with the epoch's raw states and re-consolidated, so each coarse collection
-holds at most ``max_states_per_scene`` states per scene at all times — the
-flight-recorder property.
+One *coarse group* spans ``summary_epoch_ratio`` raw epochs
+(``coarse_id = raw_epoch_id // summary_epoch_ratio``).  All summaries share
+the one summary collection; a coarse group's summaries are addressed by
+timestamp range (:func:`coarse_time_range`).  When a raw epoch is folded
+in, the existing summaries for its coarse group are selected by that
+range, combined with the epoch's raw states, and re-consolidated, so each
+coarse group holds at most ``max_states_per_scene`` states per scene at
+all times — the flight-recorder property.
 
 Everything here is a backend-agnostic pure function over
-:class:`~loci.schema.WorldState` lists so the Qdrant clients can reuse it
-later; clients wire the reads, writes, and drops around these functions.
+:class:`~loci.schema.WorldState` lists so the Qdrant clients can reuse it;
+clients wire the reads, writes, and deletes around these functions.
 """
 
 from __future__ import annotations
@@ -27,7 +33,8 @@ import numpy as np
 from loci.schema import WorldState
 from loci.temporal.sharding import epoch_id
 
-_SUMMARY_INFIX = "loci_sum_"
+_DATA_SUFFIX = "loci_data"
+_SUMMARY_SUFFIX = "loci_summary"
 _KMEANS_ITERATIONS = 8
 _ZERO_NORM_EPS = 1e-12
 
@@ -59,56 +66,71 @@ class ConsolidationPolicy:
             raise ValueError(f"max_states_per_scene must be >= 1, got {self.max_states_per_scene}")
 
 
-def summary_collection_name(
-    raw_epoch_id: int,
-    epoch_size_ms: int,
-    policy: ConsolidationPolicy,
-    prefix: str = "",
-) -> str:
-    """Return the summary collection name covering *raw_epoch_id*.
+def data_collection_name(prefix: str = "") -> str:
+    """Return the raw-data collection name for a tenant/store.
 
     Args:
-        raw_epoch_id: Raw epoch index being consolidated.
-        epoch_size_ms: Width of each raw epoch (unused in the name itself;
-            accepted for signature symmetry with :func:`summary_coarse_range`).
-        policy: Active consolidation policy.
         prefix: Optional collection prefix (multi-tenant namespacing).
 
     Returns:
-        Collection name, e.g. ``"loci_sum_3"``.
+        Collection name, e.g. ``"loci_data"`` or ``"t_loci_data"``.
     """
-    coarse_id = raw_epoch_id // policy.summary_epoch_ratio
-    return f"{prefix}{_SUMMARY_INFIX}{coarse_id}"
+    return f"{prefix}{_DATA_SUFFIX}"
 
 
-def summary_coarse_range(
-    coarse_id: int,
+def summary_collection_name(prefix: str = "") -> str:
+    """Return the consolidated-summary collection name for a tenant/store.
+
+    Constant per tenant — summaries for every coarse group live in this one
+    collection and are addressed by timestamp range
+    (:func:`coarse_time_range`), not by collection name.
+
+    Args:
+        prefix: Optional collection prefix (multi-tenant namespacing).
+
+    Returns:
+        Collection name, e.g. ``"loci_summary"`` or ``"t_loci_summary"``.
+    """
+    return f"{prefix}{_SUMMARY_SUFFIX}"
+
+
+def coarse_id(epoch: int, policy: ConsolidationPolicy) -> int:
+    """Return the coarse group index covering raw epoch *epoch*."""
+    return epoch // policy.summary_epoch_ratio
+
+
+def coarse_time_range(
+    coarse: int,
     policy: ConsolidationPolicy,
     epoch_size_ms: int,
 ) -> tuple[int, int]:
-    """Return the inclusive ``(t_min_ms, t_max_ms)`` a coarse collection spans.
+    """Return the inclusive ``(t_min_ms, t_max_ms)`` a coarse group spans.
 
-    Used for query-time overlap checks: a summary collection only needs to be
-    searched when its coarse time range overlaps the query window.
+    Summaries for coarse group *coarse* always carry ``timestamp_ms``
+    inside this range (member timestamps of its raw epochs do, and summary
+    timestamps are member means), so refold lookups and replacements select
+    a coarse group's summaries with a timestamp Range over this window.
     """
     span_ms = policy.summary_epoch_ratio * epoch_size_ms
-    t_min = coarse_id * span_ms
+    t_min = coarse * span_ms
     return t_min, t_min + span_ms - 1
 
 
-def is_summary_collection(name: str, prefix: str = "") -> int | None:
-    """Parse a collection name; return its coarse_id if it is a summary.
+def fold_cutoff_ms(
+    now_ms: int,
+    epoch_size_ms: int,
+    policy: ConsolidationPolicy,
+) -> int:
+    """Return the start of the raw window as an epoch-aligned timestamp.
 
-    Returns ``None`` for raw epoch collections and anything else that does
-    not match ``f"{prefix}loci_sum_{coarse_id}"`` exactly.
+    Raw points with ``timestamp_ms < fold_cutoff_ms`` have left the raw
+    window and must be folded into summaries.  Epochs
+    ``<= epoch_id(now_ms) - raw_window_epochs`` fold — parity with
+    :func:`epochs_to_consolidate`.  Clamped to 0 while the raw window still
+    reaches back to the beginning of time.
     """
-    expected = f"{prefix}{_SUMMARY_INFIX}"
-    if not name.startswith(expected):
-        return None
-    try:
-        return int(name[len(expected) :])
-    except ValueError:
-        return None
+    cutoff_epoch = epoch_id(now_ms, epoch_size_ms) - policy.raw_window_epochs + 1
+    return max(0, cutoff_epoch * epoch_size_ms)
 
 
 def epochs_to_consolidate(

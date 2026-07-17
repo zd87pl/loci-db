@@ -41,6 +41,30 @@ You MUST output a single JSON array where each element has:
 Output ONLY valid JSON.  No markdown fences, no commentary outside JSON.
 """
 
+#: Hard cap on the per-request output budget (model output-token limit).
+_MAX_TOKENS_CAP = 32000
+
+#: Fixed per-variant allowance for JSON structure, rationale and summary.
+_PER_VARIANT_OVERHEAD_TOKENS = 512
+
+#: Floor so tiny concepts still get a workable budget.
+_MIN_MAX_TOKENS = 4096
+
+
+def _request_max_tokens(concept: str, n: int) -> int:
+    """Scale the output budget to fit *n* full-replacement variants.
+
+    Each variant is a complete copy of the concept (~len(concept)//3
+    tokens) plus JSON/rationale overhead.  The result is clamped to the
+    model output limit; if the model still stops at ``max_tokens`` the
+    caller raises instead of parsing a truncated response.  (Splitting
+    generation across one request per variant would lift the ceiling
+    further, but a single request with a fail-fast truncation check is
+    the simpler design and keeps variant diversity in one context.)
+    """
+    per_variant = len(concept) // 3 + _PER_VARIANT_OVERHEAD_TOKENS
+    return max(_MIN_MAX_TOKENS, min(_MAX_TOKENS_CAP, n * per_variant))
+
 
 def optimize(
     thesis: Thesis,
@@ -74,17 +98,19 @@ def optimize(
         indent=2,
     )
 
-    user_content = (
-        f"THESIS:\n{thesis_block}\n\n"
-        f"ORIGINAL CONCEPT:\n{concept}"
-    )
+    user_content = f"THESIS:\n{thesis_block}\n\nORIGINAL CONCEPT:\n{concept}"
 
     message = client.messages.create(
         model=model,
-        max_tokens=4096,
+        max_tokens=_request_max_tokens(concept, n),
         system=_SYSTEM_PROMPT.format(n=n),
         messages=[{"role": "user", "content": user_content}],
     )
+    if getattr(message, "stop_reason", None) == "max_tokens":
+        raise LLMResponseError(
+            "Optimizer: response truncated at the max_tokens limit — the variants "
+            "JSON is incomplete. Raise max_tokens or reduce --variants."
+        )
     raw = extract_text(message)
     items = parse_json_array(raw)
 

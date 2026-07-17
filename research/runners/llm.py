@@ -75,7 +75,16 @@ class LLMRunner(BaseRunner):
         try:
             raw = extract_text(message)
             data = parse_json_object(raw)
-        except LLMResponseError as exc:
+            # Type coercions stay inside the guard: valid JSON with wrong
+            # types (e.g. "overall_score": "high") must hit the same
+            # fallback as unparseable JSON, not crash the pipeline.
+            score = float(data.get("overall_score", 0.0))
+            metrics = data.get("dimension_scores", {})
+            if not isinstance(metrics, dict):
+                metrics = {}
+            passed = bool(data.get("constraints_satisfied", True))
+            details = str(data.get("details", ""))
+        except (LLMResponseError, TypeError, ValueError) as exc:
             # A malformed scoring response should not kill the whole pipeline —
             # fall back to a zero-score failed result so the judge can ignore it.
             return EvalResult(
@@ -88,8 +97,8 @@ class LLMRunner(BaseRunner):
 
         return EvalResult(
             variant_id=variant.id,
-            score=float(data.get("overall_score", 0.0)),
-            metrics=data.get("dimension_scores", {}),
-            passed=bool(data.get("constraints_satisfied", True)),
-            details=data.get("details", ""),
+            score=score,
+            metrics=metrics,
+            passed=passed,
+            details=details,
         )

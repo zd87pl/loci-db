@@ -121,7 +121,7 @@ Rust serial at p=4 takes 34-501 us — a **10-150x speedup over Python** dependi
 |-----------|-------|-----------|
 | Throughput | **5** | Clustering step itself is <1ms even for millions of IDs. Negligible overhead. |
 | Correctness | **5** | Lossless transformation — same bucket set, just represented differently. |
-| Scalability | **5** | Compression ratio *increases* with resolution: 2.9x at p=4 to 1.2M:1 at p=8. The higher the resolution, the more contiguous the Hilbert mapping. |
+| Scalability | **5** | 2.9x-37.5x on measured non-aligned scenarios. The 1.2M:1 figure at p=8 is a grid-alignment artifact of the tested bounds (they decompose into 16 order-5 subcubes; see RESULTS.md caveat) and should not be extrapolated to generic bounds. Enumeration cost still gates p>=8. |
 | Integration Cost | **3** | Requires Qdrant filter change: switch from MatchAny to multiple Range filters. Need to verify Qdrant supports OR-combined Range filters efficiently. |
 | Memory Overhead | **5** | Reduces memory: fewer range objects than individual IDs. |
 | **Total** | **23/25** | |
@@ -154,8 +154,8 @@ Rust serial at p=4 takes 34-501 us — a **10-150x speedup over Python** dependi
 
 | Rank | Hypothesis | Score | Verdict |
 |------|-----------|-------|---------|
-| 1 | **B: Range Clustering** | 23/25 | **RECOMMENDED for production** — lossless, fast, superb compression at high resolutions. Integration requires Qdrant filter adaptation. |
-| 2 | **A: Rust 4D Parallel** | 22/25 | **RECOMMENDED for production** — essential infrastructure improvement. 10-150x faster than Python. Should be the default 4D bucket enumeration path. |
+| 1 | **B: Range Clustering** | 23/25 | **RECOMMENDED for production** — lossless, fast, solid 3x-40x compression on typical bounds (the 1.2M:1 p=8 figure is a grid-aligned special case). Integration requires Qdrant filter adaptation. |
+| 2 | **A: Rust 4D Enumeration** | 22/25 | **RECOMMENDED for production** — essential infrastructure improvement. Serial path is 10-150x faster than Python; parallel only pays off on large workloads. Serial should be the default 4D bucket enumeration path. |
 | 3 | **D: Sampling** | 19/25 | **REJECTED for production** — recall too low for correctness guarantees. Useful only as approximate fallback when exact enumeration is intractable (p>=8, wide bounds). |
 | 4 | **C: Hierarchical** | 14/25 | **REJECTED** — slower than direct enumeration in all scenarios. The coarse-to-fine approach doesn't amortize the sub-bucket fan-out cost. Theoretical benefit doesn't materialize in practice. |
 
@@ -170,9 +170,9 @@ Rust serial at p=4 takes 34-501 us — a **10-150x speedup over Python** dependi
 - Add `cluster_into_ranges()` to loci_core PyO3 bindings
 - Modify Qdrant filter construction to use Range filters for large bucket sets
 - Prototype: if num_ranges < num_ids / 4, use ranges; else use MatchAny
-- Expected impact: Enable higher-resolution queries (p=8) that are currently blocked by the 10K bucket limit
+- Expected impact: 3x-40x lower filter cardinality on typical bounds, bringing some over-limit queries under the 10K cap. Does not by itself make p=8 feasible — enumeration cost remains the binding constraint there (see RESULTS.md caveat)
 
 ### Phase 3 (Exploration): Combined A+B
 - Use Rust 4D enumeration (A) feeding into range clustering (B)
 - End-to-end pipeline: bounds -> Rust 4D buckets -> range clustering -> Qdrant Range filters
-- Expected impact: Full 4D spatial+temporal queries at p=6-8 with manageable filter cardinality
+- Expected impact: Full 4D spatial+temporal queries at p=6 with manageable filter cardinality; p=8 additionally requires an enumeration-free range derivation (e.g. subcube decomposition) to be tractable

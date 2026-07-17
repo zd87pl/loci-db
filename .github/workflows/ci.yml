@@ -24,7 +24,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,mcp]"
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
@@ -43,7 +43,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,mcp]"
           pip install -r cloud/api/requirements.txt
 
       - name: Run cloud API tests
@@ -65,7 +65,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,mcp]"
           pip install mypy
 
       - name: Run mypy
@@ -111,7 +111,7 @@ jobs:
       # installed — auditing a bare scanner venv checks nothing.
       - name: Install project dependencies (audit target)
         run: |
-          pip install -e ".[dev]"
+          pip install -e ".[dev,mcp]"
           pip install -r cloud/api/requirements.txt
 
       - name: Run bandit (static security analysis)

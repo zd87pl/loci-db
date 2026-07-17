@@ -40,6 +40,9 @@ research = [
     "anthropic>=0.94.0",
     "click>=8.0",
 ]
+mcp = [
+    "mcp>=1.2,<2",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
@@ -57,6 +60,7 @@ dev = [
 
 [project.scripts]
 loci = "loci.cli:main"
+loci-mcp = "loci.mcp.server:main"
 
 # The native Rust bindings are a local-only dependency GROUP (PEP 735), not a
 # published extra: `loci-core` is not registered on PyPI, so shipping it in

@@ -178,4 +178,23 @@ Banker's-rounding divergence between Python `round()` and Rust `f64::round()` at
 
 ---
 
+## Remediation Status (2026-07-17)
+
+A remediation wave on this branch addressed the findings above. Status:
+
+**Fixed in code** — the critical finding (C1: Docker image now builds from the working tree, with a new `docker-smoke` CI job as the regression net) and all high/medium findings in: ranking correctness (H1–H4: decay underflow clamp + similarity tie-break + one-hour-half-life default, euclidean score normalization at the backend boundary, absolute cosine-based novelty, `min_confidence` pushdown + overfetch), client plumbing (H5–H7: unordered scroll pagination, discovery flag + refresh-on-miss, retention cache invalidation), cloud mode (H8, H9: explicit `CloudModeUnsupportedError` guards, metadata round-trip through transport and cloud API), servers (H10, H11: root-server 422 parity and validation, optional spatial bounds, half-open windows, demo Dockerfile), docs honesty (H12–H15: README/NOVELTY/BENCHMARK_METHODOLOGY rewritten from the checked-in artifacts, working curl examples, IDD-58 claims corrected), CI/packaging (H16–H18: pip-audit audits real deps, `native` extra removed from published metadata, Rust wired into the insert hot path with bit-for-bit parity + Rust CI), research pipeline (H19, H20: CodeRunner isolation in a temp project copy + on-disk backup, optimizer token budget + truncation fail-fast), demos (H21: merge re-inserts so indexes are recomputed; XSS escaping; simulation retention cap), and tests (H22, H23: a real-Qdrant `:memory:` integration tier in `tests/test_qdrant_integration.py`, de-tautologized VLM calibration tests). All listed medium and low findings were fixed alongside their clusters (body-size cap, namespace validation + DB CHECK migration, throttle IP spoofing, PyO3 input validation, LUT caching, adaptive keying, memory-store copy semantics, ID format, retry unwrapping, epoch-range materialization, and the rest).
+
+**Deferred by design** (documented in ARCHITECTURE.md "Known Limitations", ROADMAP.md, and NEXT_STEPS.md):
+- **One-collection-per-epoch storage layout** (architecture): a storage redesign, not a patch. Mitigations landed (epoch fan-out intersects the known-epoch set instead of materializing ranges; retention bounds collection count; discovery refreshes on miss), but the move to payload-indexed epochs in a bounded collection set is a deliberate follow-up.
+- **Sync/async shared-core refactor** (~77% duplication): parity drift bugs found were fixed individually and pinned by twin tests; the structural extraction is a follow-up.
+
+**Requires account credentials (cannot be done from this environment):**
+- Register the `loci-core` name on PyPI (the extra was removed from published metadata, which closes the attack for future installs, but the historical 0.3.0 metadata still references it).
+- Publish a new release so the fixed library replaces 0.3.0 on PyPI.
+- Apply cloud migration `005_namespace_check.sql` (after cleaning any legacy underscore-namespace rows) and redeploy the cloud API.
+
+Verification at completion: `pytest tests/` 509+ passed, `cloud/tests` 63 passed, `cargo test --release` 71 passed, `ruff check`/`format` clean, `mypy loci/` clean.
+
+---
+
 *Review conducted with a multi-agent workflow: 13 specialized reviewers + build/test health check, 81 raised findings, each medium+ finding adversarially verified by independent agents (3-lens panels for high/critical), 79 confirmed / 2 refuted. Reproduction commands and evidence excerpts are preserved in the review transcripts.*

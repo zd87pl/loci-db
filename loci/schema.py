@@ -18,7 +18,10 @@ class WorldState:
         y: Normalised spatial coordinate in [0, 1].
         z: Normalised spatial coordinate in [0, 1].
         timestamp_ms: Unix epoch timestamp in milliseconds.
-        vector: Embedding vector (e.g. 512-d, 1024-d, 1408-d).
+        vector: Embedding vector (e.g. 512-d, 1024-d, 1408-d).  Note: with
+            ``distance="cosine"`` Qdrant stores unit-normalised float32
+            vectors, so vectors returned from queries may differ from the
+            inserted values by normalisation and precision.
         scene_id: Optional scene/environment identifier.
         scale_level: Granularity — ``"patch"``, ``"frame"``, or ``"sequence"``.
         confidence: Confidence score for this state, in [0, 1].

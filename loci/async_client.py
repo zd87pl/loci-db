@@ -240,6 +240,11 @@ class AsyncLociClient:
             except UnexpectedResponse as exc:
                 if exc.status_code != 404:
                     raise
+            except ValueError as exc:
+                # qdrant-client's local (":memory:"/path) engine signals a
+                # missing collection with ValueError instead of an HTTP 404.
+                if "not found" not in str(exc).lower():
+                    raise
 
             if not exists:
                 try:

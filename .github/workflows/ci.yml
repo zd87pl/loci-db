@@ -57,7 +57,11 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Must match [tool.mypy] python_version (the minimum supported
+          # Python): on 3.12 pip resolves newer deps (e.g. numpy >= 2.5)
+          # whose stubs use PEP 695 syntax that mypy rejects when
+          # analyzing as 3.11.
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |

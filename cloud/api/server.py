@@ -17,13 +17,14 @@ Environment variables (set as Fly.io secrets — never committed to git):
     LOCI_DISTANCE         Qdrant distance metric (default: cosine)
     LOCI_CORS_ORIGINS     Comma-separated allowed origins (default: none)
     LOCI_DEV_MODE         Enable Swagger/ReDoc UI when "true" (default: false)
-    LOCI_MAX_METADATA_BYTES  Max metadata payload size in bytes (default: 4096)
+    LOCI_MAX_METADATA_BYTES  Max metadata payload size in bytes (default: 16384)
     LOCI_MAX_BODY_BYTES   Max request body size in bytes (default: 5MB)
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -68,9 +69,14 @@ VECTOR_SIZE: int = int(os.environ.get("LOCI_VECTOR_SIZE", "512"))
 EPOCH_SIZE_MS: int = int(os.environ.get("LOCI_EPOCH_SIZE_MS", "5000"))
 DISTANCE: str = os.environ.get("LOCI_DISTANCE", "cosine")
 DEV_MODE: bool = os.environ.get("LOCI_DEV_MODE", "").lower() == "true"
-MAX_METADATA_BYTES: int = int(os.environ.get("LOCI_MAX_METADATA_BYTES", "4096"))
+MAX_METADATA_BYTES: int = int(os.environ.get("LOCI_MAX_METADATA_BYTES", str(16 * 1024)))
 MAX_BODY_BYTES: int = int(os.environ.get("LOCI_MAX_BODY_BYTES", str(5 * 1024 * 1024)))
 DEFAULT_RPM: int = int(os.environ.get("LOCI_DEFAULT_RPM", "600"))
+
+# Hard ceiling on vector list length at the schema level. The real dimension
+# check is VECTOR_SIZE, but that runs after the whole list is parsed; this cap
+# (together with the body-size middleware) bounds worst-case parse work.
+MAX_VECTOR_ITEMS: int = max(8192, VECTOR_SIZE)
 
 _raw_origins = os.environ.get("LOCI_CORS_ORIGINS", "")
 CORS_ORIGINS: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
@@ -141,6 +147,93 @@ app.add_middleware(
 )
 
 
+# ── Body size limit middleware ─────────────────────────────────────────────
+
+
+class BodySizeLimitMiddleware:
+    """Pure-ASGI middleware enforcing ``LOCI_MAX_BODY_BYTES``.
+
+    Two layers of defence:
+      1. Requests declaring ``Content-Length`` above the cap are rejected with
+         413 before any body bytes are read.
+      2. Bodies streamed without (or with a lying) ``Content-Length`` are
+         counted as chunks arrive; the moment the running total exceeds the cap
+         a 413 is sent and the application is handed an ``http.disconnect`` —
+         the oversized payload is never fully buffered or JSON-parsed. (This
+         cannot be signalled with an exception: FastAPI wraps body-read errors
+         into a generic 400, so the receive wrapper responds directly and any
+         response the aborted app still produces is swallowed.)
+    """
+
+    def __init__(self, app, max_body_bytes: int) -> None:  # noqa: ANN001
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    declared = -1
+                if declared > self.max_body_bytes:
+                    await self._reject(send)
+                    return
+                break
+
+        received = 0
+        responded = False
+        response_started = False
+
+        async def counting_receive():  # noqa: ANN202
+            nonlocal received, responded
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_body_bytes:
+                    if not responded and not response_started:
+                        responded = True
+                        await self._reject(send)
+                    # Starve the app of further body bytes; it will abort.
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message) -> None:  # noqa: ANN001
+            nonlocal response_started
+            if responded:
+                return  # 413 already sent; drop the aborted app's own response
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        await self.app(scope, counting_receive, guarded_send)
+
+    async def _reject(self, send) -> None:  # noqa: ANN001
+        body = json.dumps({"detail": "Request body too large"}).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+# Starlette builds the middleware stack in reverse addition order, so this
+# wraps CORS and everything inward — oversized bodies are rejected before any
+# routing or parsing work. The request-ID middleware below is added later
+# (further out), so 413 responses still get logged with a request ID.
+app.add_middleware(BodySizeLimitMiddleware, max_body_bytes=MAX_BODY_BYTES)
+
+
 # ── Request ID middleware ──────────────────────────────────────────────────
 
 
@@ -176,10 +269,21 @@ class InsertRequest(BaseModel):
     y: float = Field(..., ge=0.0, le=1.0, description="Y spatial coordinate (normalised)")
     z: float = Field(..., ge=0.0, le=1.0, description="Z spatial coordinate (normalised)")
     timestamp_ms: int = Field(..., ge=0, description="Unix timestamp in milliseconds")
-    vector: list[float] = Field(..., description=f"Embedding vector ({VECTOR_SIZE} dims)")
+    vector: list[float] = Field(
+        ...,
+        max_length=MAX_VECTOR_ITEMS,
+        description=f"Embedding vector ({VECTOR_SIZE} dims)",
+    )
     scene_id: str = Field(..., min_length=1, max_length=256, description="Scene identifier")
     scale_level: str = Field("patch", max_length=64, description="Spatial scale level")
     confidence: float = Field(1.0, ge=0.0, le=1.0, description="Detection confidence")
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            f"Arbitrary key/value payload stored with the vector and returned "
+            f"verbatim by /query (max {MAX_METADATA_BYTES} bytes JSON-serialized)"
+        ),
+    )
 
     @field_validator("vector")
     @classmethod
@@ -188,18 +292,24 @@ class InsertRequest(BaseModel):
             raise ValueError(f"vector must have {VECTOR_SIZE} dimensions, got {len(v)}")
         return v
 
-    @model_validator(mode="after")
-    def check_metadata_size(self) -> InsertRequest:
-        import json
-
-        meta = json.dumps({"scene_id": self.scene_id, "scale_level": self.scale_level})
-        if len(meta.encode()) > MAX_METADATA_BYTES:
-            raise ValueError(f"metadata exceeds {MAX_METADATA_BYTES} bytes")
-        return self
+    @field_validator("metadata")
+    @classmethod
+    def check_metadata_size(cls, v: dict[str, Any]) -> dict[str, Any]:
+        try:
+            blob = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("metadata must be JSON-serializable") from exc
+        if len(blob.encode("utf-8")) > MAX_METADATA_BYTES:
+            raise ValueError(f"metadata exceeds {MAX_METADATA_BYTES} bytes JSON-serialized")
+        return v
 
 
 class QueryRequest(BaseModel):
-    vector: list[float] = Field(..., description=f"Query vector ({VECTOR_SIZE} dims)")
+    vector: list[float] = Field(
+        ...,
+        max_length=MAX_VECTOR_ITEMS,
+        description=f"Query vector ({VECTOR_SIZE} dims)",
+    )
     x_min: float = Field(0.0, ge=-1e9, le=1e9)
     x_max: float = Field(1.0, ge=-1e9, le=1e9)
     y_min: float = Field(0.0, ge=-1e9, le=1e9)
@@ -260,6 +370,9 @@ class QueryResult(BaseModel):
     z: float
     timestamp_ms: int
     scene_id: str
+    scale_level: str = "patch"
+    confidence: float = 1.0
+    metadata: dict[str, Any] = Field(default_factory=dict)
     vector: list[float] = Field(
         default_factory=list,
         description="Embedding vector; empty unless include_vectors was set",
@@ -361,6 +474,7 @@ def insert(
             scene_id=req.scene_id,
             scale_level=req.scale_level,
             confidence=req.confidence,
+            metadata=req.metadata,
         )
     except ValueError as exc:
         # WorldState enforces invariants Pydantic doesn't fully mirror (e.g.
@@ -410,6 +524,9 @@ def query(
                 z=r.z,
                 timestamp_ms=r.timestamp_ms,
                 scene_id=r.scene_id,
+                scale_level=r.scale_level,
+                confidence=r.confidence,
+                metadata=r.metadata,
                 vector=list(r.vector) if req.include_vectors else [],
             )
             for r in results

@@ -71,44 +71,38 @@ def _make_state(**overrides) -> WorldState:
 
 
 # ---------------------------------------------------------------------------
-# _ensure_collection
+# _ensure_data_collection / _ensure_summary_collection
 # ---------------------------------------------------------------------------
 
 
 class TestEnsureCollection:
-    def test_creates_collection_on_404(self, client, mock_qdrant):
-        """Collection should be created when Qdrant returns 404."""
-        client._ensure_collection("loci_0")
+    def test_creates_data_collection_on_404(self, client, mock_qdrant):
+        """The data collection should be created when Qdrant returns 404."""
+        client._ensure_data_collection()
 
         mock_qdrant.create_collection.assert_called_once()
         name_arg = mock_qdrant.create_collection.call_args.kwargs["collection_name"]
-        assert name_arg == "loci_0"
+        assert name_arg == "loci_data"
 
     def test_idempotent_after_first_call(self, client, mock_qdrant):
         """Second call should not hit Qdrant again."""
-        client._ensure_collection("loci_0")
+        client._ensure_data_collection()
         mock_qdrant.reset_mock()
 
-        client._ensure_collection("loci_0")
+        client._ensure_data_collection()
         mock_qdrant.get_collection.assert_not_called()
         mock_qdrant.create_collection.assert_not_called()
 
-    def test_skips_create_when_collection_exists(self, mock_qdrant):
+    def test_skips_create_when_collection_exists(self, client, mock_qdrant):
         """If get_collection succeeds, don't create."""
         mock_qdrant.get_collection.side_effect = None
         mock_qdrant.get_collection.return_value = MagicMock()
 
-        c = LociClient.__new__(LociClient)
-        c._qdrant = mock_qdrant
-        c._vector_size = 4
-        c._known_collections = set()
-        c._collection_locks = {}
-        c._locks_mutex = threading.Lock()
-
-        c._ensure_collection("loci_0")
+        client._ensure_data_collection()
         mock_qdrant.create_collection.assert_not_called()
+        assert client._collection_ready["loci_data"]
 
-    def test_propagates_non_404_errors(self, mock_qdrant):
+    def test_propagates_non_404_errors(self, client, mock_qdrant):
         """Non-404 errors from get_collection should propagate."""
         import httpx
         from qdrant_client.http.exceptions import UnexpectedResponse
@@ -119,15 +113,9 @@ class TestEnsureCollection:
             content=b"",
             headers=httpx.Headers(),
         )
-        c = LociClient.__new__(LociClient)
-        c._qdrant = mock_qdrant
-        c._vector_size = 4
-        c._known_collections = set()
-        c._collection_locks = {}
-        c._locks_mutex = threading.Lock()
 
         with pytest.raises(UnexpectedResponse):
-            c._ensure_collection("loci_0")
+            client._ensure_data_collection()
 
     def test_create_conflict_treated_as_success(self, client, mock_qdrant):
         """A concurrent-writer 409 on create_collection should not raise."""
@@ -141,21 +129,21 @@ class TestEnsureCollection:
             headers=httpx.Headers(),
         )
 
-        client._ensure_collection("loci_0")
+        client._ensure_data_collection()
 
-        assert "loci_0" in client._known_collections
+        assert client._collection_ready["loci_data"]
         # The race winner creates the indexes, not us.
         mock_qdrant.create_payload_index.assert_not_called()
 
     def test_concurrent_threads_race_single_create(self, client, mock_qdrant):
-        """Two threads racing _ensure_collection must not double-create."""
+        """Two threads racing _ensure_data_collection must not double-create."""
         barrier = threading.Barrier(2)
         errors: list[Exception] = []
 
         def _run():
             barrier.wait()
             try:
-                client._ensure_collection("loci_7")
+                client._ensure_data_collection()
             except Exception as exc:  # pragma: no cover - failure path
                 errors.append(exc)
 
@@ -167,16 +155,32 @@ class TestEnsureCollection:
 
         assert errors == []
         assert mock_qdrant.create_collection.call_count == 1
-        assert "loci_7" in client._known_collections
+        assert client._collection_ready["loci_data"]
 
-    def test_creates_scale_level_index(self, client, mock_qdrant):
-        """scale_level should get a KEYWORD payload index."""
-        client._ensure_collection("loci_0")
+    def test_data_collection_index_set(self, client, mock_qdrant):
+        """The data collection gets hilbert + timestamp + keyword indexes."""
+        client._ensure_data_collection()
 
         index_calls = mock_qdrant.create_payload_index.call_args_list
         field_names = [c.kwargs["field_name"] for c in index_calls]
+        for r in client._hilbert.resolutions:
+            assert f"hilbert_r{r}" in field_names
+        assert "timestamp_ms" in field_names
         assert "scale_level" in field_names
         assert "scene_id" in field_names
+
+    def test_summary_collection_has_no_hilbert_indexes(self, client, mock_qdrant):
+        """Summaries carry no Hilbert payload, so no hilbert_r* indexes."""
+        client._ensure_summary_collection()
+
+        created = {
+            c.kwargs["collection_name"] for c in mock_qdrant.create_collection.call_args_list
+        }
+        assert created == {"loci_summary"}
+        field_names = [
+            c.kwargs["field_name"] for c in mock_qdrant.create_payload_index.call_args_list
+        ]
+        assert field_names == ["timestamp_ms", "scale_level", "scene_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -212,13 +216,13 @@ class TestInsert:
         client.insert(state)
         assert state.id == original_id  # should not be modified
 
-    def test_upserts_to_correct_collection(self, client, mock_qdrant):
-        # timestamp 10_000 with epoch_size 5000 → epoch 2 → "loci_2"
+    def test_upserts_to_data_collection(self, client, mock_qdrant):
+        # Epochs are logical only: every raw point lands in loci_data.
         state = _make_state(timestamp_ms=10_000)
         client.insert(state)
 
         upsert_call = mock_qdrant.upsert.call_args
-        assert upsert_call.kwargs["collection_name"] == "loci_2"
+        assert upsert_call.kwargs["collection_name"] == "loci_data"
 
     def test_payload_includes_hilbert_ids(self, client, mock_qdrant):
         state = _make_state()
@@ -243,9 +247,6 @@ class TestInsert:
         assert payload["z"] == 0.5
 
     def test_find_latest_predecessor_paginates_scroll_results(self, client, mock_qdrant):
-        client._known_collections = {"loci_0"}
-        client._discovered = True
-
         def _point(i: int):
             point = MagicMock()
             point.id = f"p{i}"
@@ -262,13 +263,13 @@ class TestInsert:
 
         predecessor = client._find_latest_predecessor("scene_a", 20_000)
 
-        assert predecessor == ("p299", "loci_0")
+        assert predecessor == "p299"
         assert mock_qdrant.scroll.call_args_list[1].kwargs["offset"] == "page-2"
+        # The scan targets the single raw data collection.
+        assert mock_qdrant.scroll.call_args.kwargs["collection_name"] == "loci_data"
 
     def test_find_latest_predecessor_unordered_pages(self, client, mock_qdrant):
         """The latest predecessor is chosen by timestamp, not page position."""
-        client._known_collections = {"loci_0"}
-        client._discovered = True
 
         def _point(pid: str, ts: int):
             point = MagicMock()
@@ -282,7 +283,7 @@ class TestInsert:
 
         predecessor = client._find_latest_predecessor("scene_a", 20_000)
 
-        assert predecessor == ("latest", "loci_0")
+        assert predecessor == "latest"
         # Ordered scrolls break Qdrant pagination; must scroll unordered.
         assert mock_qdrant.scroll.call_args.kwargs.get("order_by") is None
 
@@ -299,8 +300,9 @@ class TestInsertBatch:
         assert len(ids) == 5
         assert len(set(ids)) == 5  # all unique
 
-    def test_groups_by_epoch(self, client, mock_qdrant):
-        # epoch_size=5000: ts 3000 → epoch 0, ts 8000 → epoch 1
+    def test_multi_epoch_batch_single_collection(self, client, mock_qdrant):
+        # epoch_size=5000: ts 3000 → epoch 0, ts 8000 → epoch 1 — but epochs
+        # are logical only, so everything lands in loci_data.
         states = [
             _make_state(timestamp_ms=3000),
             _make_state(timestamp_ms=8000),
@@ -309,17 +311,13 @@ class TestInsertBatch:
 
         upsert_calls = mock_qdrant.upsert.call_args_list
         collections = {c.kwargs["collection_name"] for c in upsert_calls}
-        assert collections == {"loci_0", "loci_1"}
+        assert collections == {"loci_data"}
 
-    def test_single_upsert_per_epoch(self, client, mock_qdrant):
-        # All in same epoch → exactly one upsert call
-        states = [_make_state(timestamp_ms=10_000 + i) for i in range(10)]
+    def test_single_upsert_for_whole_batch(self, client, mock_qdrant):
+        states = [_make_state(timestamp_ms=10_000 + i * 3000) for i in range(10)]
         client.insert_batch(states)
 
-        # Filter to only upsert calls for loci_2
-        upsert_calls = [
-            c for c in mock_qdrant.upsert.call_args_list if c.kwargs["collection_name"] == "loci_2"
-        ]
+        upsert_calls = mock_qdrant.upsert.call_args_list
         assert len(upsert_calls) == 1
         assert len(upsert_calls[0].kwargs["points"]) == 10
 
@@ -339,9 +337,10 @@ class TestQuery:
     def test_returns_empty_when_no_collections(self, client, mock_qdrant):
         results = client.query(vector=[1.0, 2.0, 3.0, 4.0])
         assert results == []
+        mock_qdrant.query_points.assert_not_called()
 
     def test_returns_world_states_with_vectors(self, client, mock_qdrant):
-        # Insert first so the collection is known
+        # Insert first so the data collection is known
         client.insert(_make_state())
 
         hit = MagicMock()
@@ -520,55 +519,46 @@ class TestQuery:
 
 
 # ---------------------------------------------------------------------------
-# Collection discovery
+# Reader visibility (probe-based; no per-epoch discovery any more)
 # ---------------------------------------------------------------------------
 
 
-def _mock_collections_response(names: list[str]) -> MagicMock:
-    response = MagicMock()
-    cols = []
-    for name in names:
-        col = MagicMock()
-        col.name = name
-        cols.append(col)
-    response.collections = cols
-    return response
+class TestReaderVisibility:
+    def test_reader_client_sees_collections_created_by_another_writer(self, client, mock_qdrant):
+        """A client that never inserted still searches existing collections."""
+        mock_qdrant.get_collection.side_effect = None
+        mock_qdrant.get_collection.return_value = MagicMock()
 
-
-class TestDiscovery:
-    def test_insert_then_query_sees_preexisting_collections(self, client, mock_qdrant):
-        """_ensure_collection populating the cache must not suppress discovery."""
-        mock_qdrant.get_collections.return_value = _mock_collections_response(["loci_5"])
-
-        client.insert(_make_state(timestamp_ms=10_000))  # creates loci_2
         client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(25_000, 29_999))
 
-        assert "loci_5" in client._known_collections
         searched = {c.kwargs["collection_name"] for c in mock_qdrant.query_points.call_args_list}
-        assert "loci_5" in searched
+        assert searched == {"loci_data", "loci_summary"}
 
-    def test_rediscovers_when_window_epoch_unknown(self, client, mock_qdrant):
-        """A query for an unknown epoch re-runs discovery for that call."""
-        mock_qdrant.get_collections.return_value = _mock_collections_response(["loci_2"])
-        client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(10_000, 14_999))
-        assert mock_qdrant.get_collections.call_count == 1
+    def test_existence_probe_cached_after_success(self, client, mock_qdrant):
+        mock_qdrant.get_collection.side_effect = None
+        mock_qdrant.get_collection.return_value = MagicMock()
 
-        # Another writer creates loci_9; a query covering epoch 9 must find it.
-        mock_qdrant.get_collections.return_value = _mock_collections_response(["loci_2", "loci_9"])
-        client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(45_000, 49_999))
+        client.query(vector=[1.0, 2.0, 3.0, 4.0])
+        probes_after_first = mock_qdrant.get_collection.call_count
+        client.query(vector=[1.0, 2.0, 3.0, 4.0])
 
-        assert mock_qdrant.get_collections.call_count == 2
+        # Both collections were probed once; the result is cached.
+        assert probes_after_first == 2
+        assert mock_qdrant.get_collection.call_count == probes_after_first
+
+    def test_missing_summary_collection_reprobed_until_it_appears(self, client, mock_qdrant):
+        """A 404 is never cached — the summary can appear later (another writer)."""
+        client.insert(_make_state())  # data ready; summary probe 404s
+        client.query(vector=[1.0, 2.0, 3.0, 4.0])
         searched = {c.kwargs["collection_name"] for c in mock_qdrant.query_points.call_args_list}
-        assert "loci_9" in searched
+        assert searched == {"loci_data"}
 
-    def test_discovery_merges_instead_of_replacing(self, client, mock_qdrant):
-        client._known_collections = {"loci_1"}
-        client._discovered = False
-        mock_qdrant.get_collections.return_value = _mock_collections_response(["loci_3"])
-
-        client._discover_collections()
-
-        assert client._known_collections == {"loci_1", "loci_3"}
+        mock_qdrant.get_collection.side_effect = None
+        mock_qdrant.get_collection.return_value = MagicMock()
+        mock_qdrant.query_points.reset_mock()
+        client.query(vector=[1.0, 2.0, 3.0, 4.0])
+        searched = {c.kwargs["collection_name"] for c in mock_qdrant.query_points.call_args_list}
+        assert searched == {"loci_data", "loci_summary"}
 
 
 # ---------------------------------------------------------------------------
@@ -684,8 +674,6 @@ class TestTrajectoryIdNormalisation:
             }
             return point
 
-        client._known_collections = {"loci_2"}
-        client._discovered = True
         mock_qdrant.retrieve.return_value = [_pt(canonical, 10_050)]
         mock_qdrant.scroll.return_value = (
             [_pt("11111111-2222-3333-4444-555555555555", 10_000), _pt(canonical, 10_050)],
@@ -696,21 +684,23 @@ class TestTrajectoryIdNormalisation:
 
         # Anchor matched → both states returned, not just the anchor fallback.
         assert len(traj) == 2
+        # The trajectory scan targets the raw data collection only.
+        assert mock_qdrant.scroll.call_args.kwargs["collection_name"] == "loci_data"
 
 
 # ---------------------------------------------------------------------------
-# Shard failure logging
+# Search failure logging
 # ---------------------------------------------------------------------------
 
 
-class TestShardFailureLogging:
-    def test_partial_shard_failure_logged_at_warning(self, client, mock_qdrant, caplog):
-        client.insert(_make_state(timestamp_ms=3000))  # loci_0
-        client.insert(_make_state(timestamp_ms=8000))  # loci_1
+class TestSearchFailureLogging:
+    def test_partial_search_failure_logged_at_warning(self, client, mock_qdrant, caplog):
+        client.insert(_make_state(timestamp_ms=3000))
+        client._collection_ready[client._summary_collection] = True  # summary exists too
 
         good = MagicMock()
         good.points = []
-        mock_qdrant.query_points.side_effect = [RuntimeError("shard down"), good]
+        mock_qdrant.query_points.side_effect = [RuntimeError("search down"), good]
 
         import logging
 
@@ -719,13 +709,15 @@ class TestShardFailureLogging:
 
         assert results == []
         assert any(
-            "loci_0" in rec.message and "shard down" in rec.message for rec in caplog.records
+            "loci_data" in rec.message and "search down" in rec.message for rec in caplog.records
         )
+        # Only one of the two searches failed → no "all failed" summary.
+        assert not any("collection searches failed" in rec.message for rec in caplog.records)
 
-    def test_all_shards_failed_summary_warning(self, client, mock_qdrant, caplog):
+    def test_all_searches_failed_summary_warning(self, client, mock_qdrant, caplog):
         client.insert(_make_state(timestamp_ms=3000))
-        client.insert(_make_state(timestamp_ms=8000))
-        mock_qdrant.query_points.side_effect = RuntimeError("shard down")
+        client._collection_ready[client._summary_collection] = True
+        mock_qdrant.query_points.side_effect = RuntimeError("search down")
 
         import logging
 
@@ -733,7 +725,7 @@ class TestShardFailureLogging:
             results = client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
 
         assert results == []
-        assert any("All 2 shard searches failed" in rec.message for rec in caplog.records)
+        assert any("All 2 collection searches failed" in rec.message for rec in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -753,34 +745,60 @@ class TestClose:
 
 
 # ---------------------------------------------------------------------------
-# Retention cache invalidation
+# Retention wiring (cutoff-based raw-point deletes)
 # ---------------------------------------------------------------------------
 
 
-class TestRetentionCache:
-    def test_purged_collections_forgotten_and_recreatable(self, mock_qdrant):
+class TestRetentionWiring:
+    def test_purge_deletes_raw_points_below_cutoff(self, mock_qdrant):
         from loci.temporal.retention import RetentionPolicy
 
-        client = LociClient(
-            qdrant_url="http://fake:6333",
-            epoch_size_ms=5000,
-            vector_size=4,
-            decay_lambda=0.0,
-            retention_policy=RetentionPolicy(max_epochs=1),
-        )
-        client.insert(_make_state(timestamp_ms=1000))  # loci_0
-        client.insert(_make_state(timestamp_ms=6000))  # loci_1 → loci_0 purged
+        with patch("loci.client.time.time", return_value=1.0):
+            client = LociClient(
+                qdrant_url="http://fake:6333",
+                epoch_size_ms=5000,
+                vector_size=4,
+                decay_lambda=0.0,
+                retention_policy=RetentionPolicy(max_epochs=1),
+            )
+            client.insert(_make_state(timestamp_ms=1000))  # epoch 0
+            mock_qdrant.delete.assert_not_called()
+            client.insert(_make_state(timestamp_ms=6000))  # epoch 1 → epoch 0 expires
 
-        assert "loci_0" not in client._known_collections
-        assert "loci_0" not in client._collection_locks
+        # One filter-delete on the data collection, cutting below t=5000.
+        delete_calls = mock_qdrant.delete.call_args_list
+        assert len(delete_calls) == 1
+        kwargs = delete_calls[0].kwargs
+        assert kwargs["collection_name"] == "loci_data"
+        (condition,) = kwargs["points_selector"].filter.must
+        assert condition.key == "timestamp_ms"
+        assert condition.range.lt == 5000
 
-        # A late insert into the purged epoch recreates the collection.
+        # A late insert into the purged range must not crash — there is no
+        # per-epoch collection to recreate any more.
         mock_qdrant.create_collection.reset_mock()
-        client.insert(_make_state(timestamp_ms=2000))
-        created = {
-            c.kwargs["collection_name"] for c in mock_qdrant.create_collection.call_args_list
-        }
-        assert "loci_0" in created
+        with patch("loci.client.time.time", return_value=1.0):
+            late_id = client.insert(_make_state(timestamp_ms=2000))
+        assert isinstance(late_id, str)
+        mock_qdrant.create_collection.assert_not_called()
+
+    def test_retention_never_touches_summary_collection(self, mock_qdrant):
+        from loci.temporal.retention import RetentionPolicy
+
+        with patch("loci.client.time.time", return_value=1.0):
+            client = LociClient(
+                qdrant_url="http://fake:6333",
+                epoch_size_ms=5000,
+                vector_size=4,
+                decay_lambda=0.0,
+                retention_policy=RetentionPolicy(max_epochs=1),
+            )
+            client._collection_ready[client._summary_collection] = True
+            client.insert(_make_state(timestamp_ms=1000))
+            client.insert(_make_state(timestamp_ms=6000))
+
+        deleted = {c.kwargs["collection_name"] for c in mock_qdrant.delete.call_args_list}
+        assert deleted == {"loci_data"}
 
 
 # ---------------------------------------------------------------------------
@@ -817,7 +835,7 @@ class TestSpatialResolution:
 
 class TestPredictAndRetrieve:
     def test_uses_predicted_vector(self, client, mock_qdrant):
-        # Insert a state at "now" so the future-horizon collection is known
+        # Insert a state at "now" so the data collection is known
         import time as _time
 
         now_ms = int(_time.time() * 1000)

@@ -2,22 +2,22 @@
 
 Unlike tests/test_client.py (MagicMock-based), these tests run every operation through
 ``QdrantClient(location=":memory:")`` — qdrant-client's server-free local engine — and pin
-fixes for bugs that the mocked tests could not catch: ID format round-trips, discovery of
-collections created by other writers, unordered scroll pagination past 256 points,
-min_confidence pushdown, euclidean score ordering, retention purges, and tenant isolation
-via collection_prefix.
+fixes for bugs that the mocked tests could not catch: ID format round-trips, multi-writer
+visibility on a shared store, unordered scroll pagination past 256 points, min_confidence
+pushdown, euclidean score ordering, retention purges, consolidation into the bounded
+two-collection layout, and tenant isolation via collection_prefix.
 
 Notes on the local engine:
 
 * Each ``:memory:`` instance is a private store, so LociClient instances that must see each
   other's data share ONE underlying Qdrant client (injected by patching the class the same
   way the mock-based tests do).
-* KNOWN INCOMPATIBILITY (worked around, not fixed here): ``_ensure_collection`` probes with
-  ``get_collection`` and handles only ``UnexpectedResponse(404)`` — the real HTTP server's
-  contract. The local engine raises ``ValueError("Collection X not found")`` instead, so a
-  stock LociClient crashes on first insert in local mode. ``_ServerLikeQdrantClient`` below
-  translates ONLY that probe to the server's 404 contract; every other call goes to the
-  unmodified local engine.
+* The clients probe collection existence with ``get_collection``, handling both the real
+  HTTP server's ``UnexpectedResponse(404)`` contract and the local engine's
+  ``ValueError("Collection X not found")``. ``_ServerLikeQdrantClient`` below additionally
+  translates that probe to the server's 404 contract so these tests exercise the same
+  error path a production deployment hits; every other call goes to the unmodified local
+  engine.
 * Under cosine distance the local engine stores vectors unit-normalised (as the real server
   does), so vector round-trip assertions use unit vectors and approximate comparison
   (float32 storage).
@@ -25,6 +25,7 @@ Notes on the local engine:
 
 from __future__ import annotations
 
+import contextlib
 import math
 import uuid
 from unittest import mock
@@ -37,6 +38,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from loci.async_client import AsyncLociClient
 from loci.client import LociClient
 from loci.schema import WorldState
+from loci.temporal.consolidation import ConsolidationPolicy
 from loci.temporal.retention import RetentionPolicy
 
 VECTOR_SIZE = 8
@@ -204,7 +206,7 @@ class TestIdRoundTrip:
         assert "-" in state_id
         assert str(uuid.UUID(state_id)) == state_id
         # What Qdrant stores is byte-for-byte what the client returned.
-        points, _ = store.scroll("loci_2", limit=10)
+        points, _ = store.scroll("loci_data", limit=10)
         assert [str(p.id) for p in points] == [state_id]
         # And query results carry the same id back.
         results = client.query(_planar(0.0), limit=1)
@@ -278,9 +280,9 @@ class TestTenantIsolation:
             for i in range(3)
         ]
 
-        # Both tenants share the same physical store...
+        # Both tenants share the same physical store, two collections each...
         names = {c.name for c in store.get_collections().collections}
-        assert {"tenant_a_loci_2", "tenant_b_loci_2"} <= names
+        assert {"tenant_a_loci_data", "tenant_b_loci_data"} <= names
 
         # ...but queries are namespaced.
         a_results = tenant_a.query(_planar(0.0), limit=10)
@@ -297,7 +299,7 @@ class TestTenantIsolation:
 
 
 # ---------------------------------------------------------------------------
-# 5. Retention purge + late insert into a purged epoch
+# 5. Retention purge + late insert into a purged range
 # ---------------------------------------------------------------------------
 
 
@@ -305,33 +307,39 @@ class TestRetention:
     def test_max_epochs_purges_and_late_insert_does_not_crash(self, store):
         client = _make_client(store, retention_policy=RetentionPolicy(max_epochs=2))
         for ep in range(5):
-            client.insert(_state(timestamp_ms=ep * EPOCH_MS + 2_500, scene_id="ret"))
+            ts = ep * EPOCH_MS + 2_500
+            with _pinned_now("loci.client", ts):
+                client.insert(_state(timestamp_ms=ts, scene_id="ret"))
 
+        # Bounded collection set: points expire, never collections.
         names = {c.name for c in store.get_collections().collections}
-        assert names == {"loci_3", "loci_4"}  # only the two newest epochs survive
+        assert names == {"loci_data"}
+        kept = {p.payload["timestamp_ms"] for p in store.scroll("loci_data", limit=100)[0]}
+        assert kept == {17_500, 22_500}  # only the two newest epochs survive
 
-        # Late insert into the long-purged epoch 0: must not raise; the epoch is
-        # either recreated or immediately re-purged.
-        late_id = client.insert(_state(timestamp_ms=100, scene_id="ret"))
+        # Late insert older than the applied cutoff: must not raise; the point
+        # lands in the (single) data collection and is swept up when the
+        # cutoff next advances.
+        with _pinned_now("loci.client", 4 * EPOCH_MS + 2_600):
+            late_id = client.insert(_state(timestamp_ms=100, scene_id="ret"))
         assert late_id
-        names = {c.name for c in store.get_collections().collections}
-        assert {"loci_3", "loci_4"} <= names <= {"loci_0", "loci_3", "loci_4"}
 
         # Store stays consistent: the retained states are still queryable and
-        # new inserts keep working.
+        # new inserts keep working; the straggler is purged on the advance.
+        with _pinned_now("loci.client", 5 * EPOCH_MS + 2_500):
+            client.insert(_state(timestamp_ms=5 * EPOCH_MS + 2_500, scene_id="ret"))
+        kept = {p.payload["timestamp_ms"] for p in store.scroll("loci_data", limit=100)[0]}
+        assert kept == {22_500, 27_500}
         surviving = {s.timestamp_ms for s in client.query(_planar(0.0), limit=10)}
-        assert {17_500, 22_500} <= surviving
-        client.insert(_state(timestamp_ms=5 * EPOCH_MS + 2_500, scene_id="ret"))
-        results = client.query(_planar(0.0), limit=10)
-        assert 27_500 in {s.timestamp_ms for s in results}
+        assert surviving == {22_500, 27_500}
 
 
 # ---------------------------------------------------------------------------
-# 6. Insert-before-query discovery of another writer's collections
+# 6. Multi-writer visibility on a shared store
 # ---------------------------------------------------------------------------
 
 
-class TestDiscovery:
+class TestSharedStoreVisibility:
     def test_writer_b_sees_writer_a_after_inserting_first(self, store):
         writer_a = _make_client(store)
         a_ids = [
@@ -342,7 +350,8 @@ class TestDiscovery:
         ]
 
         # A brand-new client over the same store inserts FIRST, then queries.
-        # Discovery must still surface A's collections (they used to stay invisible).
+        # Both writers share the one data collection, so A's points are
+        # visible immediately (no per-epoch discovery involved).
         writer_b = _make_client(store)
         writer_b.insert(_state(timestamp_ms=20_000, scene_id="scene_b", metadata={"w": "b"}))
 
@@ -509,3 +518,204 @@ class TestAsyncClient:
         assert {s.id for s in context} == set(ids)
         traj = await client.get_trajectory(ids[150], steps_back=n, steps_forward=n)
         assert len(traj) == n
+
+
+# ---------------------------------------------------------------------------
+# 10. Memory consolidation end-to-end (real engine, injected timestamps)
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _pinned_now(module: str, ts_ms: int):
+    """Pin the client module's wall clock (maintenance + decay) to *ts_ms*."""
+    with mock.patch(f"{module}.time.time", return_value=ts_ms / 1000.0):
+        yield
+
+
+def _scene_planar(scene: str, i: int) -> list[float]:
+    """Unit vectors clustered per scene: scene 'a' near theta=0, 'b' near 1.5."""
+    base = {"a": 0.0, "b": 1.5}[scene]
+    return _planar(base + 0.02 * i)
+
+
+def _coarse_scroll(store: QdrantClient, t_min: int, t_max: int) -> list:
+    """Summary points whose timestamp falls in one coarse group's range."""
+    from qdrant_client.models import FieldCondition, Filter, Range
+
+    points, _ = store.scroll(
+        "loci_summary",
+        scroll_filter=Filter(
+            must=[FieldCondition(key="timestamp_ms", range=Range(gte=t_min, lte=t_max))]
+        ),
+        limit=100,
+    )
+    return points
+
+
+class TestConsolidation:
+    """Insert 10 epochs x 2 scenes x 5 states, advancing the pinned clock.
+
+    With raw_window_epochs=2 and summary_epoch_ratio=4, epochs 0-7 end up
+    consolidated into loci_summary — coarse group 0 (epochs 0-3) and coarse
+    group 1 (epochs 4-7) — leaving epochs 8 and 9 raw in loci_data.
+    """
+
+    N_EPOCHS = 10
+    STATES_PER_SCENE_PER_EPOCH = 5
+    POLICY = ConsolidationPolicy(raw_window_epochs=2, summary_epoch_ratio=4, max_states_per_scene=3)
+
+    def _fill(self, store: QdrantClient) -> tuple[LociClient, dict[int, list[str]]]:
+        client = _make_client(store, consolidation_policy=self.POLICY)
+        ids_by_epoch: dict[int, list[str]] = {}
+        for e in range(self.N_EPOCHS):
+            for scene in ("a", "b"):
+                for i in range(self.STATES_PER_SCENE_PER_EPOCH):
+                    ts = e * EPOCH_MS + i * 100
+                    with _pinned_now("loci.client", ts):
+                        sid = client.insert(
+                            _state(timestamp_ms=ts, scene_id=scene, vector=_scene_planar(scene, i))
+                        )
+                    ids_by_epoch.setdefault(e, []).append(sid)
+        return client, ids_by_epoch
+
+    def test_raw_beyond_window_dropped_summaries_bounded(self, store):
+        client, _ = self._fill(store)
+
+        # Exactly two collections per tenant, ever.
+        names = {c.name for c in store.get_collections().collections}
+        assert names == {"loci_data", "loci_summary"}
+
+        # Raw window: only logical epochs 8 and 9 keep raw points.
+        raw, _ = store.scroll("loci_data", limit=1000)
+        raw_epochs = sorted({p.payload["timestamp_ms"] // EPOCH_MS for p in raw})
+        assert raw_epochs == [8, 9]
+
+        # Bounded: at most max_states_per_scene per scene per coarse group,
+        # every summary flagged as consolidated.
+        summary_points = 0
+        for coarse in (0, 1):
+            span = self.POLICY.summary_epoch_ratio * EPOCH_MS
+            points = _coarse_scroll(store, coarse * span, (coarse + 1) * span - 1)
+            assert 0 < len(points) <= 2 * self.POLICY.max_states_per_scene
+            assert all(p.payload["metadata"]["consolidated"] is True for p in points)
+            summary_points += len(points)
+        # The two coarse groups account for every summary point.
+        assert summary_points == len(store.scroll("loci_summary", limit=1000)[0])
+
+        # Total resident points stay bounded: 100 inserted, <= 20 raw + 12 summaries.
+        raw_points = len(raw)
+        assert raw_points == 2 * 2 * self.STATES_PER_SCENE_PER_EPOCH
+        assert raw_points + summary_points <= 20 + 12
+
+        # Nothing silently lost: summarised source counts + raw = inserted.
+        inserted = self.N_EPOCHS * 2 * self.STATES_PER_SCENE_PER_EPOCH
+        summarised_sources = sum(
+            p.payload["metadata"]["source_count"]
+            for p in store.scroll("loci_summary", limit=1000)[0]
+        )
+        assert summarised_sources + raw_points == inserted
+
+    def test_old_data_findable_via_summaries(self, store):
+        client, _ = self._fill(store)
+        old_window = (0, 4 * EPOCH_MS - 1)  # epochs 0-3, all raw collections dropped
+        with _pinned_now("loci.client", 9 * EPOCH_MS + 400):
+            results = client.query(_scene_planar("a", 0), time_window_ms=old_window, limit=10)
+        assert results
+        for s in results:
+            assert s.metadata["consolidated"] is True
+            assert old_window[0] <= s.timestamp_ms <= old_window[1]
+            assert s.scene_id in {"a", "b"}
+            assert s.metadata["source_count"] >= 1
+
+    def test_recent_data_returns_raw(self, store):
+        client, ids_by_epoch = self._fill(store)
+        recent_window = (8 * EPOCH_MS, 10 * EPOCH_MS)
+        with _pinned_now("loci.client", 9 * EPOCH_MS + 400):
+            results = client.query(_scene_planar("a", 0), time_window_ms=recent_window, limit=20)
+        assert results
+        raw_ids = set(ids_by_epoch[8]) | set(ids_by_epoch[9])
+        for s in results:
+            assert not s.metadata.get("consolidated")
+            assert s.id in raw_ids
+
+    def test_unwindowed_query_spans_raw_and_summaries(self, store):
+        client, _ = self._fill(store)
+        with _pinned_now("loci.client", 9 * EPOCH_MS + 400):
+            results = client.query(_scene_planar("a", 0), limit=50)
+        flags = {bool(s.metadata.get("consolidated")) for s in results}
+        assert flags == {True, False}
+
+    def test_trajectory_ignores_summaries(self, store):
+        client, ids_by_epoch = self._fill(store)
+        anchor_id = ids_by_epoch[9][0]  # scene "a", epoch 9
+        trajectory = client.get_trajectory(anchor_id, steps_back=100, steps_forward=100)
+        assert trajectory
+        for s in trajectory:
+            assert not s.metadata.get("consolidated")
+            assert s.timestamp_ms >= 8 * EPOCH_MS  # only raw epochs remain
+
+
+class TestAsyncConsolidation:
+    @pytest.mark.asyncio
+    async def test_consolidation_end_to_end(self):
+        from qdrant_client.models import FieldCondition, Filter, Range
+
+        store = _ServerLikeAsyncQdrantClient(location=":memory:")
+        policy = ConsolidationPolicy(
+            raw_window_epochs=1, summary_epoch_ratio=2, max_states_per_scene=2
+        )
+        client = _make_async_client(store, consolidation_policy=policy)
+        ids_by_epoch: dict[int, list[str]] = {}
+        for e in range(4):
+            for i in range(3):
+                ts = e * EPOCH_MS + i * 100
+                with _pinned_now("loci.async_client", ts):
+                    sid = await client.insert(
+                        _state(timestamp_ms=ts, scene_id="s", vector=_planar(0.05 * (3 * e + i)))
+                    )
+                ids_by_epoch.setdefault(e, []).append(sid)
+
+        # raw_window_epochs=1 keeps only the current epoch raw; epochs 0-1
+        # fold into coarse group 0 and epoch 2 into coarse group 1, all
+        # within the single loci_summary collection.
+        names = {c.name for c in (await store.get_collections()).collections}
+        assert names == {"loci_data", "loci_summary"}
+        raw, _ = await store.scroll("loci_data", limit=100)
+        assert sorted({p.payload["timestamp_ms"] // EPOCH_MS for p in raw}) == [3]
+
+        span = policy.summary_epoch_ratio * EPOCH_MS
+        for coarse in (0, 1):
+            points, _ = await store.scroll(
+                "loci_summary",
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="timestamp_ms",
+                            range=Range(gte=coarse * span, lte=(coarse + 1) * span - 1),
+                        )
+                    ]
+                ),
+                limit=100,
+            )
+            assert 0 < len(points) <= policy.max_states_per_scene
+            assert all(p.payload["metadata"]["consolidated"] is True for p in points)
+
+        # Old data findable via summaries within a time window.
+        with _pinned_now("loci.async_client", 3 * EPOCH_MS + 200):
+            old = await client.query(_planar(0.0), time_window_ms=(0, 2 * EPOCH_MS - 1), limit=10)
+        assert old
+        assert all(s.metadata["consolidated"] is True for s in old)
+
+        # Recent data stays raw; trajectory ignores summaries.
+        with _pinned_now("loci.async_client", 3 * EPOCH_MS + 200):
+            recent = await client.query(
+                _planar(0.05 * 9), time_window_ms=(3 * EPOCH_MS, 4 * EPOCH_MS - 1), limit=10
+            )
+        assert recent
+        assert all(not s.metadata.get("consolidated") for s in recent)
+        assert {s.id for s in recent} == set(ids_by_epoch[3])
+
+        traj = await client.get_trajectory(ids_by_epoch[3][0], steps_back=50, steps_forward=50)
+        assert traj
+        assert all(not s.metadata.get("consolidated") for s in traj)
+        assert all(s.timestamp_ms >= 3 * EPOCH_MS for s in traj)

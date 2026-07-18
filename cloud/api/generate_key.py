@@ -21,9 +21,10 @@ import sys
 
 # Mirror of the server-side namespace rule (see server.py _NAMESPACE_RE and
 # migration 005_namespace_check.sql). Namespaces must NOT contain underscores:
-# Qdrant collections are named ``{namespace}_loci_{epoch}`` and discovery
-# matches on the ``{namespace}_loci_`` prefix, so an underscore would make the
-# separator ambiguous and allow cross-tenant prefix collisions.
+# each tenant owns exactly two Qdrant collections, ``{namespace}_loci_data``
+# and ``{namespace}_loci_summary``, and an underscore would make the
+# namespace/collection separator ambiguous (namespace "foo_loci" would
+# shadow namespace "foo"'s collections), risking cross-tenant collisions.
 _NAMESPACE_RE = re.compile(r"^[a-z0-9]{3,64}$")
 
 # Default namespace for ad-hoc admin keys — deliberately underscore-free.

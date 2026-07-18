@@ -1,7 +1,9 @@
-"""Shard key computation and epoch management for temporal partitioning.
+"""Epoch computation for logical temporal partitioning.
 
-Vectors are routed to per-epoch Qdrant collections named ``loci_{epoch_id}``.
-An epoch is a fixed-width time window (default 5 000 ms).
+An epoch is a fixed-width time window (default 5 000 ms).  Epochs are a
+purely logical concept: the unit of consolidation granularity and of
+Hilbert t-normalisation.  Storage uses a bounded collection set (see
+:mod:`loci.temporal.consolidation`), not per-epoch collections.
 
 When the ``loci_core`` Rust extension is available, all functions
 delegate to the native implementation.
@@ -41,7 +43,12 @@ def epoch_id(timestamp_ms: int, epoch_size_ms: int) -> int:
 
 
 def collection_name(ep_id: int) -> str:
-    """Return the Qdrant collection name for an epoch.
+    """LEGACY: return the old-layout per-epoch collection name.
+
+    Used only by the migration tool for the old one-collection-per-epoch
+    layout (and by the not-yet-migrated Qdrant clients).  New code stores
+    raw points in the single data collection
+    (:func:`loci.temporal.consolidation.data_collection_name`).
 
     Args:
         ep_id: Epoch index from :func:`epoch_id`.

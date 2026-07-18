@@ -49,7 +49,7 @@ def test_collection_uses_configured_distance():
             vector_size=128,
             distance="dot",
         )
-        client._ensure_collection("loci_0")
+        client._ensure_data_collection()
 
         create_call = instance.create_collection.call_args
         vectors_config = create_call.kwargs["vectors_config"]
@@ -91,10 +91,16 @@ def _qdrant_euclid_hits() -> MagicMock:
 
 
 def test_sync_euclidean_ranking_and_truncation():
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
     with patch("loci.client.QdrantClient") as MockCls:
         instance = MagicMock()
         MockCls.return_value = instance
         instance.query_points.return_value = _qdrant_euclid_hits()
+        # The summary collection does not exist → its probe 404s.
+        instance.get_collection.side_effect = UnexpectedResponse(
+            status_code=404, reason_phrase="Not Found", content=b"", headers=httpx.Headers()
+        )
 
         client = LociClient(
             qdrant_url="http://fake:6333",
@@ -102,8 +108,7 @@ def test_sync_euclidean_ranking_and_truncation():
             distance="euclidean",
             decay_lambda=0.0,
         )
-        client._known_collections = {"loci_2"}
-        client._discovered = True
+        client._collection_ready[client._data_collection] = True
 
         scored = client.query_scored(
             vector=[1.0, 0.0, 0.0, 0.0], time_window_ms=(10_000, 14_999), limit=2
@@ -118,11 +123,18 @@ def test_sync_euclidean_ranking_and_truncation():
 
 @pytest.mark.asyncio
 async def test_async_euclidean_ranking_and_truncation():
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
     with patch("loci.async_client.AsyncQdrantClient") as MockCls:
         instance = MagicMock()
         MockCls.return_value = instance
         instance.query_points = AsyncMock(return_value=_qdrant_euclid_hits())
-        instance.get_collections = AsyncMock(side_effect=RuntimeError("not used"))
+        # The summary collection does not exist → its probe 404s.
+        instance.get_collection = AsyncMock(
+            side_effect=UnexpectedResponse(
+                status_code=404, reason_phrase="Not Found", content=b"", headers=httpx.Headers()
+            )
+        )
 
         client = AsyncLociClient(
             qdrant_url="http://fake:6333",
@@ -130,8 +142,7 @@ async def test_async_euclidean_ranking_and_truncation():
             distance="euclidean",
             decay_lambda=0.0,
         )
-        client._known_collections = {"loci_2"}
-        client._discovered = True
+        client._collection_ready[client._data_collection] = True
 
         scored = await client.query_scored(
             vector=[1.0, 0.0, 0.0, 0.0], time_window_ms=(10_000, 14_999), limit=2

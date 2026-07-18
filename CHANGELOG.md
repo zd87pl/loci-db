@@ -8,10 +8,42 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — BREAKING
+- **Storage layout: bounded two-collection design** (RFC-0001 P1). Each
+  tenant/store now uses exactly two collections — `{prefix}loci_data` for raw
+  states (payload-indexed `hilbert_r4/r8/r12`, `timestamp_ms`, `scene_id`,
+  `scale_level`) and `{prefix}loci_summary` for consolidated summaries —
+  replacing the old one-collection-per-epoch layout (`loci_{epoch}` /
+  `loci_sum_{coarse}`, which grew by ~17k collections per day of continuous
+  ingest at the default 5s epoch). Epochs are now purely logical (the unit of
+  consolidation granularity and Hilbert t-normalization); time selectivity
+  comes from an indexed `timestamp_ms` range filter, and every operation is
+  O(1) in collection count. **Existing deployments must run
+  `loci migrate-layout` once** to copy legacy per-epoch collections into the
+  new layout before upgrading their clients.
+- **`RetentionPolicy.archive_callback` removed.** Retention is now a
+  filter-based delete of raw points older than an epoch-aligned cutoff
+  (`max_epochs` / `max_age_ms` both reduce to a cutoff timestamp); there is no
+  archive hook. Use a `ConsolidationPolicy` to age old epochs into summaries
+  instead of losing them.
+- **`RetentionManager` and consolidation helper APIs changed** for direct
+  callers: `RetentionManager.maybe_purge(now_ms, delete_before)` takes an
+  injected cutoff-deleter instead of enumerating epoch collections, and the
+  per-epoch/per-coarse collection-name helpers are replaced by
+  `data_collection_name()` / `summary_collection_name()` /
+  `coarse_time_range()` / `fold_cutoff_ms()` in `loci.temporal.consolidation`.
+
 ### Added
-- **Memory consolidation** (RFC-0001 R1, v1 for `LocalLociClient`): a
+- **`loci migrate-layout` CLI command**: one-shot, idempotent migration of a
+  legacy per-epoch Qdrant deployment to the bounded layout. Discovers legacy
+  collections under a `--prefix` (other tenants untouched), copies every point
+  verbatim (same ids, vectors, payloads) into `{prefix}loci_data` /
+  `{prefix}loci_summary`, supports `--dry-run` (plan only), and only drops
+  legacy collections with `--delete-old` after a per-collection point-count
+  verification. Safe to re-run: already-copied points are skipped.
+- **Memory consolidation** (RFC-0001 R1, all three clients): a
   `ConsolidationPolicy` that summarizes epochs older than a raw window into
-  per-scene centroid states stored in coarse summary collections instead of
+  per-scene centroid states stored in the single summary collection instead of
   deleting them. Queries include summaries transparently (marked with
   `metadata["consolidated"]`); trajectories and causal context ignore them;
   storage stays bounded while old data remains findable.

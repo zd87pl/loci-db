@@ -7,9 +7,9 @@ LOCI benchmarks compare four query methods against a brute-force ground truth to
 ## Comparison Methods
 
 1. **Naive Qdrant** — Single collection, 3 independent float-range payload filters (x, y, z) + timestamp range + HNSW vector search.
-2. **LOCI r4** — Historical fixed-`r4` Hilbert baseline with temporal sharding + single `MatchAny` integer pre-filter + exact payload post-filter + HNSW.
+2. **LOCI r4** — Historical fixed-`r4` Hilbert baseline: single `MatchAny` integer pre-filter + timestamp range filter + exact payload post-filter + HNSW.
 3. **LOCI r4 + overlap** — Same as above with `overlap_factor=1.2` (20% expanded spatial search region to catch boundary points) before exact post-filtering.
-4. **LOCI current** — Mirrors the shipped query path: epoch-local 4D bounds, per-shard overfetch, exact payload post-filtering, temporal shard routing, overlap-based Hilbert bucket expansion, and decay-weighted re-ranking before top-k truncation.
+4. **LOCI current** — Mirrors the shipped query path: indexed timestamp-range filtering, epoch-local 4D Hilbert bounds for single-epoch windows (spatial-only cover otherwise), candidate overfetch, exact payload post-filtering, overlap-based Hilbert bucket expansion, and decay-weighted re-ranking before top-k truncation.
 
 ## Dataset Generation
 
@@ -48,7 +48,7 @@ Measured results below are p50 latencies from `benchmarks/results/latest.json`
 
 LOCI's relative performance improves with dataset size in every scenario, but
 the only measured win is the combined tight spatial + temporal case (C) at
-N=10,000 — where temporal shard pruning and the Hilbert pre-filter compose.
+N=10,000 — where indexed temporal filtering and the Hilbert pre-filter compose.
 Pure spatial filtering is not currently a speedup over naive float-range
 filters; see `docs/NOVELTY.md` for the honest framing of the value proposition.
 

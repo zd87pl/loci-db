@@ -4,7 +4,8 @@
 
 - [x] WorldState data model with validation
 - [x] Hilbert curve spatial encoding (4D)
-- [x] Temporal sharding with epoch-based collections
+- [x] Temporal epoch model (since superseded: epochs are now purely logical
+      over the bounded two-collection layout)
 - [x] LociClient: insert, insert_batch, query
 - [x] Predict-then-retrieve primitive
 - [x] Temporal decay scoring
@@ -12,7 +13,7 @@
 
 ## v0.2 — Robustness
 
-- [x] AsyncLociClient with parallel shard fan-out
+- [x] AsyncLociClient with concurrent search execution
 - [x] Causal chain linking in insert and insert_batch
 - [x] Configurable distance metrics (cosine, dot, euclidean)
 - [x] Input validation (confidence, timestamps, spatial bounds)
@@ -20,7 +21,8 @@
 - [x] CI pipeline (GitHub Actions, Python 3.11 + 3.12)
 - [x] Comprehensive test suite (70+ tests)
 - [x] Connection retry logic with exponential backoff
-- [ ] Shard lifecycle: warm → cold migration policy
+- [x] Warm → cold data aging (delivered as memory consolidation: stale raw
+      epochs fold into the summary collection; see v0.4)
 
 ## v0.3 — Performance (current)
 
@@ -35,11 +37,12 @@
 Direction set by [RFC-0001](docs/RFC-0001-memory-for-world-models.md)
 ("the memory system for world models"): invest above the filter layer.
 
-- [x] Memory consolidation v1 — episodic→semantic aging on `LocalLociClient`
+- [x] Memory consolidation v1 — episodic→semantic aging on all three clients
       (`ConsolidationPolicy`; RFC-0001 R1)
 - [x] MCP server — spatial memory for agents (`loci-stdb[mcp]`, `loci-mcp`;
       RFC-0001 P2)
-- [ ] Consolidation for the Qdrant clients + multi-tier fidelity curves
+- [x] Consolidation for the Qdrant clients (sync + async)
+- [ ] Multi-tier consolidation fidelity curves (raw → k-centroids → scene digest)
 - [ ] Conformal novelty — false-alarm-rate guarantees (RFC-0001 R2)
 - [ ] World-model memory benchmark suite (RFC-0001 R3)
 - [ ] Adaptive query planner: Hilbert range-runs vs buckets vs naive filters
@@ -52,10 +55,11 @@ Direction set by [RFC-0001](docs/RFC-0001-memory-for-world-models.md)
 Known structural debts, documented in ARCHITECTURE.md ("Known Limitations and
 Planned Refactors"):
 
-- [ ] Bounded epoch storage — replace one-Qdrant-collection-per-epoch (which
-      grows unboundedly: ~17k collections/day at the default 5s epoch, with
-      O(collections) shard routing and compaction) with payload-indexed epoch
-      IDs inside a bounded collection set
+- [x] Bounded epoch storage — **done**: exactly two collections per tenant
+      (`{prefix}loci_data` + `{prefix}loci_summary`) with payload-indexed
+      timestamps and Hilbert buckets; epochs are now purely logical and every
+      operation is O(1) in collection count. Existing per-epoch deployments
+      migrate with `loci migrate-layout`
 - [ ] Shared client core — extract common query planning, filter construction,
       and result assembly to eliminate the ~77% duplicated logic across
       `LociClient` / `AsyncLociClient` / `LocalLociClient`

@@ -1,140 +1,159 @@
-"""Tests for temporal epoch retention management."""
+"""Tests for cutoff-based temporal retention management."""
 
-import contextlib
-import time
+from __future__ import annotations
+
+from unittest.mock import patch
 
 import pytest
 
-from loci.temporal.retention import RetentionManager, RetentionPolicy, epochs_to_drop
+from loci.temporal.retention import RetentionManager, RetentionPolicy, retention_cutoff_ms
+
+EPOCH_MS = 5000
 
 
 class FakeStore:
-    """In-memory stand-in for a Qdrant/Memory backend."""
+    """In-memory stand-in for a raw data collection keyed by timestamp."""
 
     def __init__(self):
-        self.collections: set[str] = set()
+        self.timestamps: list[int] = []
+        self.delete_calls: list[int] = []
 
-    def add(self, name: str):
-        self.collections.add(name)
+    def add(self, ts: int):
+        self.timestamps.append(ts)
 
-    def delete(self, name: str):
-        self.collections.discard(name)
-
-    def list_active(self) -> list[int]:
-        epochs = []
-        for col in self.collections:
-            if col.startswith("loci_"):
-                with contextlib.suppress(ValueError):
-                    epochs.append(int(col.split("_", 1)[1]))
-        return sorted(epochs)
+    def delete_before(self, cutoff_ms: int) -> int:
+        self.delete_calls.append(cutoff_ms)
+        kept = [ts for ts in self.timestamps if ts >= cutoff_ms]
+        deleted = len(self.timestamps) - len(kept)
+        self.timestamps = kept
+        return deleted
 
 
-def test_epochs_to_drop_respects_max_epochs():
-    store = FakeStore()
-    for e in range(100):
-        store.add(f"loci_{e}")
-
-    policy = RetentionPolicy(max_epochs=50)
-    to_drop = epochs_to_drop(
-        store.list_active(),
-        now_ms=int(time.time() * 1000),
-        epoch_size_ms=5000,
-        policy=policy,
-    )
-    assert len(to_drop) == 50
-    assert to_drop == list(range(50))
+# ---------------------------------------------------------------------------
+# RetentionPolicy validation
+# ---------------------------------------------------------------------------
 
 
-def test_epochs_to_drop_respects_max_age():
-    now = int(time.time() * 1000)
-    epoch_size = 5000
-    # Create epochs that are ~10s, ~20s, ~30s old
-    epochs = [
-        (now - 10_000) // epoch_size,
-        (now - 20_000) // epoch_size,
-        (now - 30_000) // epoch_size,
-    ]
-    store = FakeStore()
-    for ep in epochs:
-        store.add(f"loci_{ep}")
+class TestPolicyValidation:
+    def test_requires_at_least_one_knob(self):
+        with pytest.raises(ValueError, match="max_epochs or max_age_ms"):
+            RetentionPolicy()
 
-    policy = RetentionPolicy(max_age_ms=15_000)
-    to_drop = epochs_to_drop(
-        store.list_active(),
-        now_ms=now,
-        epoch_size_ms=epoch_size,
-        policy=policy,
-    )
-    # The ~20s and ~30s old epochs should be dropped
-    assert len(to_drop) == 2
+    @pytest.mark.parametrize("kwargs", [{"max_epochs": 0}, {"max_age_ms": 0}])
+    def test_invalid_values_rejected(self, kwargs):
+        with pytest.raises(ValueError):
+            RetentionPolicy(**kwargs)
 
 
-def test_retention_manager_drops_oldest():
-    store = FakeStore()
-    for e in range(10):
-        store.add(f"loci_{e}")
-
-    policy = RetentionPolicy(max_epochs=5)
-    mgr = RetentionManager(policy, epoch_size_ms=5000)
-    dropped = mgr.maybe_purge(
-        active_epochs=store.list_active(),
-        now_ms=int(time.time() * 1000),
-        delete_fn=store.delete,
-    )
-    assert dropped == ["loci_0", "loci_1", "loci_2", "loci_3", "loci_4"]
-    assert store.collections == {f"loci_{e}" for e in range(5, 10)}
+# ---------------------------------------------------------------------------
+# retention_cutoff_ms
+# ---------------------------------------------------------------------------
 
 
-def test_retention_manager_no_policy():
-    store = FakeStore()
-    for e in range(10):
-        store.add(f"loci_{e}")
+class TestRetentionCutoff:
+    def test_max_age_cutoff_aligned_down(self):
+        policy = RetentionPolicy(max_age_ms=15_000)
+        now = 10 * EPOCH_MS + 400  # mid-epoch 10
+        # now - 15s = epoch 7 territory, aligned down to the epoch boundary.
+        assert retention_cutoff_ms(now, EPOCH_MS, policy) == 7 * EPOCH_MS
 
-    mgr = RetentionManager(RetentionPolicy(max_epochs=999), epoch_size_ms=5000)
-    dropped = mgr.maybe_purge(
-        active_epochs=store.list_active(),
-        now_ms=int(time.time() * 1000),
-        delete_fn=store.delete,
-    )
-    assert dropped == []
-    assert len(store.collections) == 10
+    def test_max_epochs_keeps_that_many_epoch_slots(self):
+        # max_epochs=N retains N epoch-wide slots including the current
+        # (possibly partial) epoch: cutoff is the start of epoch now-N+1.
+        policy = RetentionPolicy(max_epochs=3)
+        now = 10 * EPOCH_MS + 400
+        assert retention_cutoff_ms(now, EPOCH_MS, policy) == 8 * EPOCH_MS
+
+    def test_max_epochs_one_keeps_only_current_epoch(self):
+        policy = RetentionPolicy(max_epochs=1)
+        now = 10 * EPOCH_MS + 400
+        assert retention_cutoff_ms(now, EPOCH_MS, policy) == 10 * EPOCH_MS
+
+    def test_never_splits_an_epoch(self):
+        policy = RetentionPolicy(max_age_ms=7_777)
+        for now in (10 * EPOCH_MS, 10 * EPOCH_MS + 1, 11 * EPOCH_MS - 1):
+            assert retention_cutoff_ms(now, EPOCH_MS, policy) % EPOCH_MS == 0
+
+    def test_most_aggressive_knob_wins(self):
+        now = 100 * EPOCH_MS
+        loose_age = RetentionPolicy(max_epochs=2, max_age_ms=50 * EPOCH_MS)
+        tight_age = RetentionPolicy(max_epochs=50, max_age_ms=2 * EPOCH_MS)
+        assert retention_cutoff_ms(now, EPOCH_MS, loose_age) == 99 * EPOCH_MS
+        assert retention_cutoff_ms(now, EPOCH_MS, tight_age) == 98 * EPOCH_MS
+
+    def test_clamped_to_zero_at_beginning_of_time(self):
+        policy = RetentionPolicy(max_age_ms=10**9)
+        assert retention_cutoff_ms(1000, EPOCH_MS, policy) == 0
 
 
-def test_retention_manager_custom_callback():
-    store = FakeStore()
-    archived = []
+# ---------------------------------------------------------------------------
+# RetentionManager
+# ---------------------------------------------------------------------------
 
-    def archive_then_delete(ep: int, col: str):
-        archived.append(col)
 
-    for e in range(10):
-        store.add(f"loci_{e}")
+class TestRetentionManager:
+    def test_purges_points_below_cutoff(self):
+        store = FakeStore()
+        for e in range(10):
+            store.add(e * EPOCH_MS + 100)
 
-    policy = RetentionPolicy(max_epochs=5, archive_callback=archive_then_delete)
-    mgr = RetentionManager(policy, epoch_size_ms=5000)
-    dropped = mgr.maybe_purge(
-        active_epochs=store.list_active(),
-        now_ms=int(time.time() * 1000),
-        delete_fn=store.delete,
-    )
-    assert dropped == ["loci_0", "loci_1", "loci_2", "loci_3", "loci_4"]
-    assert archived == dropped
+        mgr = RetentionManager(RetentionPolicy(max_epochs=5), epoch_size_ms=EPOCH_MS)
+        deleted = mgr.maybe_purge(9 * EPOCH_MS + 400, store.delete_before)
+
+        assert deleted == 5  # epochs 0-4 purged, epochs 5-9 kept
+        assert store.timestamps == [e * EPOCH_MS + 100 for e in range(5, 10)]
+
+    def test_no_purge_inside_retention_window(self):
+        store = FakeStore()
+        store.add(100)
+        mgr = RetentionManager(RetentionPolicy(max_epochs=999), epoch_size_ms=EPOCH_MS)
+        assert mgr.maybe_purge(9 * EPOCH_MS, store.delete_before) is None
+        assert store.delete_calls == []
+        assert store.timestamps == [100]
+
+    def test_trigger_cadence_throttled_until_cutoff_advances(self):
+        store = FakeStore()
+        for e in range(4):
+            store.add(e * EPOCH_MS)
+        mgr = RetentionManager(RetentionPolicy(max_epochs=2), epoch_size_ms=EPOCH_MS)
+
+        mgr.maybe_purge(3 * EPOCH_MS + 100, store.delete_before)
+        # Same epoch again: cutoff unchanged, deleter must not run again.
+        assert mgr.maybe_purge(3 * EPOCH_MS + 200, store.delete_before) is None
+        assert len(store.delete_calls) == 1
+        # Next epoch: cutoff advances, deleter runs once more.
+        store.add(4 * EPOCH_MS)
+        assert mgr.maybe_purge(4 * EPOCH_MS + 100, store.delete_before) == 1
+        assert store.delete_calls == [2 * EPOCH_MS, 3 * EPOCH_MS]
+
+    def test_failed_delete_retries_on_next_call(self):
+        calls: list[int] = []
+
+        def flaky_delete(cutoff_ms: int) -> int:
+            calls.append(cutoff_ms)
+            if len(calls) == 1:
+                raise RuntimeError("backend down")
+            return 7
+
+        mgr = RetentionManager(RetentionPolicy(max_epochs=1), epoch_size_ms=EPOCH_MS)
+        with pytest.raises(RuntimeError):
+            mgr.maybe_purge(5 * EPOCH_MS, flaky_delete)
+        # The cutoff was not marked applied, so the same purge retries.
+        assert mgr.maybe_purge(5 * EPOCH_MS, flaky_delete) == 7
+        assert calls == [5 * EPOCH_MS, 5 * EPOCH_MS]
 
 
 @pytest.mark.asyncio
 async def test_retention_manager_async():
     store = FakeStore()
     for e in range(10):
-        store.add(f"loci_{e}")
+        store.add(e * EPOCH_MS + 100)
 
-    policy = RetentionPolicy(max_epochs=5)
-    mgr = RetentionManager(policy, epoch_size_ms=5000)
-    dropped = await mgr.maybe_purge_async(
-        active_epochs=store.list_active(),
-        now_ms=int(time.time() * 1000),
-        delete_fn=store.delete,
-    )
-    assert dropped == ["loci_0", "loci_1", "loci_2", "loci_3", "loci_4"]
+    mgr = RetentionManager(RetentionPolicy(max_epochs=5), epoch_size_ms=EPOCH_MS)
+    deleted = await mgr.maybe_purge_async(9 * EPOCH_MS + 400, store.delete_before)
+
+    assert deleted == 5
+    assert store.timestamps == [e * EPOCH_MS + 100 for e in range(5, 10)]
 
 
 @pytest.mark.asyncio
@@ -144,80 +163,98 @@ async def test_retention_manager_async_awaits_future_returning_deleter():
 
     store = FakeStore()
     for e in range(6):
-        store.add(f"loci_{e}")
+        store.add(e * EPOCH_MS)
 
-    async def _delete_coro(name: str) -> None:
-        store.delete(name)
+    async def _delete_coro(cutoff_ms: int) -> int:
+        return store.delete_before(cutoff_ms)
 
-    def future_deleter(name: str) -> asyncio.Task:
+    def future_deleter(cutoff_ms: int) -> asyncio.Task:
         # Returns a Task (awaitable but not a coroutine object).
-        return asyncio.ensure_future(_delete_coro(name))
+        return asyncio.ensure_future(_delete_coro(cutoff_ms))
 
-    policy = RetentionPolicy(max_epochs=3)
-    mgr = RetentionManager(policy, epoch_size_ms=5000)
-    dropped = await mgr.maybe_purge_async(
-        active_epochs=store.list_active(),
-        now_ms=int(time.time() * 1000),
-        delete_fn=future_deleter,
-    )
+    mgr = RetentionManager(RetentionPolicy(max_epochs=3), epoch_size_ms=EPOCH_MS)
+    deleted = await mgr.maybe_purge_async(5 * EPOCH_MS + 1, store.delete_before)
 
-    assert dropped == ["loci_0", "loci_1", "loci_2"]
-    # The deletions actually ran (the Tasks were awaited, not abandoned).
-    assert store.collections == {"loci_3", "loci_4", "loci_5"}
+    assert deleted == 3
+    # The deletions actually ran (the Task was awaited, not abandoned).
+    assert store.timestamps == [3 * EPOCH_MS, 4 * EPOCH_MS, 5 * EPOCH_MS]
+
+    # And a Future-returning deleter is awaited on the next advance.
+    store.add(6 * EPOCH_MS)
+    deleted = await mgr.maybe_purge_async(6 * EPOCH_MS + 1, future_deleter)
+    assert deleted == 1
+    assert store.timestamps == [4 * EPOCH_MS, 5 * EPOCH_MS, 6 * EPOCH_MS]
 
 
 # ---------------------------------------------------------------------------
-# Client-level cache invalidation after purge
+# Client-level retention over the bounded layout
 # ---------------------------------------------------------------------------
 
 
-def test_local_client_late_insert_into_purged_epoch_recreates():
-    """A late insert into a purged epoch must recreate the collection."""
-    from loci.local_client import LocalLociClient
+def _state(ts: int):
     from loci.schema import WorldState
 
-    def _state(ts: int) -> WorldState:
-        return WorldState(
-            x=0.5, y=0.5, z=0.5, timestamp_ms=ts, vector=[1.0, 0.0, 0.0, 0.0], scene_id=""
-        )
-
-    client = LocalLociClient(
-        vector_size=4,
-        epoch_size_ms=5000,
-        decay_lambda=0.0,
-        retention_policy=RetentionPolicy(max_epochs=1),
+    return WorldState(
+        x=0.5, y=0.5, z=0.5, timestamp_ms=ts, vector=[1.0, 0.0, 0.0, 0.0], scene_id=""
     )
-    client.insert(_state(1000))  # loci_0
-    client.insert(_state(6000))  # loci_1 → loci_0 purged
-
-    assert "loci_0" not in client._known_collections
-    assert not client.store.collection_exists("loci_0")
-
-    # This previously raised KeyError because the client still believed the
-    # purged collection existed. The insert recreates the collection; the
-    # retention pass at the end of insert() then re-purges the stale epoch
-    # (policy-consistent), leaving cache and store in sync.
-    state_id = client.insert(_state(2000))
-    assert isinstance(state_id, str)
-    assert client.store.collection_exists("loci_0") == ("loci_0" in client._known_collections)
 
 
-def test_local_client_purge_forgets_dropped_collections():
+def _client(max_epochs: int):
     from loci.local_client import LocalLociClient
-    from loci.schema import WorldState
 
-    client = LocalLociClient(
+    return LocalLociClient(
         vector_size=4,
-        epoch_size_ms=5000,
+        epoch_size_ms=EPOCH_MS,
         decay_lambda=0.0,
-        retention_policy=RetentionPolicy(max_epochs=2),
+        retention_policy=RetentionPolicy(max_epochs=max_epochs),
     )
+
+
+def _pinned(ts_ms: int):
+    return patch("loci.local_client.time.time", return_value=ts_ms / 1000.0)
+
+
+def test_local_client_purges_expired_raw_points():
+    client = _client(max_epochs=2)
     for ts in (1000, 6000, 11_000, 16_000):
-        client.insert(
-            WorldState(
-                x=0.5, y=0.5, z=0.5, timestamp_ms=ts, vector=[1.0, 0.0, 0.0, 0.0], scene_id=""
-            )
-        )
+        with _pinned(ts):
+            client.insert(_state(ts))
 
-    assert client._known_collections == {"loci_2", "loci_3"}
-    assert client._list_active_epochs() == [2, 3]
+    # Epoch 3 is current; max_epochs=2 keeps epochs 2-3 only.
+    kept = [p["payload"]["timestamp_ms"] for p in client.store.scroll("loci_data", limit=100)]
+    assert sorted(kept) == [11_000, 16_000]
+
+
+def test_local_client_purge_never_splits_an_epoch():
+    client = _client(max_epochs=1)
+    with _pinned(1000):
+        client.insert(_state(1000))
+    with _pinned(6100):
+        client.insert(_state(6000))  # crosses into epoch 1: epoch 0 purged whole
+
+    kept = [p["payload"]["timestamp_ms"] for p in client.store.scroll("loci_data", limit=100)]
+    assert kept == [6000]
+
+
+def test_local_client_late_insert_into_purged_range_still_works():
+    """A late insert older than the applied cutoff must not crash.
+
+    The point lands in the (single) data collection and is swept up when
+    the cutoff next advances — there is no per-epoch collection to
+    recreate any more.
+    """
+    client = _client(max_epochs=1)
+    with _pinned(1000):
+        client.insert(_state(1000))
+    with _pinned(6100):
+        client.insert(_state(6000))
+
+    with _pinned(6200):
+        state_id = client.insert(_state(2000))  # older than the applied cutoff
+    assert isinstance(state_id, str)
+
+    # The straggler is purged as soon as the cutoff advances again.
+    with _pinned(11_000):
+        client.insert(_state(11_000))
+    kept = [p["payload"]["timestamp_ms"] for p in client.store.scroll("loci_data", limit=100)]
+    assert sorted(kept) == [11_000]

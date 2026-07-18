@@ -427,3 +427,80 @@ class TestScroll:
 
     def test_scroll_missing_collection(self, store):
         assert store.scroll("nonexistent") == []
+
+
+# ---------------------------------------------------------------------------
+# Point deletion
+# ---------------------------------------------------------------------------
+
+
+class TestDeletePoints:
+    def test_delete_points_by_id(self, store):
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": _vec(1.0), "payload": {}},
+                {"id": "b", "vector": _vec(2.0), "payload": {}},
+            ],
+        )
+        assert store.delete_points("test", ["a", "missing"]) == 1
+        assert store.collection_count("test") == 1
+        assert store.retrieve("test", ["a"]) == []
+        assert store.retrieve("test", ["b"]) != []
+
+    def test_delete_points_missing_collection(self, store):
+        assert store.delete_points("nonexistent", ["a"]) == 0
+
+    def test_delete_points_in_time_range_end_exclusive(self, store):
+        for i in range(5):
+            store.upsert(
+                "test",
+                [{"id": f"p{i}", "vector": _vec(1.0), "payload": {"timestamp_ms": i * 100}}],
+            )
+        deleted = store.delete_points_in_time_range("test", 100, 300)
+        assert deleted == 2  # ts=100 and ts=200; ts=300 survives (end-exclusive)
+        remaining = {r["payload"]["timestamp_ms"] for r in store.scroll("test", limit=10)}
+        assert remaining == {0, 300, 400}
+
+    def test_delete_points_in_time_range_skips_missing_field(self, store):
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": _vec(1.0), "payload": {"timestamp_ms": 100}},
+                {"id": "b", "vector": _vec(2.0), "payload": {}},
+            ],
+        )
+        assert store.delete_points_in_time_range("test", 0, 1000) == 1
+        assert [r["id"] for r in store.scroll("test", limit=10)] == ["b"]
+
+    def test_delete_points_in_time_range_missing_collection(self, store):
+        assert store.delete_points_in_time_range("nonexistent", 0, 1000) == 0
+
+
+# ---------------------------------------------------------------------------
+# Payload value range (cheap stats)
+# ---------------------------------------------------------------------------
+
+
+class TestPayloadValueRange:
+    def test_min_max_over_field(self, store):
+        for i, ts in enumerate((300, 100, 200)):
+            store.upsert(
+                "test",
+                [{"id": f"p{i}", "vector": _vec(1.0), "payload": {"timestamp_ms": ts}}],
+            )
+        assert store.payload_value_range("test", "timestamp_ms") == (100, 300)
+
+    def test_empty_and_missing(self, store):
+        assert store.payload_value_range("test", "timestamp_ms") is None
+        assert store.payload_value_range("nonexistent", "timestamp_ms") is None
+
+    def test_points_missing_field_are_skipped(self, store):
+        store.upsert(
+            "test",
+            [
+                {"id": "a", "vector": _vec(1.0), "payload": {"timestamp_ms": 42}},
+                {"id": "b", "vector": _vec(2.0), "payload": {}},
+            ],
+        )
+        assert store.payload_value_range("test", "timestamp_ms") == (42, 42)

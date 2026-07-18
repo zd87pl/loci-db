@@ -467,7 +467,7 @@ class TestSpatialResolution:
         client = LocalLociClient(vector_size=VEC_SIZE, spatial_resolution=6)
         state_id = client.insert(_make_state())
 
-        stored = client.store.retrieve("loci_0", [state_id])[0]
+        stored = client.store.retrieve("loci_data", [state_id])[0]
         assert "hilbert_r6" in stored["payload"]
         assert "hilbert_r4" not in stored["payload"]
 

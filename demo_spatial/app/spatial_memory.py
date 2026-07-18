@@ -259,11 +259,11 @@ class SpatialMemory:
         """Find a recent high-IoU record for scene_id and merge if found.
 
         The matched record is deleted and the merged observation is re-inserted
-        through the client's insert path so the Hilbert payload fields and the
-        epoch collection are recomputed for the merged position/timestamp
-        (an in-place payload update would leave stale hilbert_r* fields and
-        strand the point in the old epoch shard, breaking region and
-        time-window queries for objects that drift via successive merges).
+        through the client's insert path so the Hilbert payload fields and
+        timestamp are recomputed for the merged position/timestamp (an
+        in-place payload update would leave stale hilbert_r* fields and a
+        stale timestamp, breaking region and time-window queries for
+        objects that drift via successive merges).
 
         Returns the new state_id of the merged record, or None if no suitable
         candidate was found (caller should insert a new record).
@@ -296,18 +296,13 @@ class SpatialMemory:
         return None
 
     def _delete_point(self, state_id: str) -> bool:
-        """Remove a point from whichever epoch collection holds it.
+        """Remove a point from the raw data collection.
 
-        MemoryStore has no public per-point delete, so this reaches into the
-        store's collection map directly. Returns True if the point was found
-        and removed.
+        All raw points live in the client's single data collection.
+        Returns True if the point was found and removed.
         """
-        store = self._client._store
-        for col in list(self._client._known_collections):
-            collection = store._collections.get(col)
-            if collection is not None and collection.points.pop(state_id, None) is not None:
-                return True
-        return False
+        deleted = self._client.store.delete_points(self._client._data_collection, [state_id])
+        return deleted > 0
 
     # ------------------------------------------------------------------
     # Read

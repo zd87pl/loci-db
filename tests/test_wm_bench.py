@@ -62,12 +62,8 @@ class TestGenerators:
             assert not p.is_ood
 
     def test_warehouse_deterministic_and_revisits_reencounter(self):
-        ds1 = WarehouseDataset(
-            n_scenes=2, n_visits=2, points_per_visit=15, vector_dim=DIM, seed=5
-        )
-        ds2 = WarehouseDataset(
-            n_scenes=2, n_visits=2, points_per_visit=15, vector_dim=DIM, seed=5
-        )
+        ds1 = WarehouseDataset(n_scenes=2, n_visits=2, points_per_visit=15, vector_dim=DIM, seed=5)
+        ds2 = WarehouseDataset(n_scenes=2, n_visits=2, points_per_visit=15, vector_dim=DIM, seed=5)
         assert ds1.points() == ds2.points()
 
         pts = ds1.points()
@@ -106,9 +102,7 @@ class TestGenerators:
         # embeddings live almost entirely inside it.
         basis = ds.manifold_basis
         ood_proj = [np.linalg.norm(basis.T @ np.asarray(p.embedding)) for p in ood]
-        base_proj = [
-            np.linalg.norm(basis.T @ np.asarray(p.embedding)) for p in pts if not p.is_ood
-        ]
+        base_proj = [np.linalg.norm(basis.T @ np.asarray(p.embedding)) for p in pts if not p.is_ood]
         assert max(ood_proj) < 0.5
         assert min(base_proj) > 0.7
 
@@ -145,9 +139,7 @@ TINY_NOVELTY = dict(
     n_points=150, vector_dim=DIM, n_ood_segments=1, ood_segment_len=15, warmup=30, seed=3
 )
 TINY_TRAJ = dict(n_scenes=2, n_visits=2, points_per_visit=15, vector_dim=DIM, steps=5, seed=3)
-TINY_AGE = dict(
-    n_points=400, vector_dim=DIM, k=5, n_age_buckets=4, queries_per_bucket=4, seed=3
-)
+TINY_AGE = dict(n_points=400, vector_dim=DIM, k=5, n_age_buckets=4, queries_per_bucket=4, seed=3)
 TINY_LOAD = dict(n_points=80, vector_dim=DIM, query_every=4, k=5, seed=3)
 
 

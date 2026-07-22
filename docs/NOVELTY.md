@@ -69,3 +69,86 @@
 **What LOCI adds:** A shared persistent store where data from different sessions, agents, or time periods coexists, partitioned logically by `scene_id` and indexed time rather than physically. Causal chains (prev_state_id / next_state_id) link within sessions; cross-session queries retrieve across the whole store with indexed time-range filters.
 
 **Why it matters:** Enables multi-agent systems where agents share a common spatial memory. A fleet of robots can contribute to and query from the same LOCI instance.
+
+## Conformal Novelty Guarantees (RFC-0001 R2)
+
+### What the guarantee is
+
+`loci.retrieval.novelty.ConformalNoveltyCalibrator` upgrades the novelty score from a
+heuristic to a **distribution-free guaranteed false-alarm rate**. Each best-match
+similarity `s` maps to a nonconformity score `a = 1 - clamp(s, 0, 1)` (low similarity =
+more nonconforming). A sliding window of the most recent nonconformity scores is the
+calibration set, and a new observation gets the conformal p-value
+
+```
+p = (1 + #{a_i in window : a_i >= a*}) / (n + 1)
+```
+
+with the alarm `is_novel(score)` firing when `p <= alpha` (inductive/split conformal
+prediction; Vovk, Gammerman & Shafer, *Algorithmic Learning in a Random World*, 2005).
+
+**Guarantee:** if the current observation is exchangeable with the window contents (e.g.
+an i.i.d. in-distribution stream), the p-value is super-uniform, so
+`P(false alarm) <= alpha` — finite-sample, distribution-free, valid at any window size,
+with no threshold tuning. The pipeline already scores before observing
+(`PredictThenRetrieve` calls `calibrated_novelty` before `observe`), which is the correct
+online-conformal discipline.
+
+### The exchangeability caveat (honest limits)
+
+- **Drift breaks exchangeability.** A drifting score distribution weakens the exact
+  finite-sample bound. The sliding window *adapts* to slow drift (old regimes are
+  evicted, so alarms recover), at the cost of exact validity during the transition. On
+  the checked-in evaluation, sustained downward drift over-fires by ~1.5% absolute at
+  `alpha = 0.10` (0.115 measured) while staying within tolerance at 0.01 and 0.05.
+- **Alarms are correlated across time** — the window is shared between nearby
+  observations. The bound is on the marginal false-alarm rate, not alarm independence.
+- **Observed OOD is absorbed.** The pipeline observes every sample, so a persistent
+  anomaly migrates into the calibration window and alarms stop — first-encounter
+  detection is high (0.96–1.0 at `alpha >= 0.05` in the eval), steady-state detection
+  under contamination is much lower. This is the same mechanism as drift adaptation; if
+  your deployment needs persistent alarms, gate `observe()` on the alarm decision (and
+  accept that conditional observation biases the window).
+- **Warm-up:** below `min_samples`, `calibrated_novelty` falls back to the raw absolute
+  novelty `1 - score` (check `.warmed_up`). `is_novel`/`p_value` are valid at any
+  occupancy — with a small window the p-value simply cannot reach `alpha`, so the alarm
+  is conservative, never anti-conservative.
+
+### Usage
+
+```python
+from loci import ConformalNoveltyCalibrator, LocalLociClient
+
+client = LocalLociClient(vector_size=16)
+calibrator = ConformalNoveltyCalibrator(alpha=0.05, window=512, min_samples=30)
+
+result = client.predict_and_retrieve(
+    context_vector=embedding,
+    predictor_fn=world_model.predict,
+    future_horizon_ms=1000,
+    current_position=(x, y, z),
+    calibrator=calibrator,  # duck-typed: same slot as NoveltyCalibrator
+)
+# Continuous score: calibrated_novelty = 1 - p_value, so thresholding at
+# 1 - alpha reproduces the guaranteed alarm exactly:
+if calibrator.warmed_up and result.prediction_novelty >= 1 - calibrator.alpha:
+    ...  # fires on <= ~5% of in-distribution observations
+```
+
+The legacy z-score `NoveltyCalibrator` is unchanged and remains available; at a matched
+nominal threshold (`novelty >= 1 - alpha`) its implied alarm has an *uncontrolled* rate —
+measured FAR between 0.000 and 0.017 across configurations regardless of the nominal
+alpha, including a configuration (bimodal, alpha=0.01) with zero OOD detection.
+
+### Evaluation
+
+`benchmarks/conformal_eval.py` (deterministic, seeded, no network) sweeps
+`alpha ∈ {0.01, 0.05, 0.1}` over 5 seeds on three stream shapes (gaussian, bimodal, slow
+drift) with injected OOD segments, and writes
+`benchmarks/results/conformal_latest.json`. Measured on held-out in-distribution data
+(window=512, 20k eval points per cell): empirical FAR within ±1% of alpha for every
+exchangeable configuration — e.g. gaussian 0.0095/0.0479/0.0995 and bimodal
+0.0107/0.0493/0.0990 for alpha 0.01/0.05/0.10 — meeting the RFC-0001 R2 success metric;
+the drift shape stays within tolerance except `alpha = 0.10` (0.115), as expected from
+the caveat above. A coarse version of the guarantee is pinned in
+`tests/test_conformal_novelty.py`.

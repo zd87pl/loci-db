@@ -1,0 +1,1136 @@
+{
+  "benchmark": "conformal_novelty_eval",
+  "rfc": "RFC-0001 R2",
+  "timestamp": "2026-07-22T18:55:04Z",
+  "platform": "Linux-6.18.5-x86_64-with-glibc2.39",
+  "python": "3.11.15",
+  "config": {
+    "window": 512,
+    "min_samples": 30,
+    "alphas": [
+      0.01,
+      0.05,
+      0.1
+    ],
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "warmup_n": 512,
+    "eval_n": 4000,
+    "contam_blocks": 10,
+    "contam_in_dist_per_block": 80,
+    "contam_ood_per_block": 20,
+    "far_tolerance": 0.01,
+    "ood_means": {
+      "near": 0.55,
+      "far": 0.35
+    }
+  },
+  "summary": [
+    {
+      "shape": "gaussian",
+      "alpha": 0.01,
+      "conformal_far": 0.00945,
+      "far_abs_error": 0.0005500000000000001,
+      "within_1pct": true,
+      "conformal_far_contaminated": 0.00125,
+      "conformal_detection_near_first": 0.6000000000000001,
+      "conformal_detection_far_first": 0.5800000000000001,
+      "conformal_detection_near": 0.12,
+      "conformal_detection_far": 0.21999999999999997,
+      "legacy_far": 0.0,
+      "legacy_detection_near_first": 0.52,
+      "legacy_detection_far_first": 0.5399999999999999,
+      "legacy_detection_near": 0.10400000000000001,
+      "legacy_detection_far": 0.10800000000000001
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.05,
+      "conformal_far": 0.0479,
+      "far_abs_error": 0.0021000000000000046,
+      "within_1pct": true,
+      "conformal_far_contaminated": 0.005,
+      "conformal_detection_near_first": 1.0,
+      "conformal_detection_far_first": 1.0,
+      "conformal_detection_near": 0.22200000000000003,
+      "conformal_detection_far": 0.6439999999999999,
+      "legacy_far": 0.0015,
+      "legacy_detection_near_first": 0.9800000000000001,
+      "legacy_detection_far_first": 1.0,
+      "legacy_detection_near": 0.198,
+      "legacy_detection_far": 0.342
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.1,
+      "conformal_far": 0.09945000000000001,
+      "far_abs_error": 0.0005499999999999949,
+      "within_1pct": true,
+      "conformal_far_contaminated": 0.0185,
+      "conformal_detection_near_first": 1.0,
+      "conformal_detection_far_first": 1.0,
+      "conformal_detection_near": 0.438,
+      "conformal_detection_far": 0.958,
+      "legacy_far": 0.0134,
+      "legacy_detection_near_first": 1.0,
+      "legacy_detection_far_first": 1.0,
+      "legacy_detection_near": 0.262,
+      "legacy_detection_far": 0.8540000000000001
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.01,
+      "conformal_far": 0.010699999999999998,
+      "far_abs_error": 0.0006999999999999975,
+      "within_1pct": true,
+      "conformal_far_contaminated": 0.00025,
+      "conformal_detection_near_first": 0.55,
+      "conformal_detection_far_first": 0.61,
+      "conformal_detection_near": 0.11000000000000001,
+      "conformal_detection_far": 0.21999999999999997,
+      "legacy_far": 0.0,
+      "legacy_detection_near_first": 0.0,
+      "legacy_detection_far_first": 0.0,
+      "legacy_detection_near": 0.0,
+      "legacy_detection_far": 0.0
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.05,
+      "conformal_far": 0.0493,
+      "far_abs_error": 0.0007000000000000062,
+      "within_1pct": true,
+      "conformal_far_contaminated": 0.004750000000000001,
+      "conformal_detection_near_first": 0.96,
+      "conformal_detection_far_first": 1.0,
+      "conformal_detection_near": 0.21800000000000003,
+      "conformal_detection_far": 0.6900000000000001,
+      "legacy_far": 0.0,
+      "legacy_detection_near_first": 0.13,
+      "legacy_detection_far_first": 0.8699999999999999,
+      "legacy_detection_near": 0.026000000000000002,
+      "legacy_detection_far": 0.20600000000000002
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.1,
+      "conformal_far": 0.099,
+      "far_abs_error": 0.0010000000000000009,
+      "within_1pct": true,
+      "conformal_far_contaminated": 0.02125,
+      "conformal_detection_near_first": 0.99,
+      "conformal_detection_far_first": 1.0,
+      "conformal_detection_near": 0.426,
+      "conformal_detection_far": 0.9719999999999999,
+      "legacy_far": 0.00135,
+      "legacy_detection_near_first": 0.7,
+      "legacy_detection_far_first": 0.99,
+      "legacy_detection_near": 0.14600000000000002,
+      "legacy_detection_far": 0.6900000000000001
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.01,
+      "conformal_far": 0.01225,
+      "far_abs_error": 0.0022500000000000003,
+      "within_1pct": true,
+      "conformal_far_contaminated": 0.0017500000000000003,
+      "conformal_detection_near_first": 0.54,
+      "conformal_detection_far_first": 0.5900000000000001,
+      "conformal_detection_near": 0.10800000000000001,
+      "conformal_detection_far": 0.20800000000000002,
+      "legacy_far": 0.0,
+      "legacy_detection_near_first": 0.16999999999999998,
+      "legacy_detection_far_first": 0.5800000000000001,
+      "legacy_detection_near": 0.034,
+      "legacy_detection_far": 0.11599999999999999
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.05,
+      "conformal_far": 0.05865,
+      "far_abs_error": 0.008649999999999998,
+      "within_1pct": true,
+      "conformal_far_contaminated": 0.0085,
+      "conformal_detection_near_first": 0.99,
+      "conformal_detection_far_first": 1.0,
+      "conformal_detection_near": 0.23199999999999998,
+      "conformal_detection_far": 0.662,
+      "legacy_far": 0.00205,
+      "legacy_detection_near_first": 0.73,
+      "legacy_detection_far_first": 1.0,
+      "legacy_detection_near": 0.15000000000000002,
+      "legacy_detection_far": 0.404
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.1,
+      "conformal_far": 0.11500000000000002,
+      "far_abs_error": 0.015000000000000013,
+      "within_1pct": false,
+      "conformal_far_contaminated": 0.021249999999999998,
+      "conformal_detection_near_first": 1.0,
+      "conformal_detection_far_first": 1.0,
+      "conformal_detection_near": 0.422,
+      "conformal_detection_far": 0.96,
+      "legacy_far": 0.017,
+      "legacy_detection_near_first": 0.95,
+      "legacy_detection_far_first": 1.0,
+      "legacy_detection_near": 0.22399999999999998,
+      "legacy_detection_far": 0.836
+    }
+  ],
+  "runs": [
+    {
+      "shape": "gaussian",
+      "alpha": 0.01,
+      "seed": 0,
+      "conformal": {
+        "far_pure": 0.009,
+        "far_contaminated": 0.00125,
+        "detection_near_first": 0.65,
+        "detection_far_first": 0.65,
+        "detection_near": 0.13,
+        "detection_far": 0.24
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.55,
+        "detection_far_first": 0.45,
+        "detection_near": 0.11,
+        "detection_far": 0.09
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.01,
+      "seed": 1,
+      "conformal": {
+        "far_pure": 0.01025,
+        "far_contaminated": 0.00125,
+        "detection_near_first": 0.6,
+        "detection_far_first": 0.45,
+        "detection_near": 0.12,
+        "detection_far": 0.24
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.45,
+        "detection_far_first": 0.5,
+        "detection_near": 0.09,
+        "detection_far": 0.1
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.01,
+      "seed": 2,
+      "conformal": {
+        "far_pure": 0.00875,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.6,
+        "detection_far_first": 0.6,
+        "detection_near": 0.12,
+        "detection_far": 0.22
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.55,
+        "detection_far_first": 0.6,
+        "detection_near": 0.11,
+        "detection_far": 0.12
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.01,
+      "seed": 3,
+      "conformal": {
+        "far_pure": 0.00975,
+        "far_contaminated": 0.00375,
+        "detection_near_first": 0.55,
+        "detection_far_first": 0.6,
+        "detection_near": 0.11,
+        "detection_far": 0.2
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.55,
+        "detection_far_first": 0.55,
+        "detection_near": 0.11,
+        "detection_far": 0.11
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.01,
+      "seed": 4,
+      "conformal": {
+        "far_pure": 0.0095,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.6,
+        "detection_far_first": 0.6,
+        "detection_near": 0.12,
+        "detection_far": 0.2
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.5,
+        "detection_far_first": 0.6,
+        "detection_near": 0.1,
+        "detection_far": 0.12
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.05,
+      "seed": 0,
+      "conformal": {
+        "far_pure": 0.04775,
+        "far_contaminated": 0.005,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.21,
+        "detection_far": 0.62
+      },
+      "legacy_zscore": {
+        "far_pure": 0.001,
+        "far_contaminated": 0.0,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.2,
+        "detection_far": 0.35
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.05,
+      "seed": 1,
+      "conformal": {
+        "far_pure": 0.04825,
+        "far_contaminated": 0.00625,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.21,
+        "detection_far": 0.64
+      },
+      "legacy_zscore": {
+        "far_pure": 0.00175,
+        "far_contaminated": 0.0,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.2,
+        "detection_far": 0.36
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.05,
+      "seed": 2,
+      "conformal": {
+        "far_pure": 0.0475,
+        "far_contaminated": 0.0075,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.23,
+        "detection_far": 0.7
+      },
+      "legacy_zscore": {
+        "far_pure": 0.00175,
+        "far_contaminated": 0.0,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.2,
+        "detection_far": 0.31
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.05,
+      "seed": 3,
+      "conformal": {
+        "far_pure": 0.049,
+        "far_contaminated": 0.00625,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.23,
+        "detection_far": 0.67
+      },
+      "legacy_zscore": {
+        "far_pure": 0.002,
+        "far_contaminated": 0.0,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.2,
+        "detection_far": 0.35
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.05,
+      "seed": 4,
+      "conformal": {
+        "far_pure": 0.047,
+        "far_contaminated": 0.0,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.23,
+        "detection_far": 0.59
+      },
+      "legacy_zscore": {
+        "far_pure": 0.001,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.9,
+        "detection_far_first": 1.0,
+        "detection_near": 0.19,
+        "detection_far": 0.34
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.1,
+      "seed": 0,
+      "conformal": {
+        "far_pure": 0.101,
+        "far_contaminated": 0.01375,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.44,
+        "detection_far": 0.95
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0125,
+        "far_contaminated": 0.00125,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.24,
+        "detection_far": 0.85
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.1,
+      "seed": 1,
+      "conformal": {
+        "far_pure": 0.099,
+        "far_contaminated": 0.02125,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.42,
+        "detection_far": 0.98
+      },
+      "legacy_zscore": {
+        "far_pure": 0.01575,
+        "far_contaminated": 0.00125,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.25,
+        "detection_far": 0.87
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.1,
+      "seed": 2,
+      "conformal": {
+        "far_pure": 0.09775,
+        "far_contaminated": 0.02625,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.43,
+        "detection_far": 0.97
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0125,
+        "far_contaminated": 0.0,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.26,
+        "detection_far": 0.88
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.1,
+      "seed": 3,
+      "conformal": {
+        "far_pure": 0.09925,
+        "far_contaminated": 0.01875,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.47,
+        "detection_far": 0.93
+      },
+      "legacy_zscore": {
+        "far_pure": 0.01525,
+        "far_contaminated": 0.00375,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.27,
+        "detection_far": 0.85
+      }
+    },
+    {
+      "shape": "gaussian",
+      "alpha": 0.1,
+      "seed": 4,
+      "conformal": {
+        "far_pure": 0.10025,
+        "far_contaminated": 0.0125,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.43,
+        "detection_far": 0.96
+      },
+      "legacy_zscore": {
+        "far_pure": 0.011,
+        "far_contaminated": 0.0,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.29,
+        "detection_far": 0.82
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.01,
+      "seed": 0,
+      "conformal": {
+        "far_pure": 0.01,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.5,
+        "detection_far_first": 0.65,
+        "detection_near": 0.1,
+        "detection_far": 0.24
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.0,
+        "detection_far_first": 0.0,
+        "detection_near": 0.0,
+        "detection_far": 0.0
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.01,
+      "seed": 1,
+      "conformal": {
+        "far_pure": 0.01125,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.6,
+        "detection_far_first": 0.45,
+        "detection_near": 0.12,
+        "detection_far": 0.22
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.0,
+        "detection_far_first": 0.0,
+        "detection_near": 0.0,
+        "detection_far": 0.0
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.01,
+      "seed": 2,
+      "conformal": {
+        "far_pure": 0.0095,
+        "far_contaminated": 0.00125,
+        "detection_near_first": 0.45,
+        "detection_far_first": 0.65,
+        "detection_near": 0.09,
+        "detection_far": 0.2
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.0,
+        "detection_far_first": 0.0,
+        "detection_near": 0.0,
+        "detection_far": 0.0
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.01,
+      "seed": 3,
+      "conformal": {
+        "far_pure": 0.01125,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.55,
+        "detection_far_first": 0.65,
+        "detection_near": 0.11,
+        "detection_far": 0.2
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.0,
+        "detection_far_first": 0.0,
+        "detection_near": 0.0,
+        "detection_far": 0.0
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.01,
+      "seed": 4,
+      "conformal": {
+        "far_pure": 0.0115,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.65,
+        "detection_far_first": 0.65,
+        "detection_near": 0.13,
+        "detection_far": 0.24
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.0,
+        "detection_far_first": 0.0,
+        "detection_near": 0.0,
+        "detection_far": 0.0
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.05,
+      "seed": 0,
+      "conformal": {
+        "far_pure": 0.04825,
+        "far_contaminated": 0.005,
+        "detection_near_first": 0.95,
+        "detection_far_first": 1.0,
+        "detection_near": 0.21,
+        "detection_far": 0.68
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.1,
+        "detection_far_first": 0.85,
+        "detection_near": 0.02,
+        "detection_far": 0.2
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.05,
+      "seed": 1,
+      "conformal": {
+        "far_pure": 0.04975,
+        "far_contaminated": 0.0025,
+        "detection_near_first": 0.9,
+        "detection_far_first": 1.0,
+        "detection_near": 0.23,
+        "detection_far": 0.67
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.1,
+        "detection_far_first": 0.8,
+        "detection_near": 0.02,
+        "detection_far": 0.2
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.05,
+      "seed": 2,
+      "conformal": {
+        "far_pure": 0.04875,
+        "far_contaminated": 0.005,
+        "detection_near_first": 0.95,
+        "detection_far_first": 1.0,
+        "detection_near": 0.21,
+        "detection_far": 0.66
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.25,
+        "detection_far_first": 1.0,
+        "detection_near": 0.05,
+        "detection_far": 0.23
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.05,
+      "seed": 3,
+      "conformal": {
+        "far_pure": 0.05075,
+        "far_contaminated": 0.00625,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.21,
+        "detection_far": 0.7
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.15,
+        "detection_far_first": 0.9,
+        "detection_near": 0.03,
+        "detection_far": 0.21
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.05,
+      "seed": 4,
+      "conformal": {
+        "far_pure": 0.049,
+        "far_contaminated": 0.005,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.23,
+        "detection_far": 0.74
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.05,
+        "detection_far_first": 0.8,
+        "detection_near": 0.01,
+        "detection_far": 0.19
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.1,
+      "seed": 0,
+      "conformal": {
+        "far_pure": 0.09975,
+        "far_contaminated": 0.02,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.42,
+        "detection_far": 0.98
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0015,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.55,
+        "detection_far_first": 1.0,
+        "detection_near": 0.11,
+        "detection_far": 0.71
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.1,
+      "seed": 1,
+      "conformal": {
+        "far_pure": 0.10175,
+        "far_contaminated": 0.015,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.44,
+        "detection_far": 0.97
+      },
+      "legacy_zscore": {
+        "far_pure": 0.00175,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.7,
+        "detection_far_first": 1.0,
+        "detection_near": 0.15,
+        "detection_far": 0.68
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.1,
+      "seed": 2,
+      "conformal": {
+        "far_pure": 0.0965,
+        "far_contaminated": 0.02375,
+        "detection_near_first": 0.95,
+        "detection_far_first": 1.0,
+        "detection_near": 0.4,
+        "detection_far": 0.97
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0005,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.75,
+        "detection_far_first": 1.0,
+        "detection_near": 0.16,
+        "detection_far": 0.66
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.1,
+      "seed": 3,
+      "conformal": {
+        "far_pure": 0.098,
+        "far_contaminated": 0.025,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.42,
+        "detection_far": 0.97
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0015,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.75,
+        "detection_far_first": 0.95,
+        "detection_near": 0.15,
+        "detection_far": 0.66
+      }
+    },
+    {
+      "shape": "bimodal",
+      "alpha": 0.1,
+      "seed": 4,
+      "conformal": {
+        "far_pure": 0.099,
+        "far_contaminated": 0.0225,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.45,
+        "detection_far": 0.97
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0015,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.75,
+        "detection_far_first": 1.0,
+        "detection_near": 0.16,
+        "detection_far": 0.74
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.01,
+      "seed": 0,
+      "conformal": {
+        "far_pure": 0.01175,
+        "far_contaminated": 0.00375,
+        "detection_near_first": 0.45,
+        "detection_far_first": 0.5,
+        "detection_near": 0.09,
+        "detection_far": 0.2
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.15,
+        "detection_far_first": 0.6,
+        "detection_near": 0.03,
+        "detection_far": 0.12
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.01,
+      "seed": 1,
+      "conformal": {
+        "far_pure": 0.0125,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.45,
+        "detection_far_first": 0.6,
+        "detection_near": 0.09,
+        "detection_far": 0.19
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.2,
+        "detection_far_first": 0.6,
+        "detection_near": 0.04,
+        "detection_far": 0.12
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.01,
+      "seed": 2,
+      "conformal": {
+        "far_pure": 0.01125,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.6,
+        "detection_far_first": 0.6,
+        "detection_near": 0.12,
+        "detection_far": 0.23
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.15,
+        "detection_far_first": 0.5,
+        "detection_near": 0.03,
+        "detection_far": 0.1
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.01,
+      "seed": 3,
+      "conformal": {
+        "far_pure": 0.0115,
+        "far_contaminated": 0.0025,
+        "detection_near_first": 0.6,
+        "detection_far_first": 0.5,
+        "detection_near": 0.12,
+        "detection_far": 0.2
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.25,
+        "detection_far_first": 0.4,
+        "detection_near": 0.05,
+        "detection_far": 0.08
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.01,
+      "seed": 4,
+      "conformal": {
+        "far_pure": 0.01425,
+        "far_contaminated": 0.0025,
+        "detection_near_first": 0.6,
+        "detection_far_first": 0.75,
+        "detection_near": 0.12,
+        "detection_far": 0.22
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.1,
+        "detection_far_first": 0.8,
+        "detection_near": 0.02,
+        "detection_far": 0.16
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.05,
+      "seed": 0,
+      "conformal": {
+        "far_pure": 0.058,
+        "far_contaminated": 0.00625,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.23,
+        "detection_far": 0.68
+      },
+      "legacy_zscore": {
+        "far_pure": 0.00225,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.8,
+        "detection_far_first": 1.0,
+        "detection_near": 0.16,
+        "detection_far": 0.42
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.05,
+      "seed": 1,
+      "conformal": {
+        "far_pure": 0.05725,
+        "far_contaminated": 0.00875,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.25,
+        "detection_far": 0.67
+      },
+      "legacy_zscore": {
+        "far_pure": 0.00075,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.6,
+        "detection_far_first": 1.0,
+        "detection_near": 0.13,
+        "detection_far": 0.37
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.05,
+      "seed": 2,
+      "conformal": {
+        "far_pure": 0.0575,
+        "far_contaminated": 0.00625,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.24,
+        "detection_far": 0.68
+      },
+      "legacy_zscore": {
+        "far_pure": 0.00275,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.75,
+        "detection_far_first": 1.0,
+        "detection_near": 0.16,
+        "detection_far": 0.45
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.05,
+      "seed": 3,
+      "conformal": {
+        "far_pure": 0.06275,
+        "far_contaminated": 0.01375,
+        "detection_near_first": 0.95,
+        "detection_far_first": 1.0,
+        "detection_near": 0.2,
+        "detection_far": 0.67
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0025,
+        "far_contaminated": 0.0,
+        "detection_near_first": 0.75,
+        "detection_far_first": 1.0,
+        "detection_near": 0.15,
+        "detection_far": 0.42
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.05,
+      "seed": 4,
+      "conformal": {
+        "far_pure": 0.05775,
+        "far_contaminated": 0.0075,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.24,
+        "detection_far": 0.61
+      },
+      "legacy_zscore": {
+        "far_pure": 0.002,
+        "far_contaminated": 0.00125,
+        "detection_near_first": 0.75,
+        "detection_far_first": 1.0,
+        "detection_near": 0.15,
+        "detection_far": 0.36
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.1,
+      "seed": 0,
+      "conformal": {
+        "far_pure": 0.113,
+        "far_contaminated": 0.015,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.45,
+        "detection_far": 0.96
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0175,
+        "far_contaminated": 0.00375,
+        "detection_near_first": 0.95,
+        "detection_far_first": 1.0,
+        "detection_near": 0.23,
+        "detection_far": 0.83
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.1,
+      "seed": 1,
+      "conformal": {
+        "far_pure": 0.11575,
+        "far_contaminated": 0.02375,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.43,
+        "detection_far": 0.94
+      },
+      "legacy_zscore": {
+        "far_pure": 0.01775,
+        "far_contaminated": 0.00125,
+        "detection_near_first": 0.95,
+        "detection_far_first": 1.0,
+        "detection_near": 0.24,
+        "detection_far": 0.9
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.1,
+      "seed": 2,
+      "conformal": {
+        "far_pure": 0.11225,
+        "far_contaminated": 0.01875,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.42,
+        "detection_far": 0.94
+      },
+      "legacy_zscore": {
+        "far_pure": 0.0195,
+        "far_contaminated": 0.0,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.24,
+        "detection_far": 0.83
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.1,
+      "seed": 3,
+      "conformal": {
+        "far_pure": 0.11825,
+        "far_contaminated": 0.0225,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.42,
+        "detection_far": 0.96
+      },
+      "legacy_zscore": {
+        "far_pure": 0.015,
+        "far_contaminated": 0.00375,
+        "detection_near_first": 0.95,
+        "detection_far_first": 1.0,
+        "detection_near": 0.21,
+        "detection_far": 0.77
+      }
+    },
+    {
+      "shape": "drift",
+      "alpha": 0.1,
+      "seed": 4,
+      "conformal": {
+        "far_pure": 0.11575,
+        "far_contaminated": 0.02625,
+        "detection_near_first": 1.0,
+        "detection_far_first": 1.0,
+        "detection_near": 0.39,
+        "detection_far": 1.0
+      },
+      "legacy_zscore": {
+        "far_pure": 0.01525,
+        "far_contaminated": 0.005,
+        "detection_near_first": 0.9,
+        "detection_far_first": 1.0,
+        "detection_near": 0.2,
+        "detection_far": 0.85
+      }
+    }
+  ],
+  "elapsed_s": 124.91
+}

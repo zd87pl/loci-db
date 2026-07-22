@@ -3,6 +3,7 @@
 from loci.async_client import AsyncLociClient
 from loci.client import LociClient
 from loci.local_client import LocalLociClient, QueryStats
+from loci.retrieval.novelty import ConformalNoveltyCalibrator, NoveltyCalibrator
 from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
 from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import DensityStats
@@ -11,11 +12,13 @@ from loci.temporal.consolidation import ConsolidationPolicy
 
 __all__ = [
     "AsyncLociClient",
+    "ConformalNoveltyCalibrator",
     "ConsolidationPolicy",
     "DensityStats",
     "HilbertIndex",
     "LociClient",
     "LocalLociClient",
+    "NoveltyCalibrator",
     "PredictRetrieveResult",
     "PredictThenRetrieve",
     "QueryStats",

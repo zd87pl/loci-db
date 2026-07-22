@@ -54,6 +54,9 @@ everything remains findable.
   benchmark suite (R3).
 
 ### R2. Conformal novelty — from heuristic to guarantee
+**Landed** (`ConformalNoveltyCalibrator`; empirical FAR within ±1% of alpha —
+see `benchmarks/results/conformal_latest.json`).
+
 The novelty score is now correct (absolute best-match similarity + calibration), but
 it is a heuristic. Conformal prediction turns it into a guarantee:
 "novelty > τ fires with ≤ α false-alarm rate," distribution-free, using a sliding
@@ -69,6 +72,9 @@ calibration window of nonconformity scores.
   held-out trajectory data across three datasets.
 
 ### R3. The world-model memory benchmark — own the category
+**Landed as v1** (`benchmarks/wm_bench/`, synthetic generators + dataset
+adapter protocol; real-dataset adapters are the v2 work).
+
 No standard benchmark exists for what LOCI does. Define it:
 
 - **Datasets:** public embodied trajectories (Habitat/AI2-THOR rollouts, TartanAir,
@@ -99,6 +105,10 @@ Cost model inputs already exist (`estimated_bucket_count`, adaptive density stat
   `benchmarks/vs_naive_qdrant.py` (worst case: ties, because the planner picks naive).
 
 ### R5. Embedded Rust engine — "SQLite for spatiotemporal vectors"
+**Stage (a) landed** (`LocalLociClient(backend="rust")`, parity-tested; 5.6x
+batched insert, 85x search). Stages (b) persistence and (c) quantization
+remain.
+
 The in-memory mode is the most differentiated pragmatic asset (zero infra, µs-class
 label queries) but it is Python and non-persistent. `loci-core` already has
 parity-tested Hilbert + temporal math. Grow it into an embedded engine:

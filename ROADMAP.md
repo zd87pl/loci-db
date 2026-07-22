@@ -43,10 +43,13 @@ Direction set by [RFC-0001](docs/RFC-0001-memory-for-world-models.md)
       RFC-0001 P2)
 - [x] Consolidation for the Qdrant clients (sync + async)
 - [ ] Multi-tier consolidation fidelity curves (raw → k-centroids → scene digest)
-- [ ] Conformal novelty — false-alarm-rate guarantees (RFC-0001 R2)
-- [ ] World-model memory benchmark suite (RFC-0001 R3)
+- [x] Conformal novelty — false-alarm-rate guarantees (RFC-0001 R2)
+- [x] World-model memory benchmark suite v1 (RFC-0001 R3; synthetic data,
+      real-dataset adapters pending)
 - [ ] Adaptive query planner: Hilbert range-runs vs buckets vs naive filters
       chosen per query (RFC-0001 R4)
+- [x] Rust-native in-memory store — R5 stage (a): LocalLociClient
+      (backend="rust"), parity-tested, 5.6x insert / 85x search
 - [ ] Cross-scale causal linking
 - [ ] Scale-aware temporal decay
 

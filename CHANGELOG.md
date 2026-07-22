@@ -34,6 +34,20 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `coarse_time_range()` / `fold_cutoff_ms()` in `loci.temporal.consolidation`.
 
 ### Added
+- **Conformal novelty** (RFC-0001 R2): `ConformalNoveltyCalibrator` provides a
+  distribution-free false-alarm guarantee — `is_novel` fires on at most ~alpha
+  of in-distribution observations (empirically within ±1% of alpha across
+  distribution shapes; see `benchmarks/results/conformal_latest.json`). Plugs
+  into `predict_and_retrieve(calibrator=...)` unchanged.
+- **World-model memory benchmark** (RFC-0001 R3): `python -m benchmarks.wm_bench`
+  runs five tasks (analog recall@k vs oracle, novelty AUC, trajectory fidelity,
+  recall-vs-age under consolidation, sustained-load latency) across five
+  systems with honest wins-and-losses reporting; synthetic v1 with a dataset
+  adapter protocol for real trajectories.
+- **Rust-native in-memory store** (RFC-0001 R5 stage a):
+  `LocalLociClient(backend="rust")` opts into a loci-core store with 5.6x
+  batched insert and 85x search throughput vs the Python store, behind a
+  57-test side-by-side parity suite. Default backend unchanged.
 - **`loci migrate-layout` CLI command**: one-shot, idempotent migration of a
   legacy per-epoch Qdrant deployment to the bounded layout. Discovers legacy
   collections under a `--prefix` (other tenants untouched), copies every point

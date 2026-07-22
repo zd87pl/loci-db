@@ -1,0 +1,453 @@
+{
+  "benchmark": "wm_bench",
+  "schema_version": 1,
+  "data": "synthetic",
+  "synthetic_notice": "All v1 wm_bench results are computed on SYNTHETIC trajectories (see benchmarks/wm_bench/datasets.py for generator definitions and documented realism limitations). No real embodied dataset is involved; treat every number as a property of the retrieval systems under a synthetic workload, not a field result.",
+  "quick": false,
+  "seed": null,
+  "config": {
+    "epoch_size_ms": 5000,
+    "tasks": {
+      "future_analog_recall": {
+        "n_points": 1500,
+        "n_queries": 60,
+        "k": 10
+      },
+      "novelty_auc": {
+        "n_points": 800,
+        "n_ood_segments": 3,
+        "ood_segment_len": 40
+      },
+      "trajectory_fidelity": {
+        "n_scenes": 4,
+        "n_visits": 3,
+        "points_per_visit": 40
+      },
+      "recall_vs_age": {
+        "n_points": 3000,
+        "n_age_buckets": 6,
+        "queries_per_bucket": 8
+      },
+      "sustained_load": {
+        "n_points": 600,
+        "query_every": 5
+      }
+    },
+    "systems": [
+      "brute_force",
+      "loci_local",
+      "loci_local_consolidated",
+      "loci_qdrant_memory",
+      "naive_qdrant"
+    ]
+  },
+  "versions": {
+    "python": "3.11.15",
+    "platform": "x86_64",
+    "numpy": "2.4.4",
+    "qdrant-client": "1.17.1",
+    "loci-stdb": "0.3.0"
+  },
+  "results": {
+    "future_analog_recall": {
+      "brute_force": {
+        "task": "future_analog_recall",
+        "dataset": "synthetic:smooth_patrol(n=1500,dim=32,seed=7)",
+        "synthetic": true,
+        "n_points": 1500,
+        "k": 10,
+        "n_queries": 60,
+        "horizon_steps": 12,
+        "recall_at_k": 1.0,
+        "recall_at_k_windowed": 1.0,
+        "oracle": "brute_force"
+      },
+      "loci_local": {
+        "task": "future_analog_recall",
+        "dataset": "synthetic:smooth_patrol(n=1500,dim=32,seed=7)",
+        "synthetic": true,
+        "n_points": 1500,
+        "k": 10,
+        "n_queries": 60,
+        "horizon_steps": 12,
+        "recall_at_k": 1.0,
+        "recall_at_k_windowed": 1.0,
+        "oracle": "brute_force"
+      },
+      "loci_local_consolidated": {
+        "task": "future_analog_recall",
+        "dataset": "synthetic:smooth_patrol(n=1500,dim=32,seed=7)",
+        "synthetic": true,
+        "n_points": 1500,
+        "k": 10,
+        "n_queries": 60,
+        "horizon_steps": 12,
+        "recall_at_k": 0.16,
+        "recall_at_k_windowed": 0.2,
+        "oracle": "brute_force"
+      },
+      "loci_qdrant_memory": {
+        "task": "future_analog_recall",
+        "dataset": "synthetic:smooth_patrol(n=1500,dim=32,seed=7)",
+        "synthetic": true,
+        "n_points": 1500,
+        "k": 10,
+        "n_queries": 60,
+        "horizon_steps": 12,
+        "recall_at_k": 1.0,
+        "recall_at_k_windowed": 1.0,
+        "oracle": "brute_force"
+      },
+      "naive_qdrant": {
+        "task": "future_analog_recall",
+        "dataset": "synthetic:smooth_patrol(n=1500,dim=32,seed=7)",
+        "synthetic": true,
+        "n_points": 1500,
+        "k": 10,
+        "n_queries": 60,
+        "horizon_steps": 12,
+        "recall_at_k": 1.0,
+        "recall_at_k_windowed": 1.0,
+        "oracle": "brute_force"
+      }
+    },
+    "novelty_auc": {
+      "brute_force": {
+        "task": "novelty_auc",
+        "dataset": "synthetic:ood_patrol(n=800,dim=32,seed=13,segments=3x40)",
+        "synthetic": true,
+        "supported": true,
+        "auc": 0.8934,
+        "auc_onset": 0.9585,
+        "n_scored": 736,
+        "n_ood": 120,
+        "median_familiar": 0.019,
+        "median_ood": 0.0465
+      },
+      "loci_local": {
+        "task": "novelty_auc",
+        "dataset": "synthetic:ood_patrol(n=800,dim=32,seed=13,segments=3x40)",
+        "synthetic": true,
+        "supported": true,
+        "auc": 0.8934,
+        "auc_onset": 0.9585,
+        "n_scored": 736,
+        "n_ood": 120,
+        "median_familiar": 0.019,
+        "median_ood": 0.0465
+      },
+      "loci_local_consolidated": {
+        "task": "novelty_auc",
+        "dataset": "synthetic:ood_patrol(n=800,dim=32,seed=13,segments=3x40)",
+        "synthetic": true,
+        "supported": true,
+        "auc": 0.871,
+        "auc_onset": 0.9482,
+        "n_scored": 736,
+        "n_ood": 120,
+        "median_familiar": 0.0197,
+        "median_ood": 0.0465
+      },
+      "loci_qdrant_memory": {
+        "task": "novelty_auc",
+        "dataset": "synthetic:ood_patrol(n=800,dim=32,seed=13,segments=3x40)",
+        "synthetic": true,
+        "supported": true,
+        "auc": 0.8934,
+        "auc_onset": 0.9585,
+        "n_scored": 736,
+        "n_ood": 120,
+        "median_familiar": 0.019,
+        "median_ood": 0.0465
+      },
+      "naive_qdrant": {
+        "task": "novelty_auc",
+        "dataset": "synthetic:ood_patrol(n=800,dim=32,seed=13,segments=3x40)",
+        "synthetic": true,
+        "supported": false,
+        "auc": null,
+        "auc_onset": null,
+        "n_scored": 0,
+        "n_ood": 0,
+        "median_familiar": null,
+        "median_ood": null
+      }
+    },
+    "trajectory_fidelity": {
+      "brute_force": {
+        "task": "trajectory_fidelity",
+        "dataset": "synthetic:warehouse(scenes=4,visits=3,ppv=40,dim=32,seed=11)",
+        "synthetic": true,
+        "supported": true,
+        "coverage": 1.0,
+        "order_fidelity": 1.0,
+        "n_scenes": 4,
+        "steps": 15,
+        "method": "array_slice"
+      },
+      "loci_local": {
+        "task": "trajectory_fidelity",
+        "dataset": "synthetic:warehouse(scenes=4,visits=3,ppv=40,dim=32,seed=11)",
+        "synthetic": true,
+        "supported": true,
+        "coverage": 1.0,
+        "order_fidelity": 1.0,
+        "n_scenes": 4,
+        "steps": 15,
+        "method": "causal_scene_scan"
+      },
+      "loci_local_consolidated": {
+        "task": "trajectory_fidelity",
+        "dataset": "synthetic:warehouse(scenes=4,visits=3,ppv=40,dim=32,seed=11)",
+        "synthetic": true,
+        "supported": true,
+        "coverage": 0.75,
+        "order_fidelity": 0.75,
+        "n_scenes": 4,
+        "steps": 15,
+        "method": "causal_scene_scan"
+      },
+      "loci_qdrant_memory": {
+        "task": "trajectory_fidelity",
+        "dataset": "synthetic:warehouse(scenes=4,visits=3,ppv=40,dim=32,seed=11)",
+        "synthetic": true,
+        "supported": true,
+        "coverage": 1.0,
+        "order_fidelity": 1.0,
+        "n_scenes": 4,
+        "steps": 15,
+        "method": "causal_scene_scan"
+      },
+      "naive_qdrant": {
+        "task": "trajectory_fidelity",
+        "dataset": "synthetic:warehouse(scenes=4,visits=3,ppv=40,dim=32,seed=11)",
+        "synthetic": true,
+        "supported": true,
+        "coverage": 1.0,
+        "order_fidelity": 1.0,
+        "n_scenes": 4,
+        "steps": 15,
+        "method": "payload_scroll"
+      }
+    },
+    "recall_vs_age": {
+      "brute_force": {
+        "task": "recall_vs_age",
+        "dataset": "synthetic:smooth_patrol(n=3000,dim=32,seed=7)",
+        "synthetic": true,
+        "n_points": 3000,
+        "k": 5,
+        "n_age_buckets": 6,
+        "queries_per_bucket": 8,
+        "bucket_span_ms": 49983,
+        "recall_strict_by_age": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "recall_covered_by_age": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "inserted_points": 3000,
+        "resident_points": 3000,
+        "compression_ratio": 1.0,
+        "consolidation_active": false,
+        "oracle": "brute_force"
+      },
+      "loci_local": {
+        "task": "recall_vs_age",
+        "dataset": "synthetic:smooth_patrol(n=3000,dim=32,seed=7)",
+        "synthetic": true,
+        "n_points": 3000,
+        "k": 5,
+        "n_age_buckets": 6,
+        "queries_per_bucket": 8,
+        "bucket_span_ms": 49983,
+        "recall_strict_by_age": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "recall_covered_by_age": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "inserted_points": 3000,
+        "resident_points": 3000,
+        "compression_ratio": 1.0,
+        "consolidation_active": false,
+        "oracle": "brute_force"
+      },
+      "loci_local_consolidated": {
+        "task": "recall_vs_age",
+        "dataset": "synthetic:smooth_patrol(n=3000,dim=32,seed=7)",
+        "synthetic": true,
+        "n_points": 3000,
+        "k": 5,
+        "n_age_buckets": 6,
+        "queries_per_bucket": 8,
+        "bucket_span_ms": 49983,
+        "recall_strict_by_age": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.45
+        ],
+        "recall_covered_by_age": [
+          0.625,
+          0.7,
+          0.65,
+          0.95,
+          0.725,
+          0.575
+        ],
+        "inserted_points": 3000,
+        "resident_points": 340,
+        "compression_ratio": 8.82,
+        "consolidation_active": true,
+        "oracle": "brute_force"
+      },
+      "loci_qdrant_memory": {
+        "task": "recall_vs_age",
+        "dataset": "synthetic:smooth_patrol(n=3000,dim=32,seed=7)",
+        "synthetic": true,
+        "n_points": 3000,
+        "k": 5,
+        "n_age_buckets": 6,
+        "queries_per_bucket": 8,
+        "bucket_span_ms": 49983,
+        "recall_strict_by_age": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "recall_covered_by_age": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "inserted_points": 3000,
+        "resident_points": 3000,
+        "compression_ratio": 1.0,
+        "consolidation_active": false,
+        "oracle": "brute_force"
+      },
+      "naive_qdrant": {
+        "task": "recall_vs_age",
+        "dataset": "synthetic:smooth_patrol(n=3000,dim=32,seed=7)",
+        "synthetic": true,
+        "n_points": 3000,
+        "k": 5,
+        "n_age_buckets": 6,
+        "queries_per_bucket": 8,
+        "bucket_span_ms": 49983,
+        "recall_strict_by_age": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "recall_covered_by_age": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "inserted_points": 3000,
+        "resident_points": 3000,
+        "compression_ratio": 1.0,
+        "consolidation_active": false,
+        "oracle": "brute_force"
+      }
+    },
+    "sustained_load": {
+      "brute_force": {
+        "task": "sustained_load",
+        "dataset": "synthetic:smooth_patrol(n=600,dim=32,seed=7)",
+        "synthetic": true,
+        "n_inserts": 600,
+        "n_queries": 119,
+        "insert_p50_ms": 0.004,
+        "insert_p95_ms": 0.006,
+        "query_p50_ms": 0.101,
+        "query_p95_ms": 0.178,
+        "latency_note": "wall-clock, machine-dependent; all other wm_bench metrics are deterministic"
+      },
+      "loci_local": {
+        "task": "sustained_load",
+        "dataset": "synthetic:smooth_patrol(n=600,dim=32,seed=7)",
+        "synthetic": true,
+        "n_inserts": 600,
+        "n_queries": 119,
+        "insert_p50_ms": 2.445,
+        "insert_p95_ms": 4.724,
+        "query_p50_ms": 0.424,
+        "query_p95_ms": 0.614,
+        "latency_note": "wall-clock, machine-dependent; all other wm_bench metrics are deterministic"
+      },
+      "loci_local_consolidated": {
+        "task": "sustained_load",
+        "dataset": "synthetic:smooth_patrol(n=600,dim=32,seed=7)",
+        "synthetic": true,
+        "n_inserts": 600,
+        "n_queries": 119,
+        "insert_p50_ms": 2.168,
+        "insert_p95_ms": 2.607,
+        "query_p50_ms": 0.364,
+        "query_p95_ms": 0.45,
+        "latency_note": "wall-clock, machine-dependent; all other wm_bench metrics are deterministic"
+      },
+      "loci_qdrant_memory": {
+        "task": "sustained_load",
+        "dataset": "synthetic:smooth_patrol(n=600,dim=32,seed=7)",
+        "synthetic": true,
+        "n_inserts": 600,
+        "n_queries": 119,
+        "insert_p50_ms": 12.367,
+        "insert_p95_ms": 33.116,
+        "query_p50_ms": 3.315,
+        "query_p95_ms": 5.641,
+        "latency_note": "wall-clock, machine-dependent; all other wm_bench metrics are deterministic"
+      },
+      "naive_qdrant": {
+        "task": "sustained_load",
+        "dataset": "synthetic:smooth_patrol(n=600,dim=32,seed=7)",
+        "synthetic": true,
+        "n_inserts": 600,
+        "n_queries": 119,
+        "insert_p50_ms": 0.093,
+        "insert_p95_ms": 0.158,
+        "query_p50_ms": 3.211,
+        "query_p95_ms": 5.361,
+        "latency_note": "wall-clock, machine-dependent; all other wm_bench metrics are deterministic"
+      }
+    }
+  }
+}

@@ -24,9 +24,12 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loci.backends.memory import MemoryStore
+
+if TYPE_CHECKING:
+    from loci.backends.rust_store import RustMemoryStore
 from loci.payload_filters import extra_filter_to_memory
 from loci.retrieval.predict import PredictRetrieveResult
 from loci.schema import ScoredWorldState, WorldState
@@ -98,6 +101,10 @@ class LocalLociClient:
             retention.  Note: a retention policy tighter than the raw
             window (fewer than ``raw_window_epochs + 1`` epochs retained)
             purges raw points before consolidation can fold them.
+        backend: Storage backend — ``"python"`` (default, the pure-Python
+            :class:`MemoryStore`) or ``"rust"`` (the native
+            :class:`~loci.backends.rust_store.RustMemoryStore`; requires
+            the ``loci_core`` extension, ``uv sync --group native``).
     """
 
     def __init__(
@@ -112,12 +119,25 @@ class LocalLociClient:
         retention_policy: RetentionPolicy | None = None,
         consolidation_policy: ConsolidationPolicy | None = None,
         collection_prefix: str = "",
+        backend: str = "python",
     ) -> None:
         if epoch_size_ms <= 0:
             raise ValueError(f"epoch_size_ms must be positive, got {epoch_size_ms}")
         if distance not in {"cosine", "dot", "euclidean"}:
             raise ValueError("distance must be one of ['cosine', 'dot', 'euclidean']")
-        self._store = MemoryStore()
+        if backend not in {"python", "rust"}:
+            raise ValueError("backend must be one of ['python', 'rust']")
+        self._store: MemoryStore | RustMemoryStore
+        if backend == "rust":
+            try:
+                from loci.backends.rust_store import RustMemoryStore as _RustMemoryStore
+            except ImportError as exc:
+                raise ImportError(
+                    f"LocalLociClient(backend='rust') requires the loci_core native store: {exc}"
+                ) from exc
+            self._store = _RustMemoryStore()
+        else:
+            self._store = MemoryStore()
         self._epoch_size_ms = epoch_size_ms
         self._spatial_resolution = spatial_resolution
         self._vector_size = vector_size
@@ -167,7 +187,7 @@ class LocalLociClient:
         return self._last_query_stats
 
     @property
-    def store(self) -> MemoryStore:
+    def store(self) -> MemoryStore | RustMemoryStore:
         """Direct access to the underlying memory store (for introspection)."""
         return self._store
 

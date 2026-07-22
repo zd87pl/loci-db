@@ -8,6 +8,7 @@
 //! - Spatial distance and bounding box utilities
 //! - Novelty scoring for predict-then-retrieve
 //! - Batch WorldState preparation (the primary hot path)
+//! - An in-memory vector store (`LociStore`) — RFC-0001 R5 stage (a)
 
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
@@ -17,6 +18,7 @@ pub mod hilbert;
 pub mod hilbert_experiments;
 pub mod novelty;
 pub mod spatial;
+pub mod store;
 pub mod temporal;
 
 /// The loci_core Python module.
@@ -62,6 +64,9 @@ fn loci_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Batch processing
     m.add_function(wrap_pyfunction!(batch::py_batch_prepare_world_states, m)?)?;
+
+    // In-memory vector store (RFC-0001 R5 stage (a))
+    m.add_class::<store::PyLociStore>()?;
 
     Ok(())
 }

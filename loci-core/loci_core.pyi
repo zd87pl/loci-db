@@ -1,5 +1,7 @@
 """Type stubs for the loci_core Rust extension."""
 
+from typing import Any
+
 import numpy as np
 import numpy.typing as npt
 
@@ -110,3 +112,51 @@ def batch_prepare_world_states(
     npt.NDArray[np.uint64],
     npt.NDArray[np.int64],
 ]: ...
+
+# ---------------------------------------------------------------------------
+# In-memory vector store (RFC-0001 R5 stage (a))
+# ---------------------------------------------------------------------------
+
+class LociStore:
+    """Native in-memory vector store; points/payloads/filters cross as dicts."""
+
+    def __init__(self) -> None: ...
+    def create_collection(
+        self, name: str, vector_size: int, distance: str = "cosine"
+    ) -> None: ...
+    def collection_exists(self, name: str) -> bool: ...
+    def delete_collection(self, name: str) -> None: ...
+    def create_payload_index(self, collection: str, field_name: str) -> None: ...
+    def upsert(self, collection: str, points: list[dict[str, Any]]) -> None: ...
+    def set_payload(
+        self, collection: str, point_id: str, payload: dict[str, Any]
+    ) -> None: ...
+    def delete_points(self, collection: str, ids: list[str]) -> int: ...
+    def delete_points_in_time_range(
+        self,
+        collection: str,
+        start_ms: int,
+        end_ms_exclusive: int,
+        field: str = "timestamp_ms",
+    ) -> int: ...
+    def retrieve(self, collection: str, ids: list[str]) -> list[dict[str, Any]]: ...
+    def search(
+        self,
+        collection: str,
+        query_vector: list[float],
+        limit: int = 10,
+        payload_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]: ...
+    def scroll(
+        self,
+        collection: str,
+        payload_filter: dict[str, Any] | None = None,
+        limit: int = 10,
+        order_by: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+    @property
+    def total_points(self) -> int: ...
+    def collection_count(self, name: str) -> int: ...
+    def payload_value_range(
+        self, collection: str, field: str
+    ) -> tuple[Any, Any] | None: ...

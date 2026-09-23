@@ -978,11 +978,17 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+research = [
+    { name = "anthropic" },
+    { name = "click" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'dev'", specifier = ">=0.94.0" },
+    { name = "anthropic", marker = "extra == 'research'", specifier = ">=0.94.0" },
     { name = "bandit", extras = ["toml"], marker = "extra == 'dev'", specifier = ">=1.7" },
+    { name = "click", marker = "extra == 'research'", specifier = ">=8.0" },
     { name = "fastapi", extras = ["standard"], marker = "extra == 'dev'", specifier = ">=0.100.0" },
     { name = "hilbertcurve", specifier = ">=2.0.5" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.24.0" },
@@ -996,7 +1002,7 @@ requires-dist = [
     { name = "qdrant-client", specifier = ">=1.7.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["research", "dev"]
 
 [[package]]
 name = "markdown-it-py"

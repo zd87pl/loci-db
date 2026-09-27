@@ -6,7 +6,7 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [0.4.0] — Unreleased
 
 ### Changed — BREAKING
 - **Storage layout: bounded two-collection design** (RFC-0001 P1). Each
@@ -86,10 +86,11 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `.gitignore` entries for secrets, IDE files, and coverage artifacts.
 
 ### Docs
+- README repositioned around **spatial memory for Physical AI**: banner, demo GIF, a verified 60-second in-process quick start, use cases, and a one-line MCP setup. Adds `CITATION.cff`, issue/PR templates, and a social-preview image (`docs/assets/`); the internal project review and next-steps plan moved under `docs/`.
 - README performance section rewritten from the actual benchmark artifact (`benchmarks/results/retrieval_latest.json`), including the spatial and spatial+temporal numbers; Docker quick-start examples now send correctly-sized vectors.
 - `docs/NOVELTY.md` and `docs/BENCHMARK_METHODOLOGY.md` corrected to the measured results in `benchmarks/results/latest.json` (naive Qdrant is faster on pure spatial filtering; LOCI's measured win is combined tight spatial+temporal at N=10k, ~2x).
 - `ARCHITECTURE.md`: documents all three clients (incl. `LocalLociClient`/`MemoryStore`), the actual `predict_and_retrieve` default (searches all stored history; explicit window optional), and a new "Known Limitations and Planned Refactors" section.
-- `SECURITY.md` points to GitHub private vulnerability reporting; `docs/WORLD_MODEL_INTEGRATION.md` fixes the install name (`loci-stdb`); `NEXT_STEPS.md` and `ROADMAP.md` refreshed with the deferred refactors.
+- `SECURITY.md` points to GitHub private vulnerability reporting; `docs/WORLD_MODEL_INTEGRATION.md` fixes the install name (`loci-stdb`); `NEXT_STEPS.md` (now `docs/NEXT_STEPS.md`) and `ROADMAP.md` refreshed with the deferred refactors.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `CHANGELOG.md`, `SECURITY.md` added for open-source readiness.
 
 ---

@@ -1,4 +1,4 @@
-"""Loci — 4D spatiotemporal vector database for AI world models."""
+"""LOCI — spatial memory for Physical AI: a 4D spatiotemporal vector memory for world models."""
 
 from loci.async_client import AsyncLociClient
 from loci.client import LociClient
@@ -23,4 +23,4 @@ __all__ = [
     "SpatialBounds",
     "WorldState",
 ]
-__version__ = "0.3.0"
+__version__ = "0.4.0"

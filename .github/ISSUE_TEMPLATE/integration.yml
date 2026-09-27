@@ -1,0 +1,29 @@
+name: Integration proposal
+description: Connect LOCI to a robotics, simulation, or world-model tool (ROS 2, LeRobot, Isaac Sim, Habitat, a new world model...).
+labels: ["integration", "enhancement"]
+body:
+  - type: input
+    id: target
+    attributes:
+      label: Tool or framework
+      placeholder: e.g. ROS 2 Jazzy, LeRobot, NVIDIA Isaac Sim, Habitat, Cosmos, V-JEPA 2
+    validations:
+      required: true
+  - type: textarea
+    id: flow
+    attributes:
+      label: Data flow
+      description: What becomes a LOCI memory (which embedding, which pose/position, which timestamp), and what queries the integration needs.
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: Proposed shape
+      description: Adapter in `loci/adapters/`, an example under `examples/`, a separate package, a node, a notebook...
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to build this integration.

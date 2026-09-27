@@ -9,7 +9,7 @@ resolution are shipped. This document prioritizes the remaining work.
 ## Priority 1: Deferred architecture refactors
 
 The remaining known structural debt (see "Known Limitations and Planned
-Refactors" in [ARCHITECTURE.md](ARCHITECTURE.md)):
+Refactors" in [ARCHITECTURE.md](../ARCHITECTURE.md)):
 
 ### 1a. Bounded epoch storage — DONE
 Shipped: each tenant/store now uses exactly two collections

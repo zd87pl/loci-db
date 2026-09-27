@@ -7,22 +7,44 @@ allow-direct-references = true
 
 [project]
 name = "loci-stdb"
-version = "0.3.0"
-description = "4D spatiotemporal vector database middleware for AI world models"
+version = "0.4.0"
+description = "Spatial memory for Physical AI: a 4D (x, y, z, t) vector memory that lets robots, drones and world models remember what they saw, where and when, and detect what's new."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [
-    { name = "Loci Contributors" },
+    { name = "Zygmunt Dyras" },
+    { name = "LOCI contributors" },
 ]
-keywords = ["vector-database", "spatiotemporal", "world-models", "qdrant", "hilbert-curve"]
+keywords = [
+    "physical-ai",
+    "embodied-ai",
+    "robotics",
+    "robot-memory",
+    "spatial-memory",
+    "world-models",
+    "agent-memory",
+    "vector-database",
+    "spatiotemporal",
+    "novelty-detection",
+    "hilbert-curve",
+    "qdrant",
+    "mcp",
+    "v-jepa",
+    "dreamerv3",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 dependencies = [
     "qdrant-client>=1.7.0",
@@ -33,7 +55,9 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/zd87pl/loci-db"
 Repository = "https://github.com/zd87pl/loci-db"
+Documentation = "https://github.com/zd87pl/loci-db#readme"
 Issues = "https://github.com/zd87pl/loci-db/issues"
+Changelog = "https://github.com/zd87pl/loci-db/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 research = [

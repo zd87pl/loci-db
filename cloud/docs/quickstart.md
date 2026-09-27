@@ -93,12 +93,14 @@ from loci import LociClient, WorldState
 
 client = LociClient(
     base_url="https://api.loci.ai",
-    api_key="loci_...",          # your API key
+    api_key="loci_...",  # your API key
     vector_size=512,
 )
 
 state = WorldState(
-    x=0.42, y=0.17, z=0.88,
+    x=0.42,
+    y=0.17,
+    z=0.88,
     timestamp_ms=1713628800000,
     vector=[0.1] * 512,
     scene_id="scene_001",
@@ -169,9 +171,12 @@ result.
 hits = client.query(
     vector=[0.1] * 512,
     spatial_bounds={
-        "x_min": 0.0, "x_max": 1.0,
-        "y_min": 0.0, "y_max": 1.0,
-        "z_min": 0.0, "z_max": 1.0,
+        "x_min": 0.0,
+        "x_max": 1.0,
+        "y_min": 0.0,
+        "y_max": 1.0,
+        "z_min": 0.0,
+        "z_max": 1.0,
     },
     time_window_ms=(1713628000000, 1713629000000),
     limit=10,
@@ -188,20 +193,26 @@ for s in hits:
 import asyncio
 from loci import AsyncLociClient, WorldState
 
+
 async def main():
     async with AsyncLociClient(
         base_url="https://api.loci.ai",
         api_key="loci_...",
         vector_size=512,
     ) as client:
-        await client.insert(WorldState(
-            x=0.5, y=0.5, z=0.5,
-            timestamp_ms=1713628800000,
-            vector=[0.0] * 512,
-            scene_id="s",
-        ))
+        await client.insert(
+            WorldState(
+                x=0.5,
+                y=0.5,
+                z=0.5,
+                timestamp_ms=1713628800000,
+                vector=[0.0] * 512,
+                scene_id="s",
+            )
+        )
         hits = await client.query(vector=[0.0] * 512, limit=5)
         print(hits)
+
 
 asyncio.run(main())
 ```

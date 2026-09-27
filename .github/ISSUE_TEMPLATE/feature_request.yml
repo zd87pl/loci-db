@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest a capability LOCI should have.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: What are you building?
+      description: Robot, drone, AV, AR, world model, agent... The use case matters more than the proposed API.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is missing or painful today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to see?
+      description: An API sketch, a query you want to run, or an example of the behaviour you expect.
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'd like to help implement this.

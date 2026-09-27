@@ -24,7 +24,7 @@
 - [x] Warm → cold data aging (delivered as memory consolidation: stale raw
       epochs fold into the summary collection; see v0.4)
 
-## v0.3 — Performance (current)
+## v0.3 — Performance
 
 - [x] Integrate adaptive Hilbert resolution into clients (density tracking + stats)
 - [x] Integrate funnel search into client API (`funnel_query()` on all clients)
@@ -32,7 +32,7 @@
 - [ ] Benchmarks against Milvus and Weaviate spatial filters
 - [ ] Batch predict-then-retrieve (multiple context vectors)
 
-## v0.4 — Multi-Scale & Memory Semantics
+## v0.4 — Multi-Scale & Memory Semantics (current; 0.4.0 ships the checked items)
 
 Direction set by [RFC-0001](docs/RFC-0001-memory-for-world-models.md)
 ("the memory system for world models"): invest above the filter layer.
@@ -49,6 +49,19 @@ Direction set by [RFC-0001](docs/RFC-0001-memory-for-world-models.md)
       chosen per query (RFC-0001 R4)
 - [ ] Cross-scale causal linking
 - [ ] Scale-aware temporal decay
+
+## Ecosystem integrations (help wanted)
+
+Meet physical-AI builders where they already work. See
+[CONTRIBUTING.md](CONTRIBUTING.md#where-to-start).
+
+- [x] MCP server for LLM agents (`loci-mcp`)
+- [x] World-model adapters: V-JEPA 2, DreamerV3, generic numpy/torch
+- [ ] ROS 2 node (odometry + camera embeddings → memories; recall/novelty services)
+- [ ] LeRobot dataset loader + policy-memory example
+- [ ] NVIDIA Isaac Sim and Habitat end-to-end examples with real embeddings
+- [ ] Hosted interactive demo (Hugging Face Space)
+- [ ] Colab quick-start notebook
 
 ## Deferred architecture refactors
 

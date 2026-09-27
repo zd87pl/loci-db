@@ -1,5 +1,7 @@
 # LOCI Project Review
 
+> **Point-in-time snapshot.** This review describes the repository at commit `2e9ae47` (July 2026). Many of the findings below have since been fixed; see [CHANGELOG.md](../CHANGELOG.md) for what changed.
+
 **Date:** 2026-07-17
 **Scope:** Full repository at commit `2e9ae47` — core library (`loci/`), REST server (`server.py`), cloud API (`cloud/`), Rust core (`loci-core/`), demos, research pipeline, benchmarks, tests, docs, CI/CD.
 **Method:** 13 parallel dimension reviews (spatial, temporal, retrieval, clients, server, cloud security, Rust, demos, docs accuracy, CI/packaging, research, test quality, architecture) plus a build/test health check. Every medium-or-higher finding was independently adversarially verified (high/critical findings by a 3-lens panel: technical correctness, impact, and concrete reproduction). 81 candidate findings were raised; 79 were confirmed, 2 refuted. Many findings below were verified by **empirical reproduction**, not just code reading.

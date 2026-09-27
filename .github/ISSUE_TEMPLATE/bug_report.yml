@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in LOCI is broken or behaves unexpectedly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. For security vulnerabilities,
+        please use private reporting instead (see SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest code snippet or command sequence that shows the problem.
+      render: python
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - LocalLociClient (in-memory)
+        - LociClient (Qdrant)
+        - AsyncLociClient (Qdrant)
+        - REST server (server.py / Docker)
+        - MCP server (loci-mcp)
+        - Cloud API
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: LOCI version (`python -c "import loci; print(loci.__version__)"`), Python version, OS, and Qdrant version if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or traceback
+      render: shell

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -169,7 +170,9 @@ class Simulation:
     def get_visible_objects(self, x: int, y: int, radius: int = 3) -> list[dict]:
         """Find all objects within radius of (x, y)."""
         visible = []
-        for ox, oy in list(self.warehouse_grid.keys()) + [(ax, ay) for ax, ay in self.anomalies]:
+        # place_anomaly() also writes anomalies into warehouse_grid; dedupe so an
+        # anomaly is seen once, not twice.
+        for ox, oy in dict.fromkeys([*self.warehouse_grid, *self.anomalies]):
             dx = ox - x
             dy = oy - y
             if dx * dx + dy * dy <= radius * radius:
@@ -504,36 +507,42 @@ class Simulation:
             await self.tick()
             await asyncio.sleep(self.tick_interval_ms / 1000)
 
+    def get_expected_object_keys(self, x: int, y: int, radius: int = 3) -> list[str]:
+        """Visible-object keys the robot's map predicts, i.e. without anomalies."""
+        return [
+            key
+            for key in self.get_visible_object_keys(x, y, radius)
+            if not key.startswith(f"{ANOMALY}@")
+        ]
+
+    def expected_embedding(self, x: int, y: int) -> list[float]:
+        """What the robot expects to see at (x, y), from its map alone."""
+        return generate_embedding(x, y, self.get_expected_object_keys(x, y))
+
     def make_predictor(self, steps_ahead: int = 10):
-        """Create a simple linear extrapolation predictor."""
-        recent = (
-            self.recent_embeddings[-3:]
-            if len(self.recent_embeddings) >= 3
-            else self.recent_embeddings[:]
-        )
+        """Predict the view ``steps_ahead`` waypoints from now.
+
+        The map says what the robot should see at the future waypoint. Whatever
+        the robot sees now that the map did not predict (the residual between
+        the live view and the expected view here) is carried forward: an
+        obstacle in view now is still there in a few steps. With nothing
+        unexpected in view the prediction is exactly the map's view of the
+        future waypoint, which memory already knows (low surprise); with an
+        unexpected object in view it is unlike any memory (high surprise).
+        """
+        fx, fy = self.robot_x, self.robot_y
+        if self.patrol_route:
+            fx, fy = self.patrol_route[
+                (self.route_idx + max(steps_ahead, 1) - 1) % self.route_length
+            ]
+        expected_now = self.expected_embedding(self.robot_x, self.robot_y)
+        expected_future = self.expected_embedding(fx, fy)
 
         def predictor_fn(context: list[float]) -> list[float]:
-            if len(recent) < 2:
-                return context
-
-            # Average the deltas between recent embeddings
-            deltas = []
-            for i in range(1, len(recent)):
-                delta = [recent[i][j] - recent[i - 1][j] for j in range(len(recent[0]))]
-                deltas.append(delta)
-
-            avg_delta = [sum(d[j] for d in deltas) / len(deltas) for j in range(len(deltas[0]))]
-
-            # Extrapolate
-            predicted = [context[j] + avg_delta[j] * steps_ahead for j in range(len(context))]
-
-            # L2 normalize
-            import math
-
+            predicted = [
+                e + c - n for e, c, n in zip(expected_future, context, expected_now, strict=True)
+            ]
             norm = math.sqrt(sum(v * v for v in predicted))
-            if norm > 1e-8:
-                predicted = [v / norm for v in predicted]
-
-            return predicted
+            return [v / norm for v in predicted] if norm > 1e-8 else expected_future
 
         return predictor_fn

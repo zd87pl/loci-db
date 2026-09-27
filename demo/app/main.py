@@ -15,6 +15,9 @@ from pydantic import BaseModel
 
 from .simulation import Simulation
 
+# Memories younger than this are left out of surprise scoring (see query_predict).
+RECENT_EXCLUSION_MS = 3000
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -386,8 +389,16 @@ async def query_predict(req: PredictQueryReq):
 
     query_logs.append({
         "ts": now_ms, "tag": "PREDICT",
-        "msg": f"Linear extrapolation from last 3 embeddings, {req.steps_ahead} steps ahead",
+        "msg": (
+            f"Map view {req.steps_ahead} steps ahead + anything unexpected in view now"
+        ),
     })
+
+    # Judge the prediction against what the robot knew before the last few
+    # seconds: otherwise the frames it just recorded of a new obstacle would
+    # already make that obstacle look familiar.
+    latest_ms = sim.start_time_ms + sim.elapsed_ms
+    history_window = (sim.start_time_ms, max(sim.start_time_ms, latest_ms - RECENT_EXCLUSION_MS))
 
     result = sim.client.predict_and_retrieve(
         context_vector=context_vec,
@@ -398,6 +409,7 @@ async def query_predict(req: PredictQueryReq):
         limit=5,
         alpha=0.7,
         return_prediction=True,
+        search_time_window_ms=history_window,
     )
 
     query_logs.append({

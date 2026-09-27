@@ -5,8 +5,9 @@
     uvicorn demo.app.main:app --port 8765 &
     python docs/assets/src/record_demo_gif.py
 
-Drives the demo's guided steps (build memory, place + time search, similar
-moments), captures frames with a fixed layout, and encodes a ~1 MB GIF.
+Drives the demo's five guided steps (build memory, place + time search,
+similar moments, surprise obstacle, surprise detection), captures frames with
+a fixed layout, and encodes a ~1 MB GIF.
 """
 
 from __future__ import annotations
@@ -41,29 +42,50 @@ CSS = """
 """
 
 # (caption number, caption text, guide button to click, seconds to record, keep every Nth frame)
+# Step 4 keeps recording past its time until the obstacle is actually in the
+# robot's view (see UNTIL), so step 5 detects it rather than an empty aisle.
 STEPS = [
     (
-        "Step 1 / 3",
+        "Step 1 / 5",
         "A robot patrols and LOCI remembers what it saw, where, and when.",
         "guide-build",
         14,
         2,
     ),
     (
-        "Step 2 / 3",
+        "Step 2 / 5",
         "Ask memory: what happened in this aisle in the last few seconds?",
         "guide-spatial",
-        5,
+        4,
         1,
     ),
     (
-        "Step 3 / 3",
+        "Step 3 / 5",
         "Find moments that looked like this one, nearby in space and time.",
         "guide-similar",
+        4,
+        1,
+    ),
+    (
+        "Step 4 / 5",
+        "Something new appears on the route that memory has never seen.",
+        "guide-anomaly",
+        2,
+        1,
+    ),
+    (
+        "Step 5 / 5",
+        "Predict what's ahead and compare it with memory: high surprise.",
+        "guide-predict",
         5,
         1,
     ),
 ]
+
+UNTIL = {
+    "guide-anomaly": "visibleObjects.some(o => o.type === 'anomaly')",
+}
+MAX_EXTRA_FRAMES = 10 * FPS
 
 # Colours that must survive palette quantisation (robot, docks, anchors, accents).
 KEY_COLORS = [
@@ -100,13 +122,20 @@ async def record(frame_dir: Path) -> list[Path]:
                 [number, text],
             )
             await js_click(page, button)
-            for i in range(seconds * FPS):
+            condition = UNTIL.get(button)
+            i = 0
+            while i < seconds * FPS or (
+                condition
+                and i < seconds * FPS + MAX_EXTRA_FRAMES
+                and not await page.evaluate(condition)
+            ):
                 await page.evaluate("window.scrollTo(0, 0)")
                 path = frame_dir / f"f{n:05d}.png"
                 await page.screenshot(path=str(path))
                 if i % stride == 0:
                     kept.append(path)
                 n += 1
+                i += 1
                 await page.wait_for_timeout(1000 // FPS - 60)
         await browser.close()
     return kept

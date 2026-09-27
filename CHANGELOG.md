@@ -85,6 +85,9 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CI: dependency audit now installs the project (library + dev + cloud API deps) before `pip-audit`; new Rust workflow runs `cargo test` for `loci-core`; the Fly deploy gates on the full library suite + ruff + mypy, not only cloud tests; new `docker-smoke` job builds the root image and exercises `/health`, `/insert`, `/query` against Qdrant; workflows declare least-privilege `permissions: contents: read`; publishing verifies the release tag matches the package version; mypy runs without a global `--ignore-missing-imports` (per-module overrides in `pyproject.toml`).
 - `.gitignore` entries for secrets, IDE files, and coverage artifacts.
 
+### Demo
+- Warehouse demo surprise detection now works: placing an obstacle on the patrol route reads as **high surprise** (~0.75–0.9) while familiar stretches stay low (<0.2). Mock embeddings are now spatially smooth with a strong signature for unseen objects, the predictor carries anything unexpected in view forward to the predicted waypoint, and scoring ignores memories from the last 3 s so the robot's own fresh frames don't make an obstacle look familiar. The README GIF now shows all five guided steps.
+
 ### Docs
 - README repositioned around **spatial memory for Physical AI**: banner, demo GIF, a verified 60-second in-process quick start, use cases, and a one-line MCP setup. Adds `CITATION.cff`, issue/PR templates, and a social-preview image (`docs/assets/`); the internal project review and next-steps plan moved under `docs/`.
 - README performance section rewritten from the actual benchmark artifact (`benchmarks/results/retrieval_latest.json`), including the spatial and spatial+temporal numbers; Docker quick-start examples now send correctly-sized vectors.

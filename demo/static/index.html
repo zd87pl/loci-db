@@ -1193,7 +1193,7 @@ async function runPredictSearch() {
     for (const r of data.results) {
       html += `<div class="result-item"><span class="pos">(${r.x}, ${r.y})</span> <span class="time">${r.elapsed_s != null ? r.elapsed_s+'s into patrol' : 't='+r.timestamp_ms}</span></div>`;
     }
-    setGuideNote(`${badgeText}: use this to explain whether the robot is moving through familiar territory or entering something unexpected.`);
+    setGuideNote(`${badgeText} (${n.toFixed(2)}): ${explanation}`);
   }
   document.getElementById('predict-results').innerHTML = html;
   updateNarrativePanels();

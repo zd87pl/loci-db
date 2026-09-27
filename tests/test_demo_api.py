@@ -91,3 +91,25 @@ def test_simulation_memory_stays_bounded_with_retention_cap() -> None:
     assert local_sim.memory_count <= cap
     # Eviction actually happened (without it there would be 100 points)
     assert local_sim.memory_count < 100
+
+
+def test_surprise_detection_flags_a_new_obstacle_on_the_route() -> None:
+    """Familiar patrol reads low surprise; an obstacle in view reads high."""
+    _advance_ticks(28)
+
+    def novelty() -> float:
+        response = client.post("/api/query/predict", json={"steps_ahead": 10})
+        response.raise_for_status()
+        return response.json()["novelty"]
+
+    assert novelty() < 0.3
+
+    # Same placement the guided demo uses: four waypoints ahead on the route.
+    ahead = sim.get_route_preview()[4]
+    client.post("/api/anomaly/place", json={"x": ahead["x"], "y": ahead["y"]}).raise_for_status()
+    for _ in range(5):  # drive on until the obstacle is within view
+        _advance_ticks(1)
+        if any(o["type"] == "anomaly" for o in sim.get_visible_objects(sim.robot_x, sim.robot_y)):
+            break
+
+    assert novelty() > 0.7

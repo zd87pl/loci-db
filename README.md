@@ -26,9 +26,9 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/zd87pl/loci-db/main/docs/assets/loci-demo.gif" alt="A simulated warehouse robot builds spatial memory while it patrols, then answers place-and-time and similarity queries" width="100%">
+  <img src="https://raw.githubusercontent.com/zd87pl/loci-db/main/docs/assets/loci-demo.gif" alt="A simulated warehouse robot builds spatial memory while it patrols, answers place-and-time and similarity queries, then flags a new obstacle as a surprise" width="100%">
   <br>
-  <sub>A warehouse robot builds memory as it patrols, then answers <i>"what happened in this aisle?"</i> and <i>"where have I seen this before?"</i> Runs locally in about 30 seconds: <a href="#run-the-demo">run the demo</a>.</sub>
+  <sub>A warehouse robot builds memory as it patrols, answers <i>"what happened in this aisle?"</i> and <i>"where have I seen this before?"</i>, then flags an obstacle it has never seen as a surprise. Runs locally in about 30 seconds: <a href="#run-the-demo">run the demo</a>.</sub>
 </p>
 
 ---

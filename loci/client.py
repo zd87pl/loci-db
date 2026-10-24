@@ -29,7 +29,7 @@ from loci.retrieval.predict import PredictRetrieveResult, PredictThenRetrieve
 from loci.retrieval.predict import predict_and_retrieve as _predict_and_retrieve
 from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import AdaptiveResolution
-from loci.spatial.filtering import exact_payload_match
+from loci.spatial.filtering import exact_payload_match, exact_payload_ranges
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.decay import apply_decay
@@ -153,17 +153,20 @@ class LociClient:
     # ------------------------------------------------------------------
 
     def _discover_collections(self) -> None:
-        """Populate _known_collections from Qdrant (for read-only clients)."""
-        if self._known_collections:
-            return
+        """Refresh epoch collections so other writers and retention are visible.
+
+        Only replace the cache after a successful listing. Discovery errors
+        propagate so an unavailable backend cannot look like an empty database.
+        """
         prefix = f"{self._collection_prefix}loci_" if self._collection_prefix else "loci_"
-        try:
-            response = self._qdrant.get_collections()
-            for col in response.collections:
-                if col.name.startswith(prefix):
-                    self._known_collections.add(col.name)
-        except Exception:
-            logger.debug("Failed to discover collections", exc_info=True)
+        response = self._retry(self._qdrant.get_collections)
+        discovered: set[str] = set()
+        for col in response.collections:
+            if col.name.startswith(prefix):
+                with contextlib.suppress(ValueError):
+                    if col.name == self._col_name(int(col.name[len(prefix) :])):
+                        discovered.add(col.name)
+        self._known_collections = discovered
 
     def _ensure_collection(self, name: str) -> None:
         """Create a Qdrant collection if it does not already exist (idempotent)."""
@@ -176,6 +179,10 @@ class LociClient:
             exists = True
         except UnexpectedResponse as exc:
             if exc.status_code != 404:
+                raise
+        except ValueError as exc:
+            # Qdrant's embedded backend reports missing collections this way.
+            if str(exc) != f"Collection {name} not found":
                 raise
 
         if not exists:
@@ -207,6 +214,12 @@ class LociClient:
                 field_name="scene_id",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
+            for field in ("x", "y", "z", "confidence"):
+                self._qdrant.create_payload_index(
+                    collection_name=name,
+                    field_name=field,
+                    field_schema=PayloadSchemaType.FLOAT,
+                )
 
         self._known_collections.add(name)
 
@@ -271,6 +284,8 @@ class LociClient:
         Returns:
             List of assigned IDs (same order as *states*).
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("insert_batch is not supported in cloud mode")
         groups: dict[str, list[PointStruct]] = {}
         id_by_index: dict[int, str] = {}
         scene_chains: dict[str, tuple[str, str]] = {}  # scene_id → (latest point_id, collection)
@@ -364,15 +379,10 @@ class LociClient:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
         """
         if self._cloud is not None:
-            _advanced = (
-                _extra_payload_filter is not None
-                or _epoch_ids is not None
-                or min_confidence is not None
-            )
+            _advanced = _extra_payload_filter is not None or _epoch_ids is not None
             if _advanced:
                 raise CloudModeUnsupportedError(
-                    "advanced filtering (payload filters, epoch ids, min_confidence) "
-                    "is not supported in cloud mode"
+                    "advanced filtering (payload filters, epoch ids) is not supported in cloud mode"
                 )
             return self._cloud.query(
                 vector=vector,
@@ -380,6 +390,7 @@ class LociClient:
                 time_window_ms=time_window_ms,
                 limit=limit,
                 overlap_factor=overlap_factor,
+                min_confidence=min_confidence,
             )
 
         return [
@@ -409,6 +420,9 @@ class LociClient:
         min_confidence: float | None = None,
     ) -> list[ScoredWorldState]:
         """Search for nearest neighbours and return scores alongside states."""
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("query_scored is not supported in cloud mode")
+        exact_ranges = exact_payload_ranges(spatial_bounds, time_window_ms, min_confidence)
         self._discover_collections()
 
         if time_window_ms is not None:
@@ -447,13 +461,10 @@ class LociClient:
                 field = self._hilbert.payload_field(query_resolution)
                 must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
 
-            if time_window_ms is not None:
-                must_conditions.append(
-                    FieldCondition(
-                        key="timestamp_ms",
-                        range=Range(gte=start_ms, lte=end_ms),
-                    )
-                )
+            must_conditions.extend(
+                FieldCondition(key=key, range=Range(**bounds))
+                for key, bounds in exact_ranges.items()
+            )
 
             must_conditions.extend(extra_filter_to_conditions(_extra_payload_filter))
 
@@ -468,12 +479,20 @@ class LociClient:
                     with_vectors=True,
                 )
                 hits = resp.points
-            except Exception:  # noqa: S112  # retry loop across shards
+            except UnexpectedResponse as exc:
+                if exc.status_code != 404:
+                    raise
+                self._known_collections.discard(col)
+                continue
+            except ValueError as exc:
+                if str(exc) != f"Collection {col} not found":
+                    raise
+                self._known_collections.discard(col)
                 continue
             for hit in hits:
                 all_results.append(
                     {
-                        "score": hit.score,
+                        "score": -hit.score if self._distance == Distance.EUCLID else hit.score,
                         "timestamp_ms": hit.payload.get("timestamp_ms", 0),
                         "payload": hit.payload,
                         "vector": hit.vector,
@@ -494,7 +513,12 @@ class LociClient:
             ]
 
         now_ms = int(time.time() * 1000)
-        apply_decay(all_results, now_ms, self._decay_lambda)
+        apply_decay(
+            all_results,
+            now_ms,
+            self._decay_lambda,
+            distance="euclidean" if self._distance == Distance.EUCLID else "cosine",
+        )
         all_results = all_results[:limit]
 
         return [
@@ -550,6 +574,8 @@ class LociClient:
             :class:`PredictRetrieveResult` when current_position is set,
             otherwise a plain list of :class:`WorldState`.
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("predict_and_retrieve is not supported in cloud mode")
         if current_position is not None or return_prediction:
             ptr = PredictThenRetrieve(self, calibrator=calibrator)
             return ptr.retrieve(
@@ -594,6 +620,8 @@ class LociClient:
         Returns:
             List of :class:`WorldState` at the finest available scale.
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("funnel_query is not supported in cloud mode")
         from loci.retrieval.funnel import funnel_search
 
         return funnel_search(self, vector, spatial_bounds, time_window_ms, limit)
@@ -621,6 +649,8 @@ class LociClient:
         Returns:
             Ordered list of states from oldest to newest.
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("get_trajectory is not supported in cloud mode")
         self._discover_collections()
         anchor = self._get_state_by_id(state_id)
         if anchor is None:
@@ -685,6 +715,8 @@ class LociClient:
         Returns:
             List of :class:`WorldState` sorted by timestamp.
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("get_causal_context is not supported in cloud mode")
         self._discover_collections()
         anchor = self._get_state_by_id(state_id)
         if anchor is None or not anchor.scene_id:
@@ -731,12 +763,19 @@ class LociClient:
     def _maybe_purge(self) -> None:
         if self._retention is None:
             return
+
+        def delete_collection(name: str) -> None:
+            if self._qdrant.delete_collection(name) is False:
+                raise RuntimeError(f"Backend did not delete collection {name}")
+
         try:
-            self._retention.maybe_purge(
+            self._discover_collections()
+            dropped = self._retention.maybe_purge(
                 active_epochs=self._list_active_epochs(),
                 now_ms=int(time.time() * 1000),
-                delete_fn=self._qdrant.delete_collection,
+                delete_fn=delete_collection,
             )
+            self._known_collections.difference_update(dropped)
         except Exception as exc:
             logger.warning("Retention purge failed: %s", exc)
 

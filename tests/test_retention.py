@@ -135,3 +135,143 @@ async def test_retention_manager_async():
         delete_fn=store.delete,
     )
     assert dropped == ["loci_0", "loci_1", "loci_2", "loci_3", "loci_4"]
+
+
+def _state_at(timestamp_ms):
+    from loci.schema import WorldState
+
+    return WorldState(
+        x=0.5, y=0.5, z=0.5, timestamp_ms=timestamp_ms, vector=[1.0, 0.0], scene_id=""
+    )
+
+
+@pytest.mark.parametrize("prefix", ["", "tenant_a_"])
+def test_local_reinsert_into_purged_epoch_recreates_collection(prefix):
+    from loci.local_client import LocalLociClient
+
+    client = LocalLociClient(
+        vector_size=2, collection_prefix=prefix, retention_policy=RetentionPolicy(max_epochs=1)
+    )
+    client.insert(_state_at(0))
+    newest = client.insert(_state_at(5000))
+    assert client._known_collections == {f"{prefix}loci_1"}
+    assert not client.store.collection_exists(f"{prefix}loci_0")
+    # An out-of-order arrival must be inserted safely, then expire under policy.
+    client.insert(_state_at(1000))
+    assert client._known_collections == {f"{prefix}loci_1"}
+    assert [hit.id for hit in client.query([1.0, 0.0])] == [newest]
+
+
+def test_local_failed_purge_keeps_cached_collection():
+    from unittest.mock import patch
+
+    from loci.local_client import LocalLociClient
+
+    client = LocalLociClient(vector_size=2)
+    client.insert(_state_at(0))
+    client.insert(_state_at(5000))
+    client._retention = RetentionManager(RetentionPolicy(max_epochs=1), epoch_size_ms=5000)
+    with patch.object(client.store, "delete_collection", side_effect=RuntimeError("unavailable")):
+        client._maybe_purge()
+    assert client._known_collections == {"loci_0", "loci_1"}
+    assert client.store.collection_exists("loci_0")
+
+
+@pytest.mark.parametrize("prefix", ["", "tenant_a_"])
+def test_qdrant_reinsert_into_purged_epoch_recreates_collection(prefix):
+    from unittest.mock import patch
+
+    from qdrant_client import QdrantClient
+
+    from loci.client import LociClient
+
+    with contextlib.closing(QdrantClient(":memory:")) as backend:
+        with patch("loci.client.QdrantClient", return_value=backend):
+            client = LociClient(
+                qdrant_url="http://unused",
+                vector_size=2,
+                collection_prefix=prefix,
+                retention_policy=RetentionPolicy(max_epochs=1),
+            )
+        client.insert(_state_at(0))
+        newest = client.insert(_state_at(5000))
+        assert client._known_collections == {f"{prefix}loci_1"}
+        assert not backend.collection_exists(f"{prefix}loci_0")
+        client.insert(_state_at(1000))
+        assert client._known_collections == {f"{prefix}loci_1"}
+        assert [hit.id for hit in client.query([1.0, 0.0])] == [newest]
+
+
+@pytest.mark.parametrize("prefix", ["", "tenant_a_"])
+@pytest.mark.asyncio
+async def test_async_qdrant_reinsert_into_purged_epoch_recreates_collection(prefix):
+    from unittest.mock import patch
+
+    from qdrant_client import AsyncQdrantClient
+
+    from loci.async_client import AsyncLociClient
+
+    backend = AsyncQdrantClient(":memory:")
+    try:
+        with patch("loci.async_client.AsyncQdrantClient", return_value=backend):
+            client = AsyncLociClient(
+                qdrant_url="http://unused",
+                vector_size=2,
+                collection_prefix=prefix,
+                retention_policy=RetentionPolicy(max_epochs=1),
+            )
+        await client.insert(_state_at(0))
+        newest = await client.insert(_state_at(5000))
+        assert client._known_collections == {f"{prefix}loci_1"}
+        assert not await backend.collection_exists(f"{prefix}loci_0")
+        await client.insert(_state_at(1000))
+        assert client._known_collections == {f"{prefix}loci_1"}
+        hits = await client.query([1.0, 0.0])
+        assert [hit.id for hit in hits] == [newest]
+    finally:
+        await backend.close()
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("failure", ["raise", "false"])
+@pytest.mark.asyncio
+async def test_failed_backend_purge_keeps_cached_collection(async_mode, failure):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from loci.async_client import AsyncLociClient
+    from loci.client import LociClient
+
+    backend = MagicMock()
+    listing = SimpleNamespace(
+        collections=[SimpleNamespace(name=f"tenant_a_loci_{e}") for e in (0, 1)]
+    )
+    delete_options = (
+        {"side_effect": RuntimeError("unavailable")}
+        if failure == "raise"
+        else {
+            "return_value": False,
+        }
+    )
+    if async_mode:
+        backend.get_collections = AsyncMock(return_value=listing)
+        backend.delete_collection = AsyncMock(**delete_options)
+        with patch("loci.async_client.AsyncQdrantClient", return_value=backend):
+            client = AsyncLociClient(
+                qdrant_url="http://unused",
+                collection_prefix="tenant_a_",
+                retention_policy=RetentionPolicy(max_epochs=1),
+            )
+        await client._maybe_purge()
+    else:
+        backend.get_collections.return_value = listing
+        backend.delete_collection = MagicMock(**delete_options)
+        with patch("loci.client.QdrantClient", return_value=backend):
+            client = LociClient(
+                qdrant_url="http://unused",
+                collection_prefix="tenant_a_",
+                retention_policy=RetentionPolicy(max_epochs=1),
+            )
+        client._maybe_purge()
+    assert client._known_collections == {"tenant_a_loci_0", "tenant_a_loci_1"}
+    backend.delete_collection.assert_called_once_with("tenant_a_loci_0")

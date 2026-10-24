@@ -233,6 +233,11 @@ def _fake_result() -> SimpleNamespace:
         timestamp_ms=1000,
         scene_id="s",
         vector=VEC,
+        scale_level="frame",
+        confidence=0.8,
+        metadata={"source": "robot"},
+        prev_state_id="before",
+        next_state_id="after",
     )
 
 
@@ -251,6 +256,11 @@ def test_query_returns_vectors_by_default(client):
         assert resp.status_code == 200
         results = resp.json()["results"]
         assert results[0]["vector"] == VEC
+        assert results[0]["scale_level"] == "frame"
+        assert results[0]["confidence"] == 0.8
+        assert results[0]["metadata"] == {"source": "robot"}
+        assert results[0]["prev_state_id"] == "before"
+        assert results[0]["next_state_id"] == "after"
     finally:
         mock_client.query.return_value = []
 

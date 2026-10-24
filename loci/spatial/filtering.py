@@ -7,6 +7,41 @@ from typing import Any
 from loci.spatial.hilbert import SpatialBounds
 
 
+def exact_payload_ranges(
+    spatial_bounds: SpatialBounds | dict | None = None,
+    time_window_ms: tuple[int, int] | None = None,
+    min_confidence: float | None = None,
+) -> dict[str, dict[str, float]]:
+    """Build exact ranges to apply before backend top-k selection.
+
+    Hilbert buckets can include points outside the requested box. Filtering
+    only a bounded candidate list afterward can discard every result even
+    when qualifying points exist deeper in the index.
+    """
+    ranges: dict[str, dict[str, float]] = {}
+    if spatial_bounds is not None:
+        bounds = (
+            spatial_bounds
+            if isinstance(spatial_bounds, SpatialBounds)
+            else SpatialBounds.from_dict(spatial_bounds)
+        )
+        for axis in ("x", "y", "z"):
+            ranges[axis] = {
+                "gte": getattr(bounds, f"{axis}_min"),
+                "lte": getattr(bounds, f"{axis}_max"),
+            }
+    if time_window_ms is not None:
+        start_ms, end_ms = time_window_ms
+        if start_ms > end_ms:
+            raise ValueError("time_window_ms start must be <= end")
+        ranges["timestamp_ms"] = {"gte": start_ms, "lte": end_ms}
+    if min_confidence is not None:
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError("min_confidence must be in [0, 1]")
+        ranges["confidence"] = {"gte": min_confidence}
+    return ranges
+
+
 def exact_payload_match(
     payload: dict[str, Any],
     spatial_bounds: SpatialBounds | dict | None = None,

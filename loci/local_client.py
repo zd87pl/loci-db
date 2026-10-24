@@ -26,7 +26,7 @@ from loci.payload_filters import extra_filter_to_memory
 from loci.retrieval.predict import PredictRetrieveResult
 from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import AdaptiveResolution
-from loci.spatial.filtering import exact_payload_match
+from loci.spatial.filtering import exact_payload_match, exact_payload_ranges
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.decay import apply_decay
@@ -139,7 +139,7 @@ class LocalLociClient:
         return f"{self._collection_prefix}{base}" if self._collection_prefix else base
 
     def _ensure_collection(self, name: str) -> None:
-        if name in self._known_collections:
+        if name in self._known_collections and self._store.collection_exists(name):
             return
         self._store.create_collection(name, self._vector_size, self._distance)
         for r in self._hilbert.resolutions:
@@ -147,6 +147,8 @@ class LocalLociClient:
         self._store.create_payload_index(name, "timestamp_ms")
         self._store.create_payload_index(name, "scale_level")
         self._store.create_payload_index(name, "scene_id")
+        for field in ("x", "y", "z", "confidence"):
+            self._store.create_payload_index(name, field)
         self._known_collections.add(name)
 
     # ------------------------------------------------------------------
@@ -281,6 +283,7 @@ class LocalLociClient:
         """Search and return scored results for downstream reranking."""
         t_start = time.perf_counter()
         stats = QueryStats()
+        exact_ranges = exact_payload_ranges(spatial_bounds, time_window_ms, min_confidence)
 
         if time_window_ms is not None:
             start_ms, end_ms = time_window_ms
@@ -321,10 +324,15 @@ class LocalLociClient:
                 payload_filter[field] = {"any": hids}
                 stats.hilbert_ids_in_filter += len(hids)
 
-            if time_window_ms is not None:
-                payload_filter["timestamp_ms"] = {"gte": start_ms, "lte": end_ms}
-
             payload_filter.update(extra_filter_to_memory(_extra_payload_filter))
+            for key, bounds in exact_ranges.items():
+                if key in payload_filter:
+                    condition = payload_filter[key]
+                    if not isinstance(condition, dict):
+                        condition = {"any": [condition]}
+                    payload_filter[key] = {**condition, **bounds}
+                else:
+                    payload_filter[key] = bounds
 
             hits = self._store.search(
                 collection=col,
@@ -358,7 +366,7 @@ class LocalLociClient:
 
         # Decay and re-rank
         now_ms = int(time.time() * 1000)
-        apply_decay(all_results, now_ms, self._decay_lambda)
+        apply_decay(all_results, now_ms, self._decay_lambda, distance=self._distance)
         stats.decay_applied = self._decay_lambda > 0
         all_results = all_results[:limit]
 
@@ -518,11 +526,12 @@ class LocalLociClient:
         if self._retention is None:
             return
         try:
-            self._retention.maybe_purge(
+            dropped = self._retention.maybe_purge(
                 active_epochs=self._list_active_epochs(),
                 now_ms=int(time.time() * 1000),
                 delete_fn=self._store.delete_collection,
             )
+            self._known_collections.difference_update(dropped)
         except Exception as exc:
             logger.warning("Retention purge failed: %s", exc)
 

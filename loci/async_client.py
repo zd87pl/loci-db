@@ -29,7 +29,7 @@ from loci.payload_filters import extra_filter_to_conditions
 from loci.retrieval.predict import PredictRetrieveResult, rerank_prediction_candidates
 from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import AdaptiveResolution
-from loci.spatial.filtering import exact_payload_match
+from loci.spatial.filtering import exact_payload_match, exact_payload_ranges
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.decay import apply_decay
@@ -174,17 +174,18 @@ class AsyncLociClient:
     # ------------------------------------------------------------------
 
     async def _discover_collections(self) -> None:
-        """Populate _known_collections from Qdrant (for read-only clients)."""
-        if self._known_collections:
-            return
+        """Refresh epoch collections; preserve the cache and raise on failure."""
         prefix = f"{self._collection_prefix}loci_" if self._collection_prefix else "loci_"
-        try:
-            response = await self._qdrant.get_collections()
-            for col in response.collections:
-                if col.name.startswith(prefix):
-                    self._known_collections.add(col.name)
-        except Exception:
-            logger.debug("Failed to discover collections", exc_info=True)
+        known_before = self._known_collections.copy()
+        response = await self._retry(self._qdrant.get_collections)
+        discovered: set[str] = set()
+        for col in response.collections:
+            if col.name.startswith(prefix):
+                with contextlib.suppress(ValueError):
+                    if col.name == self._col_name(int(col.name[len(prefix) :])):
+                        discovered.add(col.name)
+        # Preserve collections created by this client while discovery awaited I/O.
+        self._known_collections = discovered | (self._known_collections - known_before)
 
     async def _ensure_collection(self, name: str) -> None:
         """Create a Qdrant collection if it does not already exist (idempotent, async-safe)."""
@@ -206,6 +207,10 @@ class AsyncLociClient:
             except UnexpectedResponse as exc:
                 if exc.status_code != 404:
                     raise
+            except ValueError as exc:
+                # Qdrant's embedded backend reports missing collections this way.
+                if str(exc) != f"Collection {name} not found":
+                    raise
 
             if not exists:
                 await self._qdrant.create_collection(
@@ -223,6 +228,14 @@ class AsyncLociClient:
                     )
                     for r in self._hilbert.resolutions
                 ]
+                index_tasks.extend(
+                    self._qdrant.create_payload_index(
+                        collection_name=name,
+                        field_name=field,
+                        field_schema=PayloadSchemaType.FLOAT,
+                    )
+                    for field in ("x", "y", "z", "confidence")
+                )
                 index_tasks.extend(
                     [
                         self._qdrant.create_payload_index(
@@ -303,6 +316,8 @@ class AsyncLociClient:
         Returns:
             List of assigned IDs (same order as *states*).
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("insert_batch is not supported in cloud mode")
         groups: dict[str, list[PointStruct]] = {}
         ids: list[str] = []
 
@@ -412,6 +427,8 @@ class AsyncLociClient:
                 spatial_bounds=spatial_bounds,
                 time_window_ms=time_window_ms,
                 limit=limit,
+                overlap_factor=overlap_factor,
+                min_confidence=min_confidence,
             )
 
         return [
@@ -441,6 +458,9 @@ class AsyncLociClient:
         min_confidence: float | None = None,
     ) -> list[ScoredWorldState]:
         """Search and return scored results for downstream reranking."""
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("query_scored is not supported in cloud mode")
+        exact_ranges = exact_payload_ranges(spatial_bounds, time_window_ms, min_confidence)
         await self._discover_collections()
 
         if time_window_ms is not None:
@@ -482,13 +502,10 @@ class AsyncLociClient:
                 field = self._hilbert.payload_field(query_resolution)
                 must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
 
-            if time_window_ms is not None:
-                must_conditions.append(
-                    FieldCondition(
-                        key="timestamp_ms",
-                        range=Range(gte=start_ms, lte=end_ms),
-                    )
-                )
+            must_conditions.extend(
+                FieldCondition(key=key, range=Range(**bounds))
+                for key, bounds in exact_ranges.items()
+            )
 
             must_conditions.extend(extra_filter_to_conditions(_extra_payload_filter))
 
@@ -505,7 +522,7 @@ class AsyncLociClient:
                 hits = resp.points
                 return [
                     {
-                        "score": hit.score,
+                        "score": -hit.score if self._distance == Distance.EUCLID else hit.score,
                         "timestamp_ms": hit.payload.get("timestamp_ms", 0),
                         "payload": hit.payload,
                         "vector": hit.vector,
@@ -513,8 +530,15 @@ class AsyncLociClient:
                     }
                     for hit in hits
                 ]
-            except Exception:
-                logger.debug("Search failed on %s", col, exc_info=True)
+            except UnexpectedResponse as exc:
+                if exc.status_code != 404:
+                    raise
+                self._known_collections.discard(col)
+                return []
+            except ValueError as exc:
+                if str(exc) != f"Collection {col} not found":
+                    raise
+                self._known_collections.discard(col)
                 return []
 
         shard_results = await asyncio.gather(
@@ -538,7 +562,12 @@ class AsyncLociClient:
 
         # Apply temporal decay and re-rank
         now_ms = int(time.time() * 1000)
-        apply_decay(all_results, now_ms, self._decay_lambda)
+        apply_decay(
+            all_results,
+            now_ms,
+            self._decay_lambda,
+            distance="euclidean" if self._distance == Distance.EUCLID else "cosine",
+        )
         all_results = all_results[:limit]
 
         return [
@@ -592,6 +621,8 @@ class AsyncLociClient:
             or ``return_prediction`` is ``True``, otherwise a plain list of
             :class:`WorldState`.
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("predict_and_retrieve is not supported in cloud mode")
         t_predictor = time.perf_counter()
         predicted_vector = predictor_fn(context_vector)
         predictor_call_ms = (time.perf_counter() - t_predictor) * 1000
@@ -679,6 +710,8 @@ class AsyncLociClient:
         Returns:
             List of :class:`WorldState` at the finest available scale.
         """
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("funnel_query is not supported in cloud mode")
         from loci.retrieval.funnel import async_funnel_search
 
         return await async_funnel_search(self, vector, spatial_bounds, time_window_ms, limit)
@@ -690,6 +723,8 @@ class AsyncLociClient:
         steps_forward: int = 10,
     ) -> list[WorldState]:
         """Reconstruct a trajectory using scroll API with scene_id filter."""
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("get_trajectory is not supported in cloud mode")
         await self._discover_collections()
         anchor = await self._get_state_by_id(state_id)
         if anchor is None:
@@ -749,6 +784,8 @@ class AsyncLociClient:
         window_ms: int = 5000,
     ) -> list[WorldState]:
         """Return all states within ±window_ms in the same scene_id."""
+        if self._cloud is not None:
+            raise CloudModeUnsupportedError("get_causal_context is not supported in cloud mode")
         await self._discover_collections()
         anchor = await self._get_state_by_id(state_id)
         if anchor is None or not anchor.scene_id:
@@ -865,12 +902,19 @@ class AsyncLociClient:
     async def _maybe_purge(self) -> None:
         if self._retention is None:
             return
+
+        async def delete_collection(name: str) -> None:
+            if await self._qdrant.delete_collection(name) is False:
+                raise RuntimeError(f"Backend did not delete collection {name}")
+
         try:
-            await self._retention.maybe_purge_async(
+            await self._discover_collections()
+            dropped = await self._retention.maybe_purge_async(
                 active_epochs=self._list_active_epochs(),
                 now_ms=int(time.time() * 1000),
-                delete_fn=self._qdrant.delete_collection,
+                delete_fn=delete_collection,
             )
+            self._known_collections.difference_update(dropped)
         except Exception as exc:
             logger.warning("Retention purge failed: %s", exc)
 

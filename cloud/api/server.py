@@ -180,6 +180,9 @@ class InsertRequest(BaseModel):
     scene_id: str = Field(..., min_length=1, max_length=256, description="Scene identifier")
     scale_level: str = Field("patch", max_length=64, description="Spatial scale level")
     confidence: float = Field(1.0, ge=0.0, le=1.0, description="Detection confidence")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Caller-supplied metadata")
+    prev_state_id: str | None = None
+    next_state_id: str | None = None
 
     @field_validator("vector")
     @classmethod
@@ -192,7 +195,15 @@ class InsertRequest(BaseModel):
     def check_metadata_size(self) -> InsertRequest:
         import json
 
-        meta = json.dumps({"scene_id": self.scene_id, "scale_level": self.scale_level})
+        meta = json.dumps(
+            {
+                "scene_id": self.scene_id,
+                "scale_level": self.scale_level,
+                "metadata": self.metadata,
+                "prev_state_id": self.prev_state_id,
+                "next_state_id": self.next_state_id,
+            }
+        )
         if len(meta.encode()) > MAX_METADATA_BYTES:
             raise ValueError(f"metadata exceeds {MAX_METADATA_BYTES} bytes")
         return self
@@ -210,6 +221,7 @@ class QueryRequest(BaseModel):
     time_end_ms: int | None = Field(None, ge=0)
     limit: int = Field(10, ge=1, le=1000)
     overlap_factor: float = Field(1.0, ge=0.1, le=10.0)
+    min_confidence: float | None = Field(None, ge=0.0, le=1.0)
     include_vectors: bool = Field(
         True, description="Return the stored embedding vector with each result"
     )
@@ -260,6 +272,11 @@ class QueryResult(BaseModel):
     z: float
     timestamp_ms: int
     scene_id: str
+    scale_level: str = "patch"
+    confidence: float = 1.0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    prev_state_id: str | None = None
+    next_state_id: str | None = None
     vector: list[float] = Field(
         default_factory=list,
         description="Embedding vector; empty unless include_vectors was set",
@@ -361,6 +378,9 @@ def insert(
             scene_id=req.scene_id,
             scale_level=req.scale_level,
             confidence=req.confidence,
+            metadata=req.metadata,
+            prev_state_id=req.prev_state_id,
+            next_state_id=req.next_state_id,
         )
     except ValueError as exc:
         # WorldState enforces invariants Pydantic doesn't fully mirror (e.g.
@@ -399,6 +419,7 @@ def query(
         time_window_ms=time_window,
         limit=req.limit,
         overlap_factor=req.overlap_factor,
+        min_confidence=req.min_confidence,
     )
 
     return QueryResponse(
@@ -410,6 +431,11 @@ def query(
                 z=r.z,
                 timestamp_ms=r.timestamp_ms,
                 scene_id=r.scene_id,
+                scale_level=r.scale_level,
+                confidence=r.confidence,
+                metadata=r.metadata,
+                prev_state_id=r.prev_state_id,
+                next_state_id=r.next_state_id,
                 vector=list(r.vector) if req.include_vectors else [],
             )
             for r in results

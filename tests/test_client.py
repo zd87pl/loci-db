@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,6 +34,11 @@ def mock_qdrant():
             headers=httpx.Headers(),
         )
         instance.get_collection.side_effect = resp_404
+        collections: set[str] = set()
+        instance.create_collection.side_effect = lambda **kw: collections.add(kw["collection_name"])
+        instance.get_collections.side_effect = lambda: SimpleNamespace(
+            collections=[SimpleNamespace(name=name) for name in collections]
+        )
 
         # query_points returns empty by default
         _empty_qr = MagicMock()
@@ -132,6 +138,17 @@ class TestEnsureCollection:
         assert "scale_level" in field_names
         assert "scene_id" in field_names
 
+    def test_creates_exact_filter_indexes(self, client, mock_qdrant):
+        from qdrant_client.models import PayloadSchemaType
+
+        client._ensure_collection("loci_0")
+        indexed_fields = {
+            call.kwargs["field_name"]: call.kwargs["field_schema"]
+            for call in mock_qdrant.create_payload_index.call_args_list
+        }
+        for field in ("x", "y", "z", "confidence"):
+            assert indexed_fields[field] == PayloadSchemaType.FLOAT
+
 
 # ---------------------------------------------------------------------------
 # insert
@@ -182,7 +199,7 @@ class TestInsert:
         assert payload["z"] == 0.5
 
     def test_find_latest_predecessor_paginates_scroll_results(self, client, mock_qdrant):
-        client._known_collections = {"loci_0"}
+        client._ensure_collection("loci_0")
 
         page_1 = []
         for i in range(256):

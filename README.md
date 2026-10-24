@@ -11,32 +11,31 @@
 
 ## The Problem
 
-Modern world models — V-JEPA 2, DreamerV3, GAIA-1, UniSim — produce embeddings
-where every vector has an implicit **4D spatiotemporal address** `(x, y, z, t)`.
-Existing vector databases (Qdrant, Milvus, Weaviate) treat all embedding dimensions
-equally: a spatial query requires 3+ float-range payload filters evaluated
-independently, time-based retrieval has no native sharding, and there is no
-concept of "predict the future then find what's nearby."
+Applications that store world-model embeddings often need to attach a position,
+timestamp, and source observation to each vector. They also need to retrieve
+relevant past observations within explicit spatial and temporal bounds. This
+requires an application-level contract for coordinates, embedding compatibility,
+and retrieval behavior alongside the vector store.
 
 ## The Solution
 
 LOCI is a middleware layer on top of [Qdrant](https://qdrant.tech) that makes
-spatiotemporal structure **first-class** through three novel primitives:
+spatiotemporal structure explicit through three capabilities:
 
 ### 1. Multi-Resolution Hilbert Bucketing
 
 Encode `(x, y, z, t)` at multiple Hilbert resolutions (p=4, 8, 12).
-Spatial bounding-box queries use a Hilbert integer pre-filter with overlap, then
-apply an exact payload post-filter as the authoritative geometric check. By
+Spatial bounding-box queries combine a Hilbert integer pre-filter with exact
+coordinate ranges in Qdrant, followed by a geometric post-check. By
 default queries start at the coarsest indexed resolution; with `adaptive=True`,
 dense regions can be promoted to finer Hilbert resolutions at query time.
 
 ```
-         Naive Qdrant               LOCI
+         Range filters             LOCI pre-filter
     ┌──────────────────┐     ┌──────────────────┐
     │ x_min ≤ x ≤ x_max│     │                  │
     │ y_min ≤ y ≤ y_max│ →   │ hilbert_r4 ∈ {…} │
-    │ z_min ≤ z ≤ z_max│     │  (single filter)  │
+    │ z_min ≤ z ≤ z_max│     │ + exact ranges   │
     └──────────────────┘     └──────────────────┘
 ```
 
@@ -49,8 +48,9 @@ all shards are searched **concurrently** via `asyncio.gather`.
 
 ### 3. Predict-then-Retrieve with Novelty Detection
 
-An **atomic API call** that composes a user-supplied world model with
-vector search, returning both results and a **novelty score**:
+A single API call composes a user-supplied world model with vector search,
+returning results and a **retrieval-based novelty score**. It is not a storage
+transaction, and the score needs task-specific evaluation before use:
 
 ```python
 result = client.predict_and_retrieve(
@@ -64,9 +64,10 @@ print(f"Novelty: {result.prediction_novelty:.2f}")
 # 1.0 = "This is new territory"
 ```
 
-By default this searches stored history for analogs to the predicted future
-embedding. Pass `search_time_window_ms=(start, end)` only when you explicitly
-want to restrict retrieval to an absolute timestamp range.
+By default this searches stored observations without a timestamp restriction
+for analogs to the predicted future embedding. Pass
+`search_time_window_ms=(start, end)` to restrict retrieval to an absolute range,
+including a historical cutoff when evaluating predictions.
 
 ## Quick Start
 
@@ -91,14 +92,16 @@ Once running, insert and query world states via the HTTP API:
 curl http://localhost:8000/health
 
 # Insert a world state (512-dim vector)
+python3 -c 'import json; print(json.dumps({"x":0.5,"y":0.3,"z":0.8,"timestamp_ms":1700000000000,"vector":[0.1]*512,"scene_id":"s1"}))' | \
 curl -X POST http://localhost:8000/insert \
   -H 'Content-Type: application/json' \
-  -d '{"x":0.5,"y":0.3,"z":0.8,"timestamp_ms":1700000000000,"vector":[0.1],"scene_id":"s1"}'
+  --data-binary @-
 
 # Query (spatial + time window)
+python3 -c 'import json; print(json.dumps({"vector":[0.1]*512,"x_min":0.0,"x_max":1.0,"time_start_ms":1700000000000,"time_end_ms":1700000005000,"limit":10}))' | \
 curl -X POST http://localhost:8000/query \
   -H 'Content-Type: application/json' \
-  -d '{"vector":[0.1],"x_min":0.0,"x_max":1.0,"limit":10}'
+  --data-binary @-
 ```
 
 Interactive API docs: `http://localhost:8000/docs`
@@ -138,7 +141,7 @@ results = client.query(
 )
 ```
 
-### With Qdrant (production)
+### With a persistent Qdrant backend
 
 ```bash
 pip install loci-stdb
@@ -210,6 +213,11 @@ async with AsyncLociClient(
 
 ### World Model Adapters
 
+These helpers convert supplied model outputs to `WorldState` objects; they do
+not load or validate a production model pipeline. The V-JEPA 2 helper maps
+tubelet grid indices to normalized coordinates, not calibrated 3D positions.
+Applications must define and validate that mapping.
+
 ```python
 from loci.adapters.vjepa2 import VJEPA2Adapter
 from loci.adapters.dreamer import DreamerV3Adapter
@@ -230,7 +238,9 @@ ws = adapter.from_numpy(embedding, position, ts, scene_id)
 
 ## Performance
 
-**Raw spatiotemporal query latency: ~75µs p50** (label-filtered, 100 objects, 128-dim, Apple Silicon).
+The following reported local measurements use the **in-memory backend** with
+128-dimensional vectors on Apple Silicon. They do not establish live-Qdrant
+latency, a general speedup, or customer-scale performance.
 
 | N objects | Query type | P50 | P99 |
 |--:|:--|--:|--:|
@@ -249,13 +259,13 @@ Run the retrieval benchmark on your hardware:
 python benchmarks/benchmark_retrieval.py
 ```
 
-Run the world-model proof harness:
+Run the synthetic world-model regression harness:
 
 ```bash
 python benchmarks/world_model_harness.py --quick
 ```
 
-For a LOCI-vs-naive-Qdrant comparison benchmark:
+For the existing LOCI-vs-naive-Qdrant comparison benchmark:
 
 ```bash
 # In-memory (no Qdrant server needed):
@@ -266,29 +276,21 @@ QDRANT_URL=http://localhost:6333 python benchmarks/vs_naive_qdrant.py
 ```
 
 Results are written to `benchmarks/results/` and printed as markdown tables.
+Before making performance claims, compare the current client on live Qdrant
+against tuned range filters and a time-sharding-only baseline at equal recall.
+See the [implementation readiness plan](docs/IMPLEMENTATION_READINESS.md).
 
-## Why not SpatCode?
+## Research and Alternative Approaches
 
-SpatCode (WWW 2026, arXiv 2601.09530) encodes coordinates into the embedding
-space for soft/fuzzy retrieval via RoPE-style positional encoding. LOCI uses
-Hilbert bucketing for **exact geometric range queries** with deterministic behavior.
+LOCI combines explicit geometric bounds, per-epoch routing, and retrieval using
+predicted embeddings. Related systems such as SpatCode and TANNS deserve
+task-matched evaluation; this repository does not establish superiority over
+them or a comprehensive claim of research priority.
 
-**Use SpatCode** when semantic proximity matters (e.g., "find images taken
-near this location").
-
-**Use LOCI** when physical boundaries matter (e.g., "find all observations
-within this 3D bounding box in the last 5 seconds").
-
-## Why not TANNS?
-
-TANNS (ICDE 2025) builds a single graph managing all timestamps internally
-with a Timestamp Graph structure. LOCI uses collection-level sharding with
-storage tiering.
-
-**Use TANNS** for single-session temporal ANN where all data fits in one graph.
-
-**Use LOCI** when you need cross-session persistence, multi-agent memory sharing,
-hot/warm/cold storage tiering, or predict-then-retrieve.
+Collection-level temporal sharding is implemented. Automatic hot/warm/cold
+storage migration is planned. Exact geometric filtering controls which results
+are eligible; ANN candidate retrieval still requires recall measurement.
+See [implementation and research claims](docs/NOVELTY.md).
 
 ## Architecture
 
@@ -320,7 +322,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design document.
 ## Documentation
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — System design
-- [docs/NOVELTY.md](docs/NOVELTY.md) — Novelty claims vs prior art
+- [docs/NOVELTY.md](docs/NOVELTY.md) — Implemented capabilities and research hypotheses
+- [docs/IMPLEMENTATION_READINESS.md](docs/IMPLEMENTATION_READINESS.md) — Pilot scope, evidence, and delivery gates
 - [docs/BENCHMARK_METHODOLOGY.md](docs/BENCHMARK_METHODOLOGY.md) — Benchmark replication guide
 - [docs/WORLD_MODEL_INTEGRATION.md](docs/WORLD_MODEL_INTEGRATION.md) — Integration guides
 

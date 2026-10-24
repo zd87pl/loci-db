@@ -1,71 +1,103 @@
-# LOCI — Novelty Claims vs Prior Art
+# LOCI — Implemented Capabilities and Research Hypotheses
 
-## Comparison Table
+LOCI combines spatiotemporal indexing, temporal collection routing, and
+retrieval using a predicted embedding. This document describes that composition
+and the evidence still needed. It does not establish that LOCI is the first
+system to provide these ideas, that related work lacks them, or that the
+combination is faster or more useful on every workload.
 
-| Capability | LOCI | SpatCode | TANNS | WorldMem | RA-DT |
-|---|:---:|:---:|:---:|:---:|:---:|
-| 4D Hilbert spatial bucketing | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Multi-resolution overlap | ✓ | soft | ✗ | ✗ | ✗ |
-| Temporal hot/cold sharding | ✓ | ✗ | partial | ✗ | ✗ |
-| Predict-then-retrieve | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Novelty detection score | ✓ | ✗ | ✗ | ✗ | ✗ |
-| World model adapters | ✓ | ✗ | ✗ | ✗ | ✗ |
-| Cross-session persistence | ✓ | ✗ | ✗ | ✗ | ✗ |
+## Implementation Status
 
-## Per-Innovation Analysis
+| Capability | Implemented behavior | Evidence still needed |
+|---|---|---|
+| 4D Hilbert bucketing | Encodes normalized coordinates and epoch-local time at multiple resolutions | Benefit over tuned Qdrant range filters at matched recall |
+| Overlap and geometric filtering | Expands candidate buckets and applies exact bounds before top-k, with a post-check | Recall across boundaries, selectivities, distributions, and scales |
+| Temporal collection routing | Stores epochs separately and searches relevant collections | Long-retention operational cost and bounded fan-out |
+| Predict-then-retrieve | Calls a supplied predictor, searches analogs, and reports a novelty score | Held-out improvement with a real predictor and real observations |
+| Model-output adapters | Converts supplied V-JEPA 2, DreamerV3, and generic arrays into WorldState records | Validated end-to-end model integration and coordinate semantics |
+| Persistence | Qdrant stores records across process sessions | Backup/restore, recovery, concurrency, and retention validation |
+| Hot/warm/cold migration | Planned | Lifecycle policy, implementation, and recovery tests |
 
-### 1. 4D Hilbert Spatial Bucketing
+## 1. Spatial Indexing
 
-**What exists:** Traditional vector databases use independent float-range filters for each spatial dimension (x, y, z, t). This requires 3-4 separate filter conditions ANDed together, each traversing a separate index.
+A Hilbert index maps a quantized 4D coordinate to an integer. LOCI stores
+multiple resolutions and combines an integer membership pre-filter with exact
+coordinate/time/confidence ranges in the backend and a final geometric check.
+The default query resolution is coarse; adaptive selection can choose finer
+stored resolutions.
 
-**What LOCI adds:** A single 4D Hilbert space-filling curve maps (x, y, z, t_normalized) to a single integer. Spatial queries become a single `MatchAny` filter on one indexed integer field instead of 3-4 independent range filters.
+The hypothesis is that this routing/filtering combination reduces work for
+some spatial and temporal query distributions. Integer membership is not
+inherently cheaper than several indexed ranges: bucket enumeration, payload
+index behavior, selectivity, ANN settings, and shard fan-out all affect cost.
+No universal complexity reduction or 5–20x speedup is established here.
 
-**Why it matters:** Reduces spatial pre-filtering from O(n_dims) index traversals to a single set-membership test. For tight spatial queries at N=100k, this yields 5-20x query speedup.
+Overlap addresses candidate coverage near quantized boundaries. Exact ranges
+exclude ineligible records before top-k; they do not guarantee exhaustive ANN
+retrieval. Measure recall@k against exact ground truth at the same ranking
+objective, including temporal decay when it is enabled.
 
-### 2. Multi-Resolution Overlap
+## 2. Temporal Routing and Persistence
 
-**What exists:** SpatCode (WWW 2026) uses RoPE-style soft encoding that embeds coordinates directly into the embedding space for fuzzy/semantic spatial matching. Hard-filtering approaches (including naive Hilbert bucketing) suffer from boundary recall degradation.
+Epochs map to separate Qdrant collections, and explicit time windows limit
+the collections searched. Async clients can search those collections in
+parallel. Qdrant persistence allows stored records to survive client sessions.
 
-**What LOCI adds:** Points are encoded at three Hilbert resolutions (p=4, 8, 12). Queries use an integer Hilbert pre-filter with overlap_factor (default 1.2 = 20% expansion), then apply exact coordinate post-filtering. The default query path starts at the coarsest resolution, while `adaptive=True` can promote denser regions to finer stored resolutions.
+Retention policies can delete old epochs; automatic hot/warm/cold migration
+is not implemented. These mechanisms also introduce
+collection-count, metadata-discovery, fan-out, and concurrent-write costs.
+Cross-agent use requires compatible coordinate frames and embeddings, tenant
+boundaries, and tested write semantics; sharding alone does not supply them.
 
-**Why it matters:** Preserves recall@k parity with brute-force search while maintaining the speed advantage of integer-set filtering. SpatCode sacrifices exact geometric range queries for soft retrieval; LOCI preserves deterministic spatial boundaries while fixing boundary-recall degradation through overlap plus authoritative exact filtering.
+## 3. Predict-Then-Retrieve
 
-### 3. Temporal Hot/Cold Sharding
+The API calls a user-supplied predictor once, queries stored observations using
+its output, re-ranks candidates, and computes a retrieval-based novelty score.
+By default there is no timestamp restriction. Supply an explicit historical
+cutoff when evaluating predictions to prevent future observations from leaking
+into retrieval. This is an API composition, not a database transaction.
 
-**What exists:** TANNS (ICDE 2025) manages timestamps within a single graph structure with internal filtering. Standard vector databases use a single collection with timestamp range filters.
+The research hypothesis is that predicted embeddings retrieve more useful
+historical analogs than current embeddings for a defined downstream task.
+The synthetic patrol harness is a regression demonstration, not evidence of
+real-predictor accuracy, generalization, or customer value. Test the hypothesis
+on held-out episodes with current-state retrieval, no-retrieval, and appropriate
+simple-predictor baselines before making a performance or novelty claim.
 
-**What LOCI adds:** Vectors are routed to separate per-epoch collections (e.g., `loci_42`). Recent (hot) data stays in fast storage; older (cold) data can be migrated. Queries fan out only to relevant epoch shards, with async parallel execution.
+## 4. Retrieval-Based Novelty
 
-**Why it matters:** Enables storage tiering (hot/warm/cold), cross-session persistence, and multi-agent memory sharing. TANNS's single-graph approach cannot support these operational concerns.
+`prediction_novelty` is bounded to [0, 1] and reflects the strength of retrieved
+matches under the implemented scoring/calibration scheme. It is not a
+probability of an unseen event or an independently validated risk estimate.
+Missing data, incompatible embeddings, filters, or retrieval failures can
+change the apparent familiarity of a situation.
 
-### 4. Predict-Then-Retrieve (Strongest Claim)
+Evaluate familiar/novel separation, false alerts, calibration behavior, and
+distribution shift on labeled held-out data. Any proposed behavior change for
+a physical agent is a separate downstream validation task.
 
-**What exists:** HyDE (ACL 2023) generates hypothetical documents for retrieval. No existing system applies this concept to spatiotemporal world models.
+## 5. Adapters and Integration
 
-**What LOCI adds:** An atomic pipeline: (1) call user's world model predictor to generate a predicted future-state embedding, (2) retrieve historical states matching that prediction, optionally constrained by spatial bounds or an explicit time window, (3) compute a combined similarity score, (4) return a prediction_novelty score.
+Adapters map arrays and supplied positions to the WorldState schema. They do
+not load model weights, provide inference, or prove production integration.
+The V-JEPA 2 helper uses tubelet grid coordinates, including temporal grid
+position as `z`; these are not calibrated physical XYZ coordinates. A physical
+retrieval workflow must supply its own verified frame/transform convention.
 
-**Why it matters:** This turns a vector database into a novelty detector for physical agents. A robot with LOCI can answer "Have I seen a situation like what I'm about to encounter?" before acting. No prior system provides this primitive.
+Embedding version, preprocessing, dimension, distance metric, source artifact,
+and timestamp semantics need an explicit integration contract. Integration
+effort must be measured in the pilot rather than asserted as a minutes-long
+setup for every model.
 
-### 5. Novelty Detection Score
+## Prior-Art and Claim Gates
 
-**What exists:** No existing vector database provides a quantified novelty metric from retrieval results.
+Before publishing a research priority or comparison claim, build a cited review
+of spatially filtered ANN, temporal ANN, retrieval-augmented world models,
+novelty estimation, and prediction-conditioned retrieval. SpatCode, TANNS,
+WorldMem, RA-DT, and HyDE are starting points to verify, not an exhaustive
+comparison or evidence that alternatives lack a capability.
 
-**What LOCI adds:** `prediction_novelty ∈ [0, 1]` computed from the predict-then-retrieve pipeline. 0.0 = "I've seen this before" (strong historical match). 1.0 = "This is new territory" (no historical analog).
-
-**Why it matters:** Enables autonomous agents to modulate behavior based on situational familiarity: use cached experience for known situations, proceed cautiously in novel ones.
-
-### 6. World Model Adapters
-
-**What exists:** No existing spatiotemporal database provides ready-to-use integrations with specific world model architectures.
-
-**What LOCI adds:** Production adapters for V-JEPA 2 (Meta FAIR), DreamerV3 (Hafner et al.), and generic numpy/torch models. Each adapter handles the specific output format and maps it to LOCI's WorldState schema.
-
-**Why it matters:** Reduces integration friction from days to minutes. A researcher can plug LOCI into their existing V-JEPA 2 or DreamerV3 pipeline with ~5 lines of code.
-
-### 7. Cross-Session Persistence
-
-**What exists:** WorldMem and RA-DT operate within single episodes. TANNS maintains a single temporal graph.
-
-**What LOCI adds:** Collection-level sharding allows data from different sessions, agents, or time periods to coexist. Causal chains (prev_state_id / next_state_id) link within sessions; cross-session queries retrieve from all relevant temporal shards.
-
-**Why it matters:** Enables multi-agent systems where agents share a common spatial memory. A fleet of robots can contribute to and query from the same LOCI instance.
+Publish reproducible, task-matched comparisons and describe where LOCI wins,
+ties, or loses. Separate a useful engineering composition from a new research
+contribution. The [implementation readiness plan](IMPLEMENTATION_READINESS.md)
+defines the next customer, reliability, and evaluation gates.

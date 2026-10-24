@@ -83,6 +83,8 @@ def test_sync_query_routes_through_cloud():
         },
         time_window_ms=(1000, 2000),
         limit=3,
+        overlap_factor=1.5,
+        min_confidence=0.75,
     )
 
     assert len(hits) == 1
@@ -96,6 +98,8 @@ def test_sync_query_routes_through_cloud():
     assert body["x_max"] == 0.9
     assert body["time_start_ms"] == 1000
     assert body["time_end_ms"] == 2000
+    assert body["overlap_factor"] == 1.5
+    assert body["min_confidence"] == 0.75
 
 
 def test_sync_query_unsupported_options_raise():
@@ -104,8 +108,6 @@ def test_sync_query_unsupported_options_raise():
         client.query(vector=[0.0] * 4, _extra_payload_filter={"scene_id": "x"})
     with pytest.raises(CloudModeUnsupportedError):
         client.query(vector=[0.0] * 4, _epoch_ids={1})
-    with pytest.raises(CloudModeUnsupportedError):
-        client.query(vector=[0.0] * 4, min_confidence=0.5)
 
 
 def test_sync_local_mode_unchanged_shape():
@@ -155,6 +157,8 @@ async def test_async_query_routes_through_cloud():
 
     async def _fake_request(method, path, body=None):
         assert path == "/query"
+        assert body["overlap_factor"] == 1.5
+        assert body["min_confidence"] == 0.75
         return {
             "results": [
                 {"id": "pA", "x": 0.1, "y": 0.2, "z": 0.3, "timestamp_ms": 9, "scene_id": "s"}
@@ -163,6 +167,6 @@ async def test_async_query_routes_through_cloud():
 
     client._cloud._request = _fake_request  # type: ignore[assignment]
 
-    hits = await client.query(vector=[0.0] * 4, limit=1)
+    hits = await client.query(vector=[0.0] * 4, limit=1, overlap_factor=1.5, min_confidence=0.75)
     assert len(hits) == 1
     assert hits[0].id == "pA"

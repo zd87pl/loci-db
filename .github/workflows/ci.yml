@@ -97,6 +97,9 @@ jobs:
       - name: Install security scanners
         run: pip install bandit[toml] pip-audit
 
+      - name: Install application dependencies for audit
+        run: pip install -e . -r cloud/api/requirements.txt
+
       - name: Run bandit (static security analysis)
         run: bandit -r loci/ cloud/api/ server.py -ll -ii
 

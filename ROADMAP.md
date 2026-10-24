@@ -1,5 +1,20 @@
 # Loci Roadmap
 
+## Immediate Priority — One Customer Pilot
+
+Version milestones below track features, not production readiness or validated
+customer value. Follow [IMPLEMENTATION_READINESS.md](docs/IMPLEMENTATION_READINESS.md)
+before expanding scope. Robot incident retrieval and regression curation is a
+provisional first workflow; confirm it with an existing user or partner.
+
+- [ ] Agree one workflow, dataset, buyer, acceptance thresholds, and paid continuation decision
+- [ ] Define coordinate frames, embedding versions, timestamps, and source provenance
+- [ ] Verify failure handling, persistence/recovery, concurrent writers, and expected scale
+- [ ] Benchmark the current client on live Qdrant against tuned filters and time-sharding-only at equal recall
+- [ ] Evaluate a real predictor on held-out episodes against retrieval without prediction
+- [ ] Measure incident investigation time and useful regression cases with pilot users
+- [ ] Proceed only when agreed reliability, quality, cost, and commercial gates pass
+
 ## v0.1 — Foundation
 
 - [x] WorldState data model with validation

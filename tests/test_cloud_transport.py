@@ -24,7 +24,7 @@ from loci.schema import WorldState
 # ── _insert_payload ──────────────────────────────────────────────────────────
 
 
-def test_insert_payload_has_all_eight_keys():
+def test_insert_payload_preserves_world_state_fields():
     state = WorldState(
         x=0.1,
         y=0.2,
@@ -34,6 +34,10 @@ def test_insert_payload_has_all_eight_keys():
         scene_id="scene-a",
         scale_level="frame",
         confidence=0.5,
+        metadata={"camera": "front", "labels": ["obstacle"]},
+        prev_state_id="previous",
+        next_state_id="next",
+        id="ignored-store-assigned-id",
     )
     payload = _insert_payload(state)
 
@@ -46,6 +50,9 @@ def test_insert_payload_has_all_eight_keys():
         "scene_id",
         "scale_level",
         "confidence",
+        "metadata",
+        "prev_state_id",
+        "next_state_id",
     }
     assert payload["x"] == 0.1
     assert payload["y"] == 0.2
@@ -55,6 +62,10 @@ def test_insert_payload_has_all_eight_keys():
     assert payload["scene_id"] == "scene-a"
     assert payload["scale_level"] == "frame"
     assert payload["confidence"] == 0.5
+    assert payload["metadata"] == state.metadata
+    assert payload["prev_state_id"] == "previous"
+    assert payload["next_state_id"] == "next"
+    assert "id" not in payload  # Local and cloud inserts both assign fresh IDs.
 
 
 # ── _query_payload ───────────────────────────────────────────────────────────
@@ -106,6 +117,15 @@ def test_query_payload_include_vectors_false_adds_flag():
 def test_query_payload_include_vectors_default_omits_flag():
     body = _query_payload([0.0], None, None, limit=3, overlap_factor=1.0)
     assert "include_vectors" not in body
+    assert "min_confidence" not in body
+
+
+@pytest.mark.parametrize("min_confidence", [0.0, 0.75])
+def test_query_payload_preserves_confidence_filter(min_confidence):
+    body = _query_payload(
+        [0.0], None, None, limit=3, overlap_factor=1.0, min_confidence=min_confidence
+    )
+    assert body["min_confidence"] == min_confidence
 
 
 # ── _parse_query_results ─────────────────────────────────────────────────────
@@ -122,6 +142,11 @@ def test_parse_query_results_with_vector_populates_world_state():
                 "timestamp_ms": 123,
                 "scene_id": "s",
                 "vector": [0.1, 0.2, 0.3],
+                "scale_level": "sequence",
+                "confidence": 0.75,
+                "metadata": {"nested": {"source": "robot"}},
+                "prev_state_id": "before",
+                "next_state_id": "after",
             }
         ]
     }
@@ -131,6 +156,11 @@ def test_parse_query_results_with_vector_populates_world_state():
     assert results[0].vector == [0.1, 0.2, 0.3]
     assert results[0].id == "p1"
     assert results[0].scene_id == "s"
+    assert results[0].scale_level == "sequence"
+    assert results[0].confidence == 0.75
+    assert results[0].metadata == {"nested": {"source": "robot"}}
+    assert results[0].prev_state_id == "before"
+    assert results[0].next_state_id == "after"
 
 
 def test_parse_query_results_without_vector_yields_empty_list():
@@ -168,6 +198,11 @@ def test_parse_query_results_missing_scene_id_defaults_empty():
 
     assert len(results) == 1
     assert results[0].scene_id == ""
+    assert results[0].scale_level == "patch"
+    assert results[0].confidence == 1.0
+    assert results[0].metadata == {}
+    assert results[0].prev_state_id is None
+    assert results[0].next_state_id is None
 
 
 # ── CloudTransport._request scheme validation ────────────────────────────────

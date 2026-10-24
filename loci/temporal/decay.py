@@ -32,6 +32,8 @@ def apply_decay(
     results: list[dict],
     now_ms: int,
     lambda_: float = 1e-4,
+    *,
+    distance: str = "cosine",
 ) -> list[dict]:
     """Re-rank a list of scored results using temporal decay.
 
@@ -42,12 +44,16 @@ def apply_decay(
         results: Mutable list of result dicts.
         now_ms: Current unix timestamp in milliseconds.
         lambda_: Decay rate.
+        distance: Distance metric. Euclidean raw scores are negative distances;
+            their ranking similarity is ``1 / (1 + distance)`` so age always
+            reduces their rank. Raw scores in the results are preserved.
 
     Returns:
         The same list, sorted by decayed score descending.
     """
     for r in results:
         age = max(0.0, now_ms - r["timestamp_ms"])
-        r["decayed_score"] = decay_score(r["score"], age, lambda_)
+        similarity = 1.0 / (1.0 - r["score"]) if distance == "euclidean" else r["score"]
+        r["decayed_score"] = decay_score(similarity, age, lambda_)
     results.sort(key=lambda r: r["decayed_score"], reverse=True)
     return results

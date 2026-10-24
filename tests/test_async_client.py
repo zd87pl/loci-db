@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -34,7 +35,15 @@ def mock_async_qdrant():
         )
 
         instance.get_collection = AsyncMock(side_effect=resp_404)
-        instance.create_collection = AsyncMock()
+        collections: set[str] = set()
+        instance.create_collection = AsyncMock(
+            side_effect=lambda **kw: collections.add(kw["collection_name"])
+        )
+        instance.get_collections = AsyncMock(
+            side_effect=lambda: SimpleNamespace(
+                collections=[SimpleNamespace(name=name) for name in collections]
+            )
+        )
         instance.create_payload_index = AsyncMock()
         instance.upsert = AsyncMock()
         _empty_qr = MagicMock()
@@ -82,6 +91,19 @@ def _make_state(**overrides) -> WorldState:
 async def test_ensure_collection_creates_on_404(async_client, mock_async_qdrant):
     await async_client._ensure_collection("loci_0")
     mock_async_qdrant.create_collection.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_ensure_collection_creates_exact_filter_indexes(async_client, mock_async_qdrant):
+    from qdrant_client.models import PayloadSchemaType
+
+    await async_client._ensure_collection("loci_0")
+    indexed_fields = {
+        call.kwargs["field_name"]: call.kwargs["field_schema"]
+        for call in mock_async_qdrant.create_payload_index.call_args_list
+    }
+    for field in ("x", "y", "z", "confidence"):
+        assert indexed_fields[field] == PayloadSchemaType.FLOAT
 
 
 @pytest.mark.asyncio
@@ -146,7 +168,7 @@ async def test_insert_routes_to_correct_collection(async_client, mock_async_qdra
 
 @pytest.mark.asyncio
 async def test_find_latest_predecessor_paginates_scroll_results(async_client, mock_async_qdrant):
-    async_client._known_collections = {"loci_0"}
+    await async_client._ensure_collection("loci_0")
 
     page_1 = []
     for i in range(256):

@@ -1,0 +1,31 @@
+# LOCI handheld -- USER unit (no sudo). Recommended: the headset voice loop needs the user's
+# PipeWire session, and the user's own groups (plugdev video audio input) already apply.
+#
+#   mkdir -p /home/ziggy/.config/systemd/user
+#   cp /home/ziggy/loci-handheld/src/deploy/handheld/loci-handheld.user.service \
+#      /home/ziggy/.config/systemd/user/loci-handheld.service
+#   systemctl --user daemon-reload && systemctl --user enable --now loci-handheld
+#   journalctl --user -u loci-handheld -f
+#   sudo loginctl enable-linger ziggy      # once, so the unit starts at boot without a login
+#
+# install_pi.sh does the copy/enable. systemd does not expand "~": every path below is absolute.
+[Unit]
+Description=LOCI handheld spatial memory (Pi 5 + OAK-D Lite)
+Documentation=file:/home/ziggy/loci-handheld/src/deploy/handheld/README.md
+After=pipewire.service wireplumber.service pipewire-pulse.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ziggy/loci-handheld/src
+EnvironmentFile=/home/ziggy/loci-handheld/env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ziggy/loci-handheld/src/deploy/handheld/run_pi.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,14 @@
+# Mac / CI scratch venv for the handheld demo (Python 3.11 or 3.12, arm64 or x86_64):
+#
+#   python3.11 -m venv "$SCRATCH/devenv"
+#   "$SCRATCH/devenv/bin/pip" install -e . -r deploy/handheld/requirements-dev.txt
+#   "$SCRATCH/devenv/bin/python" -m pytest tests/ -q -p no:cacheprovider
+#
+# Pulls the exact Pi pins (depthai 3.11.0 installs on macOS arm64 too) plus the tooling the
+# hardware-adjacent tests need (Pillow for the tag sheet, pytest-asyncio for the voice pipeline).
+-r requirements-pi.txt
+
+pillow>=10.1
+av<15; python_version < "3.14"
+pytest-asyncio>=0.21
+ruff>=0.4

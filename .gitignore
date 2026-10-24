@@ -38,3 +38,6 @@ loci-core/target/
 
 # Python virtual environments
 .venv/
+
+# Downloaded YOLO weights (demo servers fetch them into the working directory)
+/*.pt

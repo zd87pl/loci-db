@@ -49,48 +49,65 @@ incompatible-embedding, and malformed-data behavior.
 
 - Exercise backend timeouts/unavailability, partial batch writes, ambiguous
   acknowledgments, retries, process interruption, and dependency recovery.
-- Query shard errors now propagate after retries; missing-collection retention
-  races are skipped. Verify this on live Qdrant and audit trajectory helpers'
-  failure behavior; never treat an incomplete search as confirmed novelty.
+- Query backend errors propagate after retries instead of yielding partial
+  results; a `loci_data`/`loci_summary` collection deleted out from under a
+  client yields an empty result and resets that client's readiness cache.
+  Verify this on live Qdrant and audit the trajectory/causal-context helpers,
+  which still fall back to the anchor on scroll errors; never treat an
+  incomplete search as confirmed novelty.
 - Verify data after restart and backup/restore. Record write acknowledgment
   semantics and agreed recovery/data-loss targets.
 - Check concurrent collection creation, same-scene writes, duplicate retries,
-  and trajectory linking; separate batches currently do not stitch their
-  causal links. Document ordering and isolation.
+  and trajectory linking. `insert_batch` links each scene's first state to the
+  latest stored predecessor, but concurrent or out-of-order writers can still
+  leave inconsistent `prev`/`next` links, and `get_trajectory()` time-sorts the
+  scene rather than following them. Document ordering and isolation.
 - Validate cloud namespace separation and metadata fidelity if cloud is used.
-- Bound retained collections, discovery, fan-out, connection pools, and memory
-  at the pilot's retention and ingest rate; measure ingest/query contention.
+- The layout is fixed at two collections per tenant (`loci_data` +
+  `loci_summary`); bound the raw window, consolidation/retention work,
+  connection pools, and memory at the pilot's retention and ingest rate, and
+  measure ingest/query contention.
 - Define retention/deletion and source-artifact cleanup. Automatic tier
   migration remains future work until implemented and tested.
 - Add request/ingest/error/latency and resource telemetry plus a recovery runbook.
-  Dependency audit CI includes app/cloud dependencies; real-server CI and native
-  parity checks remain additional validation work.
+  Dependency-audit CI installs the app/cloud dependencies and a `docker-smoke`
+  job exercises `/health`, `/insert`, `/query` against a Qdrant container; the
+  library's Qdrant integration tests use the embedded `:memory:` engine, so
+  live-server client CI and native parity checks remain additional work.
 
 ### Upgrade Existing Deployments
 
-New Qdrant shards create FLOAT indexes for `x`, `y`, `z`, and `confidence`.
-Backfill retained shards before adopting exact range filtering with Qdrant
-strict filtering enabled. Run this idempotent script against the intended
-database, setting `LOCI_COLLECTION_PREFIX` to the client's configured prefix
-(empty only for an unprefixed store). It selects only that prefix's epoch names:
+Deployments created on the legacy one-collection-per-epoch layout must run
+`loci migrate-layout` once (dry-run first) to copy into the bounded
+`{prefix}loci_data` / `{prefix}loci_summary` layout; see `CHANGELOG.md`.
+
+Newly created `loci_data` and `loci_summary` collections get FLOAT payload
+indexes for `x`, `y`, `z`, and `confidence`, which the exact range conditions
+use before top-k; `loci migrate-layout` creates them on the target collections
+it creates but leaves an existing target untouched. Collections created before
+these indexes existed still return correct results because Qdrant evaluates
+Range conditions on unindexed payload fields by scanning; add the indexes
+before pilot benchmarking. Run
+this idempotent script against the intended database, setting
+`LOCI_COLLECTION_PREFIX` to the client's configured prefix (empty only for an
+unprefixed store):
 
 ```python
 import os
-import re
 from qdrant_client import QdrantClient, models
 
 db = QdrantClient(url=os.environ["QDRANT_URL"], api_key=os.getenv("QDRANT_API_KEY"))
-prefix = os.environ["LOCI_COLLECTION_PREFIX"]
-epoch_name = re.compile(re.escape(prefix) + r"loci_(0|[1-9][0-9]*)\Z")
-for collection in db.get_collections().collections:
-    if epoch_name.fullmatch(collection.name):
+prefix = os.environ.get("LOCI_COLLECTION_PREFIX", "")
+for name in (f"{prefix}loci_data", f"{prefix}loci_summary"):
+    if db.collection_exists(name):
         for field in ("x", "y", "z", "confidence"):
-            db.create_payload_index(collection.name, field, models.PayloadSchemaType.FLOAT, wait=True)
+            db.create_payload_index(name, field, models.PayloadSchemaType.FLOAT, wait=True)
 ```
 
 Deploy the cloud API before or with the SDK: older servers silently ignore
-new metadata and `min_confidence` fields. Euclidean raw scores are `-distance`;
-decayed scores use `1 / (1 + distance) * exp(-lambda * age_ms)`.
+the `min_confidence`, `prev_state_id`, and `next_state_id` request fields and
+omit them from responses. Euclidean raw scores are `-distance`; decayed scores
+use `1 / (1 + distance) * exp(-lambda * age_ms)` and lie in `(0, 1]`.
 
 ## 4. Test the Retrieval Advantage on Live Qdrant
 
@@ -100,7 +117,8 @@ establish this deployment's performance. Compare on the same data, hardware,
 ranking objective, and equal recall:
 
 1. Tuned single-collection Qdrant with indexed spatial/time payload filters.
-2. Time-sharding-only with those range filters, without Hilbert bucketing.
+2. Indexed timestamp-range filtering plus those spatial range filters, without
+   Hilbert bucketing (the "time filter only" ablation).
 3. Current LOCI; ablate overlap and adaptive resolution settings.
 
 Use independent exact ground truth and tune ANN effort/candidate budgets fairly.
@@ -112,8 +130,8 @@ beyond expected volume. Save seeds, queries, repetitions, uncertainty, raw
 results, and full configuration.
 
 Gate: meet agreed quality/latency/cost thresholds against the strongest baseline.
-If tuned filters or sharding alone suffice, simplify or justify LOCI through
-measured workflow benefit rather than speed.
+If tuned filters or the time-range-only baseline suffice, simplify or justify
+LOCI through measured workflow benefit rather than speed.
 
 ## 5. Evaluate Prediction Separately
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -35,15 +33,7 @@ def mock_async_qdrant():
         )
 
         instance.get_collection = AsyncMock(side_effect=resp_404)
-        collections: set[str] = set()
-        instance.create_collection = AsyncMock(
-            side_effect=lambda **kw: collections.add(kw["collection_name"])
-        )
-        instance.get_collections = AsyncMock(
-            side_effect=lambda: SimpleNamespace(
-                collections=[SimpleNamespace(name=name) for name in collections]
-            )
-        )
+        instance.create_collection = AsyncMock()
         instance.create_payload_index = AsyncMock()
         instance.upsert = AsyncMock()
         _empty_qr = MagicMock()
@@ -52,6 +42,7 @@ def mock_async_qdrant():
         instance.scroll = AsyncMock(return_value=([], None))
         instance.set_payload = AsyncMock()
         instance.retrieve = AsyncMock(return_value=[])
+        instance.delete = AsyncMock()
         instance.close = AsyncMock()
 
         yield instance
@@ -88,35 +79,25 @@ def _make_state(**overrides) -> WorldState:
 
 
 @pytest.mark.asyncio
-async def test_ensure_collection_creates_on_404(async_client, mock_async_qdrant):
-    await async_client._ensure_collection("loci_0")
+async def test_ensure_data_collection_creates_on_404(async_client, mock_async_qdrant):
+    await async_client._ensure_data_collection()
     mock_async_qdrant.create_collection.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_ensure_collection_creates_exact_filter_indexes(async_client, mock_async_qdrant):
-    from qdrant_client.models import PayloadSchemaType
-
-    await async_client._ensure_collection("loci_0")
-    indexed_fields = {
-        call.kwargs["field_name"]: call.kwargs["field_schema"]
-        for call in mock_async_qdrant.create_payload_index.call_args_list
-    }
-    for field in ("x", "y", "z", "confidence"):
-        assert indexed_fields[field] == PayloadSchemaType.FLOAT
+    name_arg = mock_async_qdrant.create_collection.call_args.kwargs["collection_name"]
+    assert name_arg == "loci_data"
 
 
 @pytest.mark.asyncio
 async def test_ensure_collection_idempotent(async_client, mock_async_qdrant):
-    await async_client._ensure_collection("loci_0")
+    await async_client._ensure_data_collection()
     mock_async_qdrant.reset_mock()
 
-    await async_client._ensure_collection("loci_0")
+    await async_client._ensure_data_collection()
     mock_async_qdrant.get_collection.assert_not_called()
+    mock_async_qdrant.create_collection.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_ensure_collection_propagates_500(mock_async_qdrant):
+async def test_ensure_collection_propagates_500(async_client, mock_async_qdrant):
     from qdrant_client.http.exceptions import UnexpectedResponse
 
     mock_async_qdrant.get_collection = AsyncMock(
@@ -127,16 +108,51 @@ async def test_ensure_collection_propagates_500(mock_async_qdrant):
             headers=httpx.Headers(),
         )
     )
-    client = AsyncLociClient.__new__(AsyncLociClient)
-    client._qdrant = mock_async_qdrant
-    client._vector_size = 4
-    client._distance = MagicMock()
-    client._known_collections = set()
-    client._collection_locks = {}
-    client._locks_mutex = asyncio.Lock()
 
     with pytest.raises(UnexpectedResponse):
-        await client._ensure_collection("loci_0")
+        await async_client._ensure_data_collection()
+
+
+@pytest.mark.asyncio
+async def test_summary_collection_has_no_hilbert_indexes(async_client, mock_async_qdrant):
+    """Summaries carry no Hilbert payload, so no hilbert_r* indexes."""
+    await async_client._ensure_summary_collection()
+
+    created = {
+        c.kwargs["collection_name"] for c in mock_async_qdrant.create_collection.call_args_list
+    }
+    assert created == {"loci_summary"}
+    field_names = [
+        c.kwargs["field_name"] for c in mock_async_qdrant.create_payload_index.call_args_list
+    ]
+    assert not any(name.startswith("hilbert_r") for name in field_names)
+    assert sorted(field_names) == [
+        "confidence",
+        "scale_level",
+        "scene_id",
+        "timestamp_ms",
+        "x",
+        "y",
+        "z",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("which", ["data", "summary"])
+async def test_creates_exact_filter_indexes(async_client, mock_async_qdrant, which):
+    """x/y/z/confidence get FLOAT indexes: they are Range-filtered before top-k."""
+    from qdrant_client.models import PayloadSchemaType
+
+    if which == "data":
+        await async_client._ensure_data_collection()
+    else:
+        await async_client._ensure_summary_collection()
+    indexed_fields = {
+        call.kwargs["field_name"]: call.kwargs["field_schema"]
+        for call in mock_async_qdrant.create_payload_index.call_args_list
+    }
+    for field in ("x", "y", "z", "confidence"):
+        assert indexed_fields[field] == PayloadSchemaType.FLOAT
 
 
 # ---------------------------------------------------------------------------
@@ -146,9 +162,27 @@ async def test_ensure_collection_propagates_500(mock_async_qdrant):
 
 @pytest.mark.asyncio
 async def test_insert_returns_id(async_client, mock_async_qdrant):
+    import uuid
+
     result = await async_client.insert(_make_state())
     assert isinstance(result, str)
-    assert len(result) == 32
+    # Canonical hyphenated UUID so IDs round-trip through real Qdrant servers.
+    assert len(result) == 36
+    assert str(uuid.UUID(result)) == result
+
+
+@pytest.mark.asyncio
+async def test_insert_rejects_wrong_vector_dimension(async_client, mock_async_qdrant):
+    with pytest.raises(ValueError, match="dimension"):
+        await async_client.insert(_make_state(vector=[1.0, 2.0]))
+    mock_async_qdrant.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_insert_batch_rejects_wrong_vector_dimension(async_client, mock_async_qdrant):
+    with pytest.raises(ValueError, match="dimension"):
+        await async_client.insert_batch([_make_state(), _make_state(vector=[1.0])])
+    mock_async_qdrant.upsert.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -160,27 +194,22 @@ async def test_insert_does_not_mutate(async_client, mock_async_qdrant):
 
 
 @pytest.mark.asyncio
-async def test_insert_routes_to_correct_collection(async_client, mock_async_qdrant):
+async def test_insert_routes_to_data_collection(async_client, mock_async_qdrant):
     await async_client.insert(_make_state(timestamp_ms=10_000))
     upsert_call = mock_async_qdrant.upsert.call_args
-    assert upsert_call.kwargs["collection_name"] == "loci_2"
+    assert upsert_call.kwargs["collection_name"] == "loci_data"
 
 
 @pytest.mark.asyncio
 async def test_find_latest_predecessor_paginates_scroll_results(async_client, mock_async_qdrant):
-    await async_client._ensure_collection("loci_0")
-
-    page_1 = []
-    for i in range(256):
+    def _point(i: int):
         point = MagicMock()
         point.id = f"p{i}"
-        page_1.append(point)
+        point.payload = {"timestamp_ms": i}
+        return point
 
-    page_2 = []
-    for i in range(256, 300):
-        point = MagicMock()
-        point.id = f"p{i}"
-        page_2.append(point)
+    page_1 = [_point(i) for i in range(256)]
+    page_2 = [_point(i) for i in range(256, 300)]
 
     mock_async_qdrant.scroll.side_effect = [
         (page_1, "page-2"),
@@ -189,8 +218,30 @@ async def test_find_latest_predecessor_paginates_scroll_results(async_client, mo
 
     predecessor = await async_client._find_latest_predecessor("scene_a", 20_000)
 
-    assert predecessor == ("p299", "loci_0")
+    assert predecessor == "p299"
     assert mock_async_qdrant.scroll.call_args_list[1].kwargs["offset"] == "page-2"
+    # The scan targets the single raw data collection.
+    assert mock_async_qdrant.scroll.call_args.kwargs["collection_name"] == "loci_data"
+
+
+@pytest.mark.asyncio
+async def test_find_latest_predecessor_unordered_pages(async_client, mock_async_qdrant):
+    """The latest predecessor is chosen by timestamp, not page position."""
+
+    def _point(pid: str, ts: int):
+        point = MagicMock()
+        point.id = pid
+        point.payload = {"timestamp_ms": ts}
+        return point
+
+    points = [_point("a", 100), _point("latest", 900), _point("b", 500)]
+    mock_async_qdrant.scroll.side_effect = [(points, None)]
+
+    predecessor = await async_client._find_latest_predecessor("scene_a", 20_000)
+
+    assert predecessor == "latest"
+    # Ordered scrolls break Qdrant pagination; must scroll unordered.
+    assert mock_async_qdrant.scroll.call_args.kwargs.get("order_by") is None
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +255,18 @@ async def test_insert_batch_returns_correct_count(async_client, mock_async_qdran
     ids = await async_client.insert_batch(states)
     assert len(ids) == 5
     assert len(set(ids)) == 5
+
+
+@pytest.mark.asyncio
+async def test_insert_batch_single_upsert_to_data_collection(async_client, mock_async_qdrant):
+    """A batch spanning several logical epochs is one upsert into loci_data."""
+    states = [_make_state(timestamp_ms=3000), _make_state(timestamp_ms=8000)]
+    await async_client.insert_batch(states)
+
+    upsert_calls = mock_async_qdrant.upsert.call_args_list
+    assert len(upsert_calls) == 1
+    assert upsert_calls[0].kwargs["collection_name"] == "loci_data"
+    assert len(upsert_calls[0].kwargs["points"]) == 2
 
 
 @pytest.mark.asyncio
@@ -249,7 +312,7 @@ async def test_insert_batch_separate_scenes(async_client, mock_async_qdrant):
 
 
 # ---------------------------------------------------------------------------
-# Query — parallel fan-out
+# Query — concurrent fan-out
 # ---------------------------------------------------------------------------
 
 
@@ -257,6 +320,7 @@ async def test_insert_batch_separate_scenes(async_client, mock_async_qdrant):
 async def test_query_returns_empty_when_no_collections(async_client, mock_async_qdrant):
     results = await async_client.query(vector=[1.0, 2.0, 3.0, 4.0])
     assert results == []
+    mock_async_qdrant.query_points.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -289,11 +353,10 @@ async def test_query_with_vectors(async_client, mock_async_qdrant):
 
 
 @pytest.mark.asyncio
-async def test_query_parallel_fanout(async_client, mock_async_qdrant):
-    """Searches across multiple epochs should happen via asyncio.gather."""
-    # Create states in two different epochs
-    await async_client.insert(_make_state(timestamp_ms=3000))  # epoch 0
-    await async_client.insert(_make_state(timestamp_ms=8000))  # epoch 1
+async def test_query_searches_data_and_summary_concurrently(async_client, mock_async_qdrant):
+    """Both real collections are searched (via asyncio.gather) when present."""
+    await async_client.insert(_make_state(timestamp_ms=3000))
+    async_client._collection_ready[async_client._summary_collection] = True
     _empty_qr = MagicMock()
     _empty_qr.points = []
     mock_async_qdrant.query_points = AsyncMock(return_value=_empty_qr)
@@ -302,8 +365,8 @@ async def test_query_parallel_fanout(async_client, mock_async_qdrant):
         vector=[1.0, 2.0, 3.0, 4.0],
         time_window_ms=(0, 10_000),
     )
-    # Both collections should have been searched
-    assert mock_async_qdrant.query_points.call_count == 2
+    searched = {c.kwargs["collection_name"] for c in mock_async_qdrant.query_points.call_args_list}
+    assert searched == {"loci_data", "loci_summary"}
 
 
 @pytest.mark.asyncio
@@ -398,6 +461,165 @@ async def test_adaptive_query_uses_finer_hilbert_field(mock_async_qdrant):
     filt = mock_async_qdrant.query_points.call_args.kwargs["query_filter"]
     keys = {condition.key for condition in filt.must}
     assert "hilbert_r8" in keys
+
+
+# ---------------------------------------------------------------------------
+# min_confidence and reader visibility
+# ---------------------------------------------------------------------------
+
+
+def _confidence_hit(i: int, confidence: float = 1.0) -> MagicMock:
+    hit = MagicMock()
+    hit.score = 0.9 - i * 0.01
+    hit.id = f"hit{i}"
+    hit.vector = [1.0, 0.0, 0.0, 0.0]
+    hit.payload = {
+        "x": 0.5,
+        "y": 0.5,
+        "z": 0.5,
+        "timestamp_ms": 10_000,
+        "scene_id": "s1",
+        "scale_level": "patch",
+        "confidence": confidence,
+    }
+    return hit
+
+
+@pytest.mark.asyncio
+async def test_min_confidence_pushed_down_and_overfetched(async_client, mock_async_qdrant):
+    await async_client.insert(_make_state())
+
+    qr = MagicMock()
+    qr.points = [_confidence_hit(i) for i in range(10)]
+    mock_async_qdrant.query_points = AsyncMock(return_value=qr)
+
+    results = await async_client.query(
+        vector=[1.0, 0.0, 0.0, 0.0],
+        time_window_ms=(10_000, 14_999),
+        limit=5,
+        min_confidence=0.5,
+    )
+
+    # More qualifying matches than limit → the full limit is returned.
+    assert len(results) == 5
+
+    kwargs = mock_async_qdrant.query_points.call_args.kwargs
+    assert kwargs["limit"] == 15
+    conf_conditions = [
+        c for c in kwargs["query_filter"].must if getattr(c, "key", None) == "confidence"
+    ]
+    assert len(conf_conditions) == 1
+    assert conf_conditions[0].range.gte == 0.5
+
+
+@pytest.mark.asyncio
+async def test_reader_client_sees_collections_created_by_another_writer(
+    async_client, mock_async_qdrant
+):
+    """A client that never inserted still searches existing collections."""
+    mock_async_qdrant.get_collection = AsyncMock(return_value=MagicMock())
+
+    await async_client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(25_000, 29_999))
+
+    searched = {c.kwargs["collection_name"] for c in mock_async_qdrant.query_points.call_args_list}
+    assert searched == {"loci_data", "loci_summary"}
+
+
+@pytest.mark.asyncio
+async def test_missing_summary_collection_reprobed_until_it_appears(
+    async_client, mock_async_qdrant
+):
+    """A 404 is never cached — the summary can appear later (another writer)."""
+    await async_client.insert(_make_state())  # data ready; summary probe 404s
+    await async_client.query(vector=[1.0, 2.0, 3.0, 4.0])
+    searched = {c.kwargs["collection_name"] for c in mock_async_qdrant.query_points.call_args_list}
+    assert searched == {"loci_data"}
+
+    mock_async_qdrant.get_collection = AsyncMock(return_value=MagicMock())
+    mock_async_qdrant.query_points.reset_mock()
+    await async_client.query(vector=[1.0, 2.0, 3.0, 4.0])
+    searched = {c.kwargs["collection_name"] for c in mock_async_qdrant.query_points.call_args_list}
+    assert searched == {"loci_data", "loci_summary"}
+
+
+@pytest.mark.asyncio
+async def test_search_failure_propagates(async_client, mock_async_qdrant):
+    """Backend failures propagate instead of degrading into empty results."""
+    await async_client.insert(_make_state(timestamp_ms=3000))
+    async_client._collection_ready[async_client._summary_collection] = True
+    mock_async_qdrant.query_points = AsyncMock(side_effect=RuntimeError("search down"))
+
+    with pytest.raises(RuntimeError, match="search down"):
+        await async_client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
+
+
+@pytest.mark.asyncio
+async def test_partial_search_failure_propagates(async_client, mock_async_qdrant):
+    """One failing collection search fails the query; no partial results."""
+    await async_client.insert(_make_state(timestamp_ms=3000))
+    async_client._collection_ready[async_client._summary_collection] = True
+
+    good = MagicMock()
+    good.points = []
+
+    async def _query_points(**kwargs):
+        if kwargs["collection_name"] == async_client._data_collection:
+            raise RuntimeError("search down")
+        return good
+
+    mock_async_qdrant.query_points = AsyncMock(side_effect=_query_points)
+
+    with pytest.raises(RuntimeError, match="search down"):
+        await async_client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
+
+
+@pytest.mark.asyncio
+async def test_missing_collection_mid_query_yields_empty_and_resets_cache(
+    async_client, mock_async_qdrant
+):
+    """A collection deleted after being cached as ready is not an error."""
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    async_client._collection_ready[async_client._data_collection] = True
+    mock_async_qdrant.query_points = AsyncMock(
+        side_effect=UnexpectedResponse(
+            status_code=404, reason_phrase="Not Found", content=b"", headers=httpx.Headers()
+        )
+    )
+
+    assert await async_client.query(vector=[1.0, 2.0, 3.0, 4.0]) == []
+    assert async_client._data_collection not in async_client._collection_ready
+
+
+@pytest.mark.asyncio
+async def test_probe_failure_propagates(mock_async_qdrant):
+    """A backend outage on the existence probe must not read as 'no data'."""
+    async_client = AsyncLociClient(qdrant_url="http://fake:6333", vector_size=4, max_retries=0)
+    mock_async_qdrant.get_collection = AsyncMock(side_effect=ConnectionError("unavailable"))
+
+    with pytest.raises(ConnectionError, match="unavailable"):
+        await async_client.query(vector=[1.0, 2.0, 3.0, 4.0])
+    assert mock_async_qdrant.get_collection.await_count == 1  # budget exhausted, no retry
+
+
+@pytest.mark.asyncio
+async def test_probe_transient_failure_is_retried(mock_async_qdrant):
+    """The existence probe honours the retry policy like every other call."""
+    async_client = AsyncLociClient(
+        qdrant_url="http://fake:6333", vector_size=4, max_retries=2, retry_backoff=0.0
+    )
+    probes: list[str] = []
+
+    async def flaky_probe(name):
+        probes.append(name)
+        if len(probes) == 1:
+            raise ConnectionError("blip")
+        return MagicMock()
+
+    mock_async_qdrant.get_collection = AsyncMock(side_effect=flaky_probe)
+
+    assert await async_client.query(vector=[1.0, 2.0, 3.0, 4.0]) == []
+    assert probes[:2] == [async_client._data_collection, async_client._data_collection]
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +753,7 @@ async def test_predict_and_retrieve_extended_path_uses_real_scores(async_client)
 
 
 @pytest.mark.asyncio
-async def test_insert_batch_patches_cross_epoch_next_link(async_client, mock_async_qdrant):
+async def test_insert_batch_patches_next_link_in_data_collection(async_client, mock_async_qdrant):
     states = [
         _make_state(timestamp_ms=4_900, scene_id="scene_a"),
         _make_state(timestamp_ms=5_100, scene_id="scene_a"),
@@ -540,7 +762,7 @@ async def test_insert_batch_patches_cross_epoch_next_link(async_client, mock_asy
     await async_client.insert_batch(states)
 
     call_kwargs = mock_async_qdrant.set_payload.call_args.kwargs
-    assert call_kwargs["collection_name"] == "loci_0"
+    assert call_kwargs["collection_name"] == "loci_data"
 
 
 # ---------------------------------------------------------------------------
@@ -571,42 +793,22 @@ async def test_collection_prefix_applied_on_insert(mock_async_qdrant):
     await client.insert(_make_state(timestamp_ms=10_000))
 
     create_kwargs = mock_async_qdrant.create_collection.call_args.kwargs
-    assert create_kwargs["collection_name"] == "tenant_a_loci_2"
+    assert create_kwargs["collection_name"] == "tenant_a_loci_data"
 
     upsert_kwargs = mock_async_qdrant.upsert.call_args.kwargs
-    assert upsert_kwargs["collection_name"] == "tenant_a_loci_2"
+    assert upsert_kwargs["collection_name"] == "tenant_a_loci_data"
 
 
 @pytest.mark.asyncio
-async def test_list_active_epochs_respects_prefix(mock_async_qdrant):
+async def test_collection_prefix_applied_on_query(mock_async_qdrant):
     client = AsyncLociClient(
         qdrant_url="http://fake:6333",
         vector_size=4,
         collection_prefix="tenant_a_",
     )
-    # Simulate a mix of prefixed and non-prefixed collections in cache.
-    client._known_collections = {"tenant_a_loci_0", "tenant_a_loci_3", "loci_7", "other_"}
-    assert client._list_active_epochs() == [0, 3]
+    mock_async_qdrant.get_collection = AsyncMock(return_value=MagicMock())
 
+    await client.query(vector=[1.0, 2.0, 3.0, 4.0], limit=5)
 
-@pytest.mark.asyncio
-async def test_discover_collections_respects_prefix(mock_async_qdrant):
-    client = AsyncLociClient(
-        qdrant_url="http://fake:6333",
-        vector_size=4,
-        collection_prefix="tenant_a_",
-    )
-    fake_collections = MagicMock()
-    fake_collections.collections = [
-        MagicMock(name="c1"),
-        MagicMock(name="c2"),
-        MagicMock(name="c3"),
-    ]
-    # MagicMock's .name attribute has to be set explicitly.
-    fake_collections.collections[0].name = "tenant_a_loci_0"
-    fake_collections.collections[1].name = "loci_9"
-    fake_collections.collections[2].name = "tenant_b_loci_2"
-    mock_async_qdrant.get_collections = AsyncMock(return_value=fake_collections)
-
-    await client._discover_collections()
-    assert client._known_collections == {"tenant_a_loci_0"}
+    searched = {c.kwargs["collection_name"] for c in mock_async_qdrant.query_points.call_args_list}
+    assert searched == {"tenant_a_loci_data", "tenant_a_loci_summary"}

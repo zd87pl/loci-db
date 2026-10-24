@@ -78,7 +78,7 @@ fn bench_batch_prepare(c: &mut Criterion) {
         let zs: Vec<f64> = (0..size)
             .map(|i| ((i as f64 * 2.7) / size as f64) % 1.0)
             .collect();
-        let timestamps: Vec<u64> = (0..size).map(|i| (i as u64) * 100).collect();
+        let timestamps: Vec<i64> = (0..size).map(|i| (i as i64) * 100).collect();
 
         group.bench_with_input(
             BenchmarkId::new("N", size),

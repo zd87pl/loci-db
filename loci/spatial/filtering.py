@@ -17,6 +17,12 @@ def exact_payload_ranges(
     Hilbert buckets can include points outside the requested box. Filtering
     only a bounded candidate list afterward can discard every result even
     when qualifying points exist deeper in the index.
+
+    Inputs are not validated here: an inverted window or an out-of-range
+    threshold yields a range that nothing (or everything) satisfies, exactly
+    like :func:`exact_payload_match`, so callers see an empty result rather
+    than an exception (the REST servers forward caller-supplied windows
+    unchecked).
     """
     ranges: dict[str, dict[str, float]] = {}
     if spatial_bounds is not None:
@@ -32,12 +38,8 @@ def exact_payload_ranges(
             }
     if time_window_ms is not None:
         start_ms, end_ms = time_window_ms
-        if start_ms > end_ms:
-            raise ValueError("time_window_ms start must be <= end")
         ranges["timestamp_ms"] = {"gte": start_ms, "lte": end_ms}
     if min_confidence is not None:
-        if not 0.0 <= min_confidence <= 1.0:
-            raise ValueError("min_confidence must be in [0, 1]")
         ranges["confidence"] = {"gte": min_confidence}
     return ranges
 

@@ -1,0 +1,83 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:transparent}
+.card{position:relative;overflow:hidden;border-radius:var(--r);background:
+  radial-gradient(900px 500px at 78% 40%, rgba(0,188,212,.16), transparent 60%),
+  radial-gradient(700px 400px at 10% 110%, rgba(124,77,255,.14), transparent 60%),
+  #0a0e1a;color:#e8edf7;font-family:'Inter',sans-serif}
+.card::after{content:"";position:absolute;inset:0;border-radius:var(--r);border:1px solid rgba(255,255,255,.07);pointer-events:none}
+svg.curve{position:absolute}
+.text{position:absolute;display:flex;flex-direction:column}
+.kicker{font-family:'JetBrains Mono',monospace;letter-spacing:.16em;text-transform:uppercase;color:#5fd8e8}
+.word{font-family:'Space Grotesk',sans-serif;font-weight:700;letter-spacing:-.02em;line-height:.9;
+  background:linear-gradient(180deg,#ffffff 0%,#b9f2fb 100%);-webkit-background-clip:text;background-clip:text;color:transparent}
+.tag{white-space:nowrap;font-family:'Space Grotesk',sans-serif;font-weight:500;color:#fff;letter-spacing:-.01em}
+.tag em{font-style:normal;color:#35d0e3}
+.sub{color:#9aa6c0;line-height:1.45}
+.chips{display:flex;gap:10px;flex-wrap:wrap}
+.chip{font-family:'JetBrains Mono',monospace;border:1px solid rgba(53,208,227,.35);background:rgba(53,208,227,.08);color:#bdf4fb;border-radius:999px}
+.url{font-family:'JetBrains Mono',monospace;color:#6f7b96}
+</style></head>
+<body>
+<div class="card" id="card"><svg class="curve" id="curve"></svg><div class="text" id="text">
+  <div class="kicker">Open source · Apache 2.0</div>
+  <div class="word">LOCI</div>
+  <div class="tag">Spatial memory for <em>Physical AI</em></div>
+  <div class="sub" id="sub">Robots, drones and world models remember what they saw, where and when, and notice what's new.</div>
+  <div class="chips"><span class="chip">(x, y, z, t) memory</span><span class="chip">novelty detection</span><span class="chip">MCP server</span></div>
+  <div class="url">github.com/zd87pl/loci-db</div>
+</div></div>
+<script>
+const P = new URLSearchParams(location.hash.slice(1));
+const mode = P.get('mode') || 'social';
+const L = mode === 'social'
+  ? {W:1280,H:640,r:0, curve:{x:690,y:40,s:560}, text:{x:80,y:92,w:620},
+     kicker:15, word:150, tag:42, sub:23, chip:15, url:17, gaps:[22,26,20,34,40], order:5}
+  : {W:1280,H:360,r:18, curve:{x:760,y:-140,s:600}, text:{x:64,y:44,w:660},
+     kicker:13, word:96, tag:34, sub:19, chip:13, url:0, gaps:[12,14,12,20,0], order:5};
+const card = document.getElementById('card');
+card.style.width = L.W+'px'; card.style.height = L.H+'px'; card.style.setProperty('--r', L.r+'px');
+const T = document.getElementById('text');
+Object.assign(T.style,{left:L.text.x+'px',top:L.text.y+'px',width:L.text.w+'px'});
+const kids = [...T.children];
+kids[0].style.fontSize=L.kicker+'px'; kids[1].style.fontSize=L.word+'px'; kids[2].style.fontSize=L.tag+'px';
+kids[3].style.fontSize=L.sub+'px'; kids[3].style.maxWidth=(L.text.w-40)+'px';
+kids[4].querySelectorAll('.chip').forEach(c=>{c.style.fontSize=L.chip+'px';c.style.padding=(L.chip*.45)+'px '+(L.chip*.9)+'px'});
+kids[5].style.fontSize=L.url+'px'; if(!L.url) kids[5].style.display='none';
+kids.slice(0,5).forEach((k,i)=>k.style.marginBottom=L.gaps[i]+'px');
+
+// Hilbert curve (order k): a range query box maps to a few contiguous runs of the curve.
+function rot(n,x,y,rx,ry){ if(ry===0){ if(rx===1){x=n-1-x;y=n-1-y;} return [y,x]; } return [x,y]; }
+function d2xy(n,d){ let t=d,x=0,y=0; for(let s=1;s<n;s*=2){ const rx=1&(t/2), ry=1&(t^rx); [x,y]=rot(s,x,y,rx,ry); x+=s*rx; y+=s*ry; t=Math.floor(t/4);} return [x,y]; }
+const n = 1<<L.order, S=L.curve.s, cell=S/n, pad=cell/2;
+const svg = document.getElementById('curve');
+svg.setAttribute('width',S); svg.setAttribute('height',S); svg.setAttribute('viewBox',`0 0 ${S} ${S}`);
+Object.assign(svg.style,{left:L.curve.x+'px',top:L.curve.y+'px'});
+const pts=[]; for(let d=0; d<n*n; d++){ const [x,y]=d2xy(n,d); pts.push([pad+x*cell, pad+y*cell, x, y]); }
+const box = mode==='social' ? {x0:13,y0:9,x1:22,y1:18} : {x0:13,y0:12,x1:22,y1:21};
+const inBox = p => p[2]>=box.x0 && p[2]<=box.x1 && p[3]>=box.y0 && p[3]<=box.y1;
+let dim='', hot='';
+for(let i=1;i<pts.length;i++){ const a=pts[i-1], b=pts[i]; const seg=`M${a[0].toFixed(1)} ${a[1].toFixed(1)}L${b[0].toFixed(1)} ${b[1].toFixed(1)}`;
+  if(inBox(a)&&inBox(b)) hot+=seg; else dim+=seg; }
+// Deterministic "memories" scattered along the curve.
+let seed=7; const rnd=()=>(seed=(seed*1103515245+12345)&0x7fffffff)/0x7fffffff;
+let dots='';
+for(let k=0;k<70;k++){ const p=pts[Math.floor(rnd()*pts.length)]; const h=inBox(p);
+  dots+=`<circle cx="${p[0]}" cy="${p[1]}" r="${h?cell*.2:cell*.13}" fill="${h?'#ffffff':'#3d4d70'}" ${h?'filter="url(#g)"':''}/>`; }
+const bx=box.x0*cell, by=box.y0*cell, bw=(box.x1-box.x0+1)*cell, bh=(box.y1-box.y0+1)*cell;
+svg.innerHTML = `<defs>
+  <filter id="g" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  <radialGradient id="fade" cx="55%" cy="50%" r="60%"><stop offset="0" stop-color="#fff" stop-opacity="1"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
+  <mask id="m"><rect width="${S}" height="${S}" fill="url(#fade)"/></mask></defs>
+  <g mask="url(#m)">
+    <path d="${dim}" stroke="#23314f" stroke-width="${cell*.11}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    ${dots}
+  </g>
+  <rect x="${bx}" y="${by}" width="${bw}" height="${bh}" rx="${cell*.3}" fill="rgba(53,208,227,.07)" stroke="#35d0e3" stroke-opacity=".7" stroke-dasharray="${cell*.3} ${cell*.22}" stroke-width="1.5"/>
+  <path d="${hot}" stroke="#35d0e3" stroke-width="${cell*.16}" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#g)"/>
+  ${dots.split('<circle').filter(c=>c.includes('#ffffff')).map(c=>'<circle'+c).join('')}`;
+</script>
+</body></html>

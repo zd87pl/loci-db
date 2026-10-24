@@ -1,9 +1,15 @@
-"""Async LociClient — parallel shard fan-out for high-throughput workloads."""
+"""Async LociClient — concurrent data + summary searches for high-throughput workloads.
+
+Storage layout (bounded collection set): raw points live in one
+``{prefix}loci_data`` collection and consolidated summaries in one
+``{prefix}loci_summary`` collection.  Epochs are a purely logical
+concept — the unit of consolidation granularity and of Hilbert
+t-normalisation — never a collection.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import time
 import uuid
@@ -16,6 +22,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    FilterSelector,
     MatchAny,
     MatchValue,
     PayloadSchemaType,
@@ -26,20 +33,36 @@ from qdrant_client.models import (
 
 from loci.cloud_transport import AsyncCloudTransport, CloudModeUnsupportedError
 from loci.payload_filters import extra_filter_to_conditions
-from loci.retrieval.predict import PredictRetrieveResult, rerank_prediction_candidates
+from loci.retrieval.predict import (
+    PredictRetrieveResult,
+    _validate_predicted_vector,
+    rerank_prediction_candidates,
+)
 from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import AdaptiveResolution
 from loci.spatial.filtering import exact_payload_match, exact_payload_ranges
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
-from loci.temporal.decay import apply_decay
+from loci.temporal.consolidation import (
+    ConsolidationPolicy,
+    coarse_id,
+    coarse_time_range,
+    consolidate_states,
+    data_collection_name,
+    fold_cutoff_ms,
+    summary_collection_name,
+)
+from loci.temporal.decay import DEFAULT_DECAY_LAMBDA, apply_decay
 from loci.temporal.retention import RetentionManager, RetentionPolicy
-from loci.temporal.sharding import collection_name, epoch_id, epochs_in_range
+from loci.temporal.sharding import epoch_id
 
 logger = logging.getLogger(__name__)
 
 _EXACT_FILTER_OVERFETCH = 3
 _SCROLL_PAGE_SIZE = 256
+# Payload fields that receive exact Range conditions before backend top-k
+# selection (FLOAT-indexed on both collections).
+_EXACT_RANGE_FIELDS = ("x", "y", "z", "confidence")
 
 # Map public distance names to Qdrant enum values
 _DISTANCE_MAP: dict[str, Distance] = {
@@ -50,22 +73,37 @@ _DISTANCE_MAP: dict[str, Distance] = {
 
 
 class AsyncLociClient:
-    """Async high-level client with parallel shard fan-out.
+    """Async high-level client with concurrent collection fan-out.
 
-    All query operations fan out across temporal shards concurrently
-    using ``asyncio.gather``, giving significant speedups when data
-    spans many epochs.
+    Query operations search the raw data collection and the summary
+    collection concurrently using ``asyncio.gather``.
 
     Args:
         qdrant_url: URL of the Qdrant instance.
-        epoch_size_ms: Width of each temporal shard in milliseconds.
-        spatial_resolution: Hilbert curve resolution order (bits per dimension).
+        epoch_size_ms: Width of each logical temporal epoch in milliseconds.
+        spatial_resolution: Hilbert curve resolution order (bits per dimension)
+            used as the default (coarsest) query resolution. Ignored when an
+            explicit ``resolutions`` list is provided — ``resolutions`` wins.
         vector_size: Dimensionality of the embedding vectors.
-        decay_lambda: Temporal decay rate for recency weighting.
+        decay_lambda: Temporal decay rate for recency weighting (per ms;
+            defaults to a one-hour half-life).
         distance: Distance metric — ``"cosine"``, ``"dot"``, or ``"euclidean"``.
         max_retries: Maximum number of retry attempts for transient Qdrant failures.
         retry_backoff: Base delay in seconds for exponential backoff between retries.
         collection_prefix: Optional tenant namespace prefix for Qdrant collections.
+        retention_policy: Optional policy that purges expired raw points
+            from the data collection (cutoff-based; never touches the
+            summary collection).
+        consolidation_policy: Optional policy that summarises raw epochs
+            leaving the raw window into the ``loci_summary`` collection,
+            then deletes their raw points (episodic-to-semantic memory
+            aging).  Works standalone or combined with ``retention_policy``;
+            when both are set, consolidation runs first on each maintenance
+            pass and retention's purge applies to whatever raw points
+            remain.  Summaries are never purged or re-consolidated by
+            retention.  Note: a retention policy tighter than the raw
+            window (fewer than ``raw_window_epochs + 1`` epochs retained)
+            purges raw points before consolidation can fold them.
     """
 
     def __init__(
@@ -74,7 +112,7 @@ class AsyncLociClient:
         epoch_size_ms: int = 5000,
         spatial_resolution: int = 4,
         vector_size: int = 512,
-        decay_lambda: float = 1e-4,
+        decay_lambda: float = DEFAULT_DECAY_LAMBDA,
         distance: str = "cosine",
         adaptive: bool = False,
         max_retries: int = 3,
@@ -84,6 +122,7 @@ class AsyncLociClient:
         collection_prefix: str = "",
         base_url: str | None = None,
         retention_policy: RetentionPolicy | None = None,
+        consolidation_policy: ConsolidationPolicy | None = None,
     ) -> None:
         if epoch_size_ms <= 0:
             raise ValueError(f"epoch_size_ms must be positive, got {epoch_size_ms}")
@@ -111,10 +150,25 @@ class AsyncLociClient:
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
         self._collection_prefix = collection_prefix
-        self._known_collections: set[str] = set()
-        self._collection_locks: dict[str, asyncio.Lock] = {}
-        self._locks_mutex = asyncio.Lock()
-        self._hilbert = HilbertIndex(resolutions=resolutions or [4, 8, 12])
+        self._data_collection = data_collection_name(collection_prefix)
+        self._summary_collection = summary_collection_name(collection_prefix)
+        # Per-collection readiness cache and create locks — exactly two real
+        # collections, so exactly two locks (serialising the check-then-create).
+        self._collection_ready: dict[str, bool] = {}
+        self._collection_locks: dict[str, asyncio.Lock] = {
+            self._data_collection: asyncio.Lock(),
+            self._summary_collection: asyncio.Lock(),
+        }
+        # Frontier of time this client has inserted; maintenance clocks off
+        # max(wall clock, frontier) so future-dated streams still age out.
+        self._newest_timestamp_ms = 0
+        # Explicit resolutions win; otherwise spatial_resolution becomes the
+        # coarsest (default) query resolution alongside the finer defaults.
+        self._hilbert = HilbertIndex(
+            resolutions=resolutions
+            if resolutions is not None
+            else sorted({spatial_resolution, 8, 12})
+        )
         self._adaptive = (
             AdaptiveResolution(
                 base_order=self._hilbert.resolutions[0],
@@ -125,19 +179,11 @@ class AsyncLociClient:
             else None
         )
         self._retention = (
-            RetentionManager(
-                policy=retention_policy,
-                epoch_size_ms=self._epoch_size_ms,
-                collection_prefix=collection_prefix,
-            )
+            RetentionManager(policy=retention_policy, epoch_size_ms=self._epoch_size_ms)
             if retention_policy is not None
             else None
         )
-
-    def _col_name(self, ep: int) -> str:
-        """Return the Qdrant collection name for an epoch, applying the tenant namespace prefix."""
-        base = collection_name(ep)
-        return f"{self._collection_prefix}{base}" if self._collection_prefix else base
+        self._consolidation_policy = consolidation_policy
 
     async def _retry(self, fn, *args, **kwargs):
         """Execute an async fn with retry logic."""
@@ -173,91 +219,123 @@ class AsyncLociClient:
     # Collection management
     # ------------------------------------------------------------------
 
-    async def _discover_collections(self) -> None:
-        """Refresh epoch collections; preserve the cache and raise on failure."""
-        prefix = f"{self._collection_prefix}loci_" if self._collection_prefix else "loci_"
-        known_before = self._known_collections.copy()
-        response = await self._retry(self._qdrant.get_collections)
-        discovered: set[str] = set()
-        for col in response.collections:
-            if col.name.startswith(prefix):
-                with contextlib.suppress(ValueError):
-                    if col.name == self._col_name(int(col.name[len(prefix) :])):
-                        discovered.add(col.name)
-        # Preserve collections created by this client while discovery awaited I/O.
-        self._known_collections = discovered | (self._known_collections - known_before)
+    async def _ensure_data_collection(self) -> None:
+        await self._ensure_collection(self._data_collection, hilbert_indices=True)
 
-    async def _ensure_collection(self, name: str) -> None:
-        """Create a Qdrant collection if it does not already exist (idempotent, async-safe)."""
-        if name in self._known_collections:
+    async def _ensure_summary_collection(self) -> None:
+        # Summaries carry no Hilbert payload; spatial queries reach them
+        # via the exact x/y/z Range conditions (plus the final post-check).
+        await self._ensure_collection(self._summary_collection, hilbert_indices=False)
+
+    async def _ensure_collection(self, name: str, *, hilbert_indices: bool) -> None:
+        """Create a Qdrant collection if it does not already exist.
+
+        Idempotent and async-safe: the collection's lock serialises the
+        check-then-create within this process, and a create conflict from a
+        concurrent external writer is treated as success (the race winner
+        also creates the payload indexes).
+        """
+        if self._collection_ready.get(name):
             return
-
-        # Per-collection lock prevents concurrent creation races.
-        async with self._locks_mutex:
-            if name not in self._collection_locks:
-                self._collection_locks[name] = asyncio.Lock()
         async with self._collection_locks[name]:
-            if name in self._known_collections:
+            if self._collection_ready.get(name):
                 return
+            if not await self._collection_exists(name):
+                await self._create_collection(name, hilbert_indices=hilbert_indices)
+            self._collection_ready[name] = True
 
-            exists = False
-            try:
-                await self._qdrant.get_collection(name)
-                exists = True
-            except UnexpectedResponse as exc:
-                if exc.status_code != 404:
-                    raise
-            except ValueError as exc:
-                # Qdrant's embedded backend reports missing collections this way.
-                if str(exc) != f"Collection {name} not found":
-                    raise
-
-            if not exists:
-                await self._qdrant.create_collection(
+    async def _create_collection(self, name: str, *, hilbert_indices: bool) -> None:
+        try:
+            await self._qdrant.create_collection(
+                collection_name=name,
+                vectors_config=VectorParams(
+                    size=self._vector_size,
+                    distance=self._distance,
+                ),
+            )
+        except Exception as exc:
+            # A concurrent writer won the create race; treat as success
+            # (the winner also creates the payload indexes).
+            if not _is_already_exists_error(exc):
+                raise
+            return
+        index_tasks: list[Any] = []
+        if hilbert_indices:
+            index_tasks.extend(
+                self._qdrant.create_payload_index(
                     collection_name=name,
-                    vectors_config=VectorParams(
-                        size=self._vector_size,
-                        distance=self._distance,
-                    ),
+                    field_name=f"hilbert_r{r}",
+                    field_schema=PayloadSchemaType.INTEGER,
                 )
-                index_tasks = [
-                    self._qdrant.create_payload_index(
-                        collection_name=name,
-                        field_name=f"hilbert_r{r}",
-                        field_schema=PayloadSchemaType.INTEGER,
-                    )
-                    for r in self._hilbert.resolutions
-                ]
-                index_tasks.extend(
-                    self._qdrant.create_payload_index(
-                        collection_name=name,
-                        field_name=field,
-                        field_schema=PayloadSchemaType.FLOAT,
-                    )
-                    for field in ("x", "y", "z", "confidence")
-                )
-                index_tasks.extend(
-                    [
-                        self._qdrant.create_payload_index(
-                            collection_name=name,
-                            field_name="timestamp_ms",
-                            field_schema=PayloadSchemaType.INTEGER,
-                        ),
-                        self._qdrant.create_payload_index(
-                            collection_name=name,
-                            field_name="scale_level",
-                            field_schema=PayloadSchemaType.KEYWORD,
-                        ),
-                        self._qdrant.create_payload_index(
-                            collection_name=name,
-                            field_name="scene_id",
-                            field_schema=PayloadSchemaType.KEYWORD,
-                        ),
-                    ]
-                )
-                await asyncio.gather(*index_tasks)
+                for r in self._hilbert.resolutions
+            )
+        index_tasks.extend(
+            [
+                self._qdrant.create_payload_index(
+                    collection_name=name,
+                    field_name="timestamp_ms",
+                    field_schema=PayloadSchemaType.INTEGER,
+                ),
+                self._qdrant.create_payload_index(
+                    collection_name=name,
+                    field_name="scale_level",
+                    field_schema=PayloadSchemaType.KEYWORD,
+                ),
+                self._qdrant.create_payload_index(
+                    collection_name=name,
+                    field_name="scene_id",
+                    field_schema=PayloadSchemaType.KEYWORD,
+                ),
+            ]
+        )
+        # Exact x/y/z/confidence Range conditions ride in the search filter
+        # before top-k (see query_scored); index them so they are cheap.
+        index_tasks.extend(
+            self._qdrant.create_payload_index(
+                collection_name=name,
+                field_name=field,
+                field_schema=PayloadSchemaType.FLOAT,
+            )
+            for field in _EXACT_RANGE_FIELDS
+        )
+        await asyncio.gather(*index_tasks)
 
-            self._known_collections.add(name)
+    async def _collection_exists(self, name: str) -> bool:
+        """Probe Qdrant for a collection using the HTTP server's 404 contract.
+
+        The probe goes through the retry policy like every other backend
+        call: a transient outage is retried and only propagates once the
+        budget is exhausted.  "Not found" (HTTP 404, or the embedded
+        engine's ValueError) is a definitive answer and returns False at
+        once.
+        """
+        try:
+            await self._retry(self._qdrant.get_collection, name)
+        except Exception as exc:
+            if _is_missing_collection_error(exc):
+                return False
+            raise
+        return True
+
+    async def _searchable(self, name: str) -> bool:
+        """True when a query/scan should touch *name*.
+
+        Cached once a collection is known to exist (created by us or found
+        by a probe — another writer may have created it).  Only "not found"
+        is tolerated (the collection may appear later); any other probe
+        failure propagates so an unavailable backend never looks like an
+        empty database.
+        """
+        if self._collection_ready.get(name):
+            return True
+        exists = await self._collection_exists(name)
+        if exists:
+            self._collection_ready[name] = True
+        return exists
+
+    def _validate_vector(self, vector: list[float]) -> None:
+        if len(vector) != self._vector_size:
+            raise ValueError(f"vector has dimension {len(vector)}, expected {self._vector_size}")
 
     # ------------------------------------------------------------------
     # Write
@@ -265,6 +343,8 @@ class AsyncLociClient:
 
     async def insert(self, state: WorldState) -> str:
         """Insert a single WorldState into the store.
+
+        The input *state* is not mutated.
 
         Args:
             state: The world state to persist.
@@ -275,11 +355,11 @@ class AsyncLociClient:
         if self._cloud is not None:
             return await self._cloud.insert(state)
 
-        point_id = uuid.uuid4().hex
+        self._validate_vector(state.vector)
+        point_id = str(uuid.uuid4())
 
         ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
-        col = self._col_name(ep)
-        await self._ensure_collection(col)
+        await self._ensure_data_collection()
 
         t_norm = _normalise_time(state.timestamp_ms, ep, self._epoch_size_ms)
         hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
@@ -292,23 +372,23 @@ class AsyncLociClient:
         # Causal linking
         predecessor = await self._find_latest_predecessor(state.scene_id, state.timestamp_ms)
         if predecessor is not None:
-            prev_id, prev_col = predecessor
-            payload["prev_state_id"] = prev_id
-            await self._patch_next_link(prev_id, point_id, collection_hint=prev_col)
+            payload["prev_state_id"] = predecessor
+            await self._patch_next_link(predecessor, point_id)
 
         await self._retry(
             self._qdrant.upsert,
-            collection_name=col,
+            collection_name=self._data_collection,
             points=[PointStruct(id=point_id, vector=state.vector, payload=payload)],
         )
+        self._newest_timestamp_ms = max(self._newest_timestamp_ms, state.timestamp_ms)
         await self._maybe_purge()
         return point_id
 
     async def insert_batch(self, states: list[WorldState]) -> list[str]:
-        """Insert a batch of WorldStates — truly batched, one upsert per epoch.
+        """Insert a batch of WorldStates — one upsert into the data collection.
 
-        Within a batch, states in the same scene are causally linked
-        in timestamp order.
+        Within a batch, states in the same scene are causally linked in
+        timestamp order.  Input states are not mutated.
 
         Args:
             states: List of world states.
@@ -318,25 +398,22 @@ class AsyncLociClient:
         """
         if self._cloud is not None:
             raise CloudModeUnsupportedError("insert_batch is not supported in cloud mode")
-        groups: dict[str, list[PointStruct]] = {}
-        ids: list[str] = []
+        for state in states:
+            self._validate_vector(state.vector)
+        await self._ensure_data_collection()
 
-        # Track per-scene causal chains within the batch
-        scene_chains: dict[str, tuple[str, str]] = {}  # scene_id → (latest point_id, collection)
-        prev_collection_by_point: dict[str, str] = {}
-
-        # Sort indices by (scene_id, timestamp_ms) for correct linking
-        indexed = sorted(enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms))
         id_by_index: dict[int, str] = {}
+        scene_chains: dict[str, str] = {}  # scene_id → latest point_id in the batch
+        points: list[PointStruct] = []
+
+        # Sort by (scene_id, timestamp) to build correct causal chains
+        indexed = sorted(enumerate(states), key=lambda it: (it[1].scene_id, it[1].timestamp_ms))
 
         for orig_idx, state in indexed:
-            point_id = uuid.uuid4().hex
+            point_id = str(uuid.uuid4())
             id_by_index[orig_idx] = point_id
 
             ep = epoch_id(state.timestamp_ms, self._epoch_size_ms)
-            col = self._col_name(ep)
-            await self._ensure_collection(col)
-
             t_norm = _normalise_time(state.timestamp_ms, ep, self._epoch_size_ms)
             hilbert_ids = self._hilbert.encode(state.x, state.y, state.z, t_norm)
             if self._adaptive is not None:
@@ -344,54 +421,42 @@ class AsyncLociClient:
 
             payload = _state_to_payload(state, hilbert_ids)
 
-            # Link within the batch
-            if state.scene_id and state.scene_id in scene_chains:
-                prev_id, prev_col = scene_chains[state.scene_id]
-                payload["prev_state_id"] = prev_id
-                prev_collection_by_point[point_id] = prev_col
+            # Causal link within the batch; the first state per scene links to
+            # the latest predecessor already in the store (matching the
+            # sequential-insert behaviour).
             if state.scene_id:
-                scene_chains[state.scene_id] = (point_id, col)
+                if state.scene_id in scene_chains:
+                    prev_id: str | None = scene_chains[state.scene_id]
+                else:
+                    prev_id = await self._find_latest_predecessor(
+                        state.scene_id, state.timestamp_ms
+                    )
+                if prev_id is not None:
+                    payload["prev_state_id"] = prev_id
+                scene_chains[state.scene_id] = point_id
 
-            groups.setdefault(col, []).append(
-                PointStruct(id=point_id, vector=state.vector, payload=payload)
+            points.append(PointStruct(id=point_id, vector=state.vector, payload=payload))
+
+        if points:
+            await self._retry(
+                self._qdrant.upsert, collection_name=self._data_collection, points=points
             )
 
-        # Fan out upserts concurrently
-        await asyncio.gather(
-            *(
-                self._retry(self._qdrant.upsert, collection_name=col, points=points)
-                for col, points in groups.items()
+        # Patch next_state_id for intra-batch links
+        for point in points:
+            prev_link_id = (point.payload or {}).get("prev_state_id")
+            if prev_link_id:
+                await self._patch_next_link(str(prev_link_id), str(point.id))
+
+        if states:
+            self._newest_timestamp_ms = max(
+                self._newest_timestamp_ms, max(s.timestamp_ms for s in states)
             )
-        )
-
-        # Patch next_state_id links within the batch
-        for col, points in groups.items():
-            for point in points:
-                prev_link_id = (point.payload or {}).get("prev_state_id")
-                if prev_link_id:
-                    prev_id_str = str(prev_link_id)
-                    try:
-                        await self._retry(
-                            self._qdrant.set_payload,
-                            collection_name=prev_collection_by_point.get(str(point.id), col),
-                            payload={"next_state_id": point.id},
-                            points=[prev_id_str],
-                        )
-                    except Exception:
-                        logger.debug(
-                            "Failed to patch next link %s→%s",
-                            prev_link_id,
-                            point.id,
-                            exc_info=True,
-                        )
-
-        # Return IDs in original order
-        ids = [id_by_index[i] for i in range(len(states))]
         await self._maybe_purge()
-        return ids
+        return [id_by_index[i] for i in range(len(states))]
 
     # ------------------------------------------------------------------
-    # Read — parallel fan-out
+    # Read — concurrent fan-out
     # ------------------------------------------------------------------
 
     async def query(
@@ -406,9 +471,9 @@ class AsyncLociClient:
         overlap_factor: float = 1.2,
         min_confidence: float | None = None,
     ) -> list[WorldState]:
-        """Search for nearest neighbours with parallel shard fan-out.
+        """Search for nearest neighbours with spatial and temporal filtering.
 
-        All matching epoch collections are searched concurrently.
+        The data and summary collections are searched concurrently.
 
         Args:
             vector: Query embedding vector.
@@ -420,8 +485,11 @@ class AsyncLociClient:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
         """
         if self._cloud is not None:
-            if _extra_payload_filter is not None or _epoch_ids is not None:
-                raise CloudModeUnsupportedError("advanced filtering is not supported in cloud mode")
+            _advanced = _extra_payload_filter is not None or _epoch_ids is not None
+            if _advanced:
+                raise CloudModeUnsupportedError(
+                    "advanced filtering (payload filters, epoch ids) is not supported in cloud mode"
+                )
             return await self._cloud.query(
                 vector=vector,
                 spatial_bounds=spatial_bounds,
@@ -457,96 +525,108 @@ class AsyncLociClient:
         overlap_factor: float = 1.2,
         min_confidence: float | None = None,
     ) -> list[ScoredWorldState]:
-        """Search and return scored results for downstream reranking."""
+        """Search and return scored results for downstream reranking.
+
+        Runs ONE search over the ``loci_data`` collection with
+        must-conditions [timestamp Range (when a window or epoch
+        restriction is given), Hilbert MatchAny (when spatial bounds are
+        given), exact x/y/z Range (when spatial bounds are given),
+        confidence Range (when ``min_confidence`` is given)], PLUS one
+        search over ``loci_summary`` (the same conditions minus the Hilbert
+        MatchAny — summaries carry no Hilbert payload), concurrently via
+        ``asyncio.gather``, then merges both result sets before the exact
+        post-check and decay re-rank.
+
+        The exact ranges are part of the backend filter *before* top-k
+        selection: a Hilbert cover (or a plain vector search over
+        summaries) can contain more out-of-box or low-confidence points
+        than the overfetch budget, and post-filtering alone would then
+        drop every qualifying point.  Backend failures propagate after the
+        retry budget is exhausted; a collection deleted out from under
+        this client yields no hits and resets its readiness cache.
+
+        Hilbert bucket selection: when the time window maps to a SINGLE
+        epoch, the cover uses that epoch's normalised t-bounds (full 4D
+        selectivity).  When the window spans multiple epochs, or there is
+        no window, the cover is computed with the full t range [0, 1] —
+        spatial-only selectivity — and the timestamp Range condition
+        carries the t-dimension instead.
+
+        Scores follow the higher-is-better convention for every distance
+        metric: raw Qdrant euclidean distances (smaller-is-better) are
+        negated at the boundary so decay re-ranking, merging, and
+        truncation behave identically across metrics and backends.
+        """
         if self._cloud is not None:
             raise CloudModeUnsupportedError("query_scored is not supported in cloud mode")
+
+        # Exact x/y/z/confidence Range conditions for the backend filter.
+        # The timestamp range is handled separately below because it is also
+        # intersected with the epoch restriction's envelope.
         exact_ranges = exact_payload_ranges(spatial_bounds, time_window_ms, min_confidence)
-        await self._discover_collections()
+        exact_ranges.pop("timestamp_ms", None)
 
-        if time_window_ms is not None:
-            start_ms, end_ms = time_window_ms
-            epochs = epochs_in_range(start_ms, end_ms, self._epoch_size_ms)
-        else:
-            epochs = self._list_active_epochs()
-        if _epoch_ids is not None:
-            epochs = [ep for ep in epochs if ep in _epoch_ids]
-
-        epoch_collections = [
-            (e, self._col_name(e)) for e in epochs if self._col_name(e) in self._known_collections
-        ]
-        if not epoch_collections:
+        if _epoch_ids is not None and not _epoch_ids:
+            # Explicit empty epoch restriction (funnel dead-end): no results.
             return []
 
-        shard_limit = limit * _EXACT_FILTER_OVERFETCH if spatial_bounds is not None else limit
+        # Timestamp Range: intersection of the query window and the epoch
+        # restriction's envelope (funnel narrowing).
+        ts_lo, ts_hi = self._timestamp_range(time_window_ms, _epoch_ids)
 
-        # Parallel fan-out across shards
-        async def _search_shard(ep: int, col: str) -> list[dict]:
-            must_conditions: list = []
-            if spatial_bounds is not None:
-                query_resolution = choose_query_resolution(
-                    self._hilbert,
-                    self._adaptive,
-                    spatial_bounds,
-                    time_window_ms,
-                    ep,
-                    self._epoch_size_ms,
-                    overlap_factor,
-                )
-                hids = self._hilbert.query_buckets(
-                    bounds_for_epoch(spatial_bounds, time_window_ms, ep, self._epoch_size_ms),
-                    resolution=query_resolution,
-                    overlap_factor=overlap_factor,
-                )
-                if not hids:
-                    return []
-                field = self._hilbert.payload_field(query_resolution)
-                must_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
+        # Over-fetch whenever post-search filtering (spatial exact match,
+        # min_confidence, epoch membership) or decay re-ranking can
+        # reorder/drop hits, else truncation could evict the top-k.
+        needs_overfetch = (
+            spatial_bounds is not None
+            or min_confidence is not None
+            or _epoch_ids is not None
+            or self._decay_lambda > 0
+        )
+        fetch_limit = limit * _EXACT_FILTER_OVERFETCH if needs_overfetch else limit
 
-            must_conditions.extend(
-                FieldCondition(key=key, range=Range(**bounds))
-                for key, bounds in exact_ranges.items()
+        base_conditions: list[FieldCondition] = []
+        if ts_lo is not None:
+            base_conditions.append(
+                FieldCondition(key="timestamp_ms", range=Range(gte=ts_lo, lte=ts_hi))
             )
+        base_conditions.extend(
+            FieldCondition(key=key, range=Range(**bounds)) for key, bounds in exact_ranges.items()
+        )
+        base_conditions.extend(extra_filter_to_conditions(_extra_payload_filter))
 
-            must_conditions.extend(extra_filter_to_conditions(_extra_payload_filter))
+        # --- Raw data search (Hilbert pre-filter + timestamp/exact Ranges) ---
+        data_conditions = list(base_conditions)
+        skip_data = False
+        if spatial_bounds is not None:
+            hids, field = self._hilbert_cover(spatial_bounds, time_window_ms, overlap_factor)
+            if hids:
+                data_conditions.append(FieldCondition(key=field, match=MatchAny(any=hids)))
+            else:
+                skip_data = True  # no bucket overlaps the requested region
 
-            query_filter = Filter(must=must_conditions) if must_conditions else None
-            try:
-                resp = await self._retry(
-                    self._qdrant.query_points,
-                    collection_name=col,
-                    query=vector,
-                    query_filter=query_filter,
-                    limit=shard_limit,
-                    with_vectors=True,
-                )
-                hits = resp.points
-                return [
-                    {
-                        "score": -hit.score if self._distance == Distance.EUCLID else hit.score,
-                        "timestamp_ms": hit.payload.get("timestamp_ms", 0),
-                        "payload": hit.payload,
-                        "vector": hit.vector,
-                        "id": hit.id,
-                    }
-                    for hit in hits
-                ]
-            except UnexpectedResponse as exc:
-                if exc.status_code != 404:
-                    raise
-                self._known_collections.discard(col)
-                return []
-            except ValueError as exc:
-                if str(exc) != f"Collection {col} not found":
-                    raise
-                self._known_collections.discard(col)
-                return []
+        search_jobs: list[tuple[str, list[FieldCondition], bool]] = []
+        if not skip_data and await self._searchable(self._data_collection):
+            search_jobs.append((self._data_collection, data_conditions, False))
+        # --- Summary search (no Hilbert condition) ---
+        if await self._searchable(self._summary_collection):
+            search_jobs.append((self._summary_collection, base_conditions, True))
 
-        shard_results = await asyncio.gather(
-            *(_search_shard(ep, col) for ep, col in epoch_collections)
+        # return_exceptions=True lets the sibling search run to completion
+        # (no orphaned task, no "exception was never retrieved" noise) before
+        # the first failure propagates; results are never partial.
+        outcomes = await asyncio.gather(
+            *(
+                self._search_collection(name, vector, conditions, fetch_limit, summary=summary)
+                for name, conditions, summary in search_jobs
+            ),
+            return_exceptions=True,
         )
         all_results: list[dict] = []
-        for batch in shard_results:
-            all_results.extend(batch)
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+            all_results.extend(outcome)
 
         if spatial_bounds is not None or time_window_ms is not None or min_confidence is not None:
             all_results = [
@@ -559,6 +639,8 @@ class AsyncLociClient:
                     min_confidence=min_confidence,
                 )
             ]
+        if _epoch_ids is not None:
+            all_results = [r for r in all_results if self._epoch_restriction_ok(r, _epoch_ids)]
 
         # Apply temporal decay and re-rank
         now_ms = int(time.time() * 1000)
@@ -620,12 +702,23 @@ class AsyncLociClient:
             :class:`PredictRetrieveResult` when ``current_position`` is set
             or ``return_prediction`` is ``True``, otherwise a plain list of
             :class:`WorldState`.
+
+        In cloud mode only the legacy path (plain query on the predicted
+        vector) is supported; ``current_position``, ``return_prediction``,
+        and ``calibrator`` require scored retrieval, which the cloud API
+        does not expose yet.
         """
-        if self._cloud is not None:
-            raise CloudModeUnsupportedError("predict_and_retrieve is not supported in cloud mode")
+        if self._cloud is not None and (
+            current_position is not None or return_prediction or calibrator is not None
+        ):
+            raise CloudModeUnsupportedError(
+                "predict_and_retrieve with current_position, return_prediction, or "
+                "calibrator is not supported in cloud mode"
+            )
         t_predictor = time.perf_counter()
         predicted_vector = predictor_fn(context_vector)
         predictor_call_ms = (time.perf_counter() - t_predictor) * 1000
+        _validate_predicted_vector(predicted_vector, len(context_vector))
         if current_timestamp_ms is not None:
             now_ms = current_timestamp_ms
         else:
@@ -661,15 +754,19 @@ class AsyncLociClient:
                     alpha=alpha,
                     limit=limit,
                     use_temporal_proximity=search_time_window_ms is not None,
+                    predicted_vector=predicted_vector,
+                    time_window_ms=search_time_window_ms,
                 )
             else:
                 results = []
                 best_score = 0.0
 
             if calibrator is not None:
-                calibrator.observe(best_score)
+                # Score against the window *before* observing so the current
+                # sample does not contaminate its own baseline.
                 prediction_novelty = calibrator.calibrated_novelty(best_score)
                 novelty_samples = len(calibrator)
+                calibrator.observe(best_score)
             else:
                 prediction_novelty = max(0.0, min(1.0, 1.0 - best_score))
                 novelty_samples = 0
@@ -716,58 +813,53 @@ class AsyncLociClient:
 
         return await async_funnel_search(self, vector, spatial_bounds, time_window_ms, limit)
 
+    # ------------------------------------------------------------------
+    # Temporal navigation
+    # ------------------------------------------------------------------
+
     async def get_trajectory(
         self,
         state_id: str,
         steps_back: int = 10,
         steps_forward: int = 10,
     ) -> list[WorldState]:
-        """Reconstruct a trajectory using scroll API with scene_id filter."""
+        """Reconstruct a trajectory using the scroll API with a scene_id filter.
+
+        Scans the raw data collection only — summaries are naturally
+        excluded by collection.
+        """
         if self._cloud is not None:
             raise CloudModeUnsupportedError("get_trajectory is not supported in cloud mode")
-        await self._discover_collections()
         anchor = await self._get_state_by_id(state_id)
         if anchor is None:
             return []
         if not anchor.scene_id:
             return [anchor]
 
-        async def _scroll_shard(col: str) -> list[WorldState]:
-            try:
-                points = await self._scroll_all(
-                    collection=col,
-                    scroll_filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="scene_id",
-                                match=MatchValue(value=anchor.scene_id),
-                            ),
-                        ]
-                    ),
-                    order_by="timestamp_ms",
-                    with_vectors=True,
-                )
-                results = []
-                for pt in points:
-                    vec = pt.vector
-                    if isinstance(vec, dict):
-                        vec = list(vec.values())[0] if vec else []
-                    results.append(_payload_to_state(pt.payload, pt.id, vec))
-                return results
-            except Exception:
-                return []
+        try:
+            points = await self._scroll_all(
+                collection=self._data_collection,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="scene_id",
+                            match=MatchValue(value=anchor.scene_id),
+                        ),
+                    ]
+                ),
+                with_vectors=True,
+            )
+        except Exception as exc:
+            logger.warning("Trajectory scroll failed on %s: %s", self._data_collection, exc)
+            return [anchor]
+        all_states = [_payload_to_state(pt.payload, pt.id, _point_vector(pt)) for pt in points]
 
-        shard_results = await asyncio.gather(
-            *(_scroll_shard(col) for col in list(self._known_collections))
-        )
-        all_states: list[WorldState] = []
-        for batch in shard_results:
-            all_states.extend(batch)
-
+        # Sort by timestamp and find anchor position
         all_states.sort(key=lambda s: s.timestamp_ms)
         anchor_idx = None
+        target = _normalize_id(state_id)
         for i, s in enumerate(all_states):
-            if s.id == state_id:
+            if _normalize_id(s.id) == target:
                 anchor_idx = i
                 break
 
@@ -783,10 +875,14 @@ class AsyncLociClient:
         state_id: str,
         window_ms: int = 5000,
     ) -> list[WorldState]:
-        """Return all states within ±window_ms in the same scene_id."""
+        """Return all states within ±window_ms in the same scene_id.
+
+        A single Qdrant scroll over the raw data collection with a
+        scene_id + timestamp range filter; summaries are naturally
+        excluded by collection.
+        """
         if self._cloud is not None:
             raise CloudModeUnsupportedError("get_causal_context is not supported in cloud mode")
-        await self._discover_collections()
         anchor = await self._get_state_by_id(state_id)
         if anchor is None or not anchor.scene_id:
             return []
@@ -794,51 +890,312 @@ class AsyncLociClient:
         t_min = anchor.timestamp_ms - window_ms
         t_max = anchor.timestamp_ms + window_ms
 
-        async def _scroll_shard(col: str) -> list[WorldState]:
-            try:
-                points = await self._scroll_all(
-                    collection=col,
-                    scroll_filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="scene_id",
-                                match=MatchValue(value=anchor.scene_id),
-                            ),
-                            FieldCondition(
-                                key="timestamp_ms",
-                                range=Range(gte=t_min, lte=t_max),
-                            ),
-                        ]
-                    ),
-                    order_by="timestamp_ms",
-                    with_vectors=True,
-                )
-                results = []
-                for pt in points:
-                    vec = pt.vector
-                    if isinstance(vec, dict):
-                        vec = list(vec.values())[0] if vec else []
-                    results.append(_payload_to_state(pt.payload, pt.id, vec))
-                return results
-            except Exception:
-                return []
-
-        shard_results = await asyncio.gather(
-            *(_scroll_shard(col) for col in list(self._known_collections))
-        )
-        context: list[WorldState] = []
-        for batch in shard_results:
-            context.extend(batch)
+        try:
+            points = await self._scroll_all(
+                collection=self._data_collection,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="scene_id",
+                            match=MatchValue(value=anchor.scene_id),
+                        ),
+                        FieldCondition(
+                            key="timestamp_ms",
+                            range=Range(gte=t_min, lte=t_max),
+                        ),
+                    ]
+                ),
+                with_vectors=True,
+            )
+        except Exception as exc:
+            logger.warning("Causal-context scroll failed on %s: %s", self._data_collection, exc)
+            return []
+        context = [_payload_to_state(pt.payload, pt.id, _point_vector(pt)) for pt in points]
 
         context.sort(key=lambda s: s.timestamp_ms)
         return context
+
+    # ------------------------------------------------------------------
+    # Query helpers
+    # ------------------------------------------------------------------
+
+    def _timestamp_range(
+        self,
+        time_window_ms: tuple[int, int] | None,
+        epoch_ids: set[int] | None,
+    ) -> tuple[int | None, int | None]:
+        """Inclusive timestamp Range for the search must-conditions.
+
+        Intersects the explicit query window with the envelope of an
+        internal epoch restriction (funnel narrowing).  The epoch envelope
+        is widened to whole coarse groups so summaries representing a
+        requested epoch stay reachable; exact membership is enforced by
+        :meth:`_epoch_restriction_ok` afterwards.
+        """
+        lo: int | None = None
+        hi: int | None = None
+        if time_window_ms is not None:
+            lo, hi = time_window_ms
+        if epoch_ids:
+            e_lo = min(epoch_ids) * self._epoch_size_ms
+            e_hi = (max(epoch_ids) + 1) * self._epoch_size_ms - 1
+            policy = self._consolidation_policy
+            if policy is not None:
+                first = coarse_id(min(epoch_ids), policy)
+                last = coarse_id(max(epoch_ids), policy)
+                e_lo = min(e_lo, coarse_time_range(first, policy, self._epoch_size_ms)[0])
+                e_hi = max(e_hi, coarse_time_range(last, policy, self._epoch_size_ms)[1])
+            lo = e_lo if lo is None else max(lo, e_lo)
+            hi = e_hi if hi is None else min(hi, e_hi)
+        return lo, hi
+
+    def _hilbert_cover(
+        self,
+        spatial_bounds: dict,
+        time_window_ms: tuple[int, int] | None,
+        overlap_factor: float,
+    ) -> tuple[list[int], str]:
+        """Hilbert bucket cover and payload field for a spatial query.
+
+        Single-epoch windows use that epoch's normalised t-bounds; anything
+        else covers the full t range [0, 1] (see :meth:`query_scored`).
+        """
+        single_epoch = time_window_ms is not None and epoch_id(
+            time_window_ms[0], self._epoch_size_ms
+        ) == epoch_id(time_window_ms[1], self._epoch_size_ms)
+        if single_epoch:
+            assert time_window_ms is not None
+            ep = epoch_id(time_window_ms[0], self._epoch_size_ms)
+            window: tuple[int, int] | None = time_window_ms
+        else:
+            ep = 0
+            window = None  # bounds_for_epoch then yields t in [0, 1]
+        resolution = choose_query_resolution(
+            self._hilbert,
+            self._adaptive,
+            spatial_bounds,
+            window,
+            ep,
+            self._epoch_size_ms,
+            overlap_factor,
+        )
+        hids = self._hilbert.query_buckets(
+            bounds_for_epoch(spatial_bounds, window, ep, self._epoch_size_ms),
+            resolution=resolution,
+            overlap_factor=overlap_factor,
+        )
+        return hids, self._hilbert.payload_field(resolution)
+
+    def _epoch_restriction_ok(self, result: dict, epoch_ids: set[int]) -> bool:
+        """Exact epoch-membership post-filter for an internal restriction.
+
+        Raw points must lie in a requested epoch.  Summaries represent a
+        whole coarse group, so they pass when their coarse group covers any
+        requested epoch (matching the old per-collection pruning).
+        """
+        ts = result["payload"].get("timestamp_ms", 0)
+        ep = epoch_id(ts, self._epoch_size_ms)
+        if not result["summary"]:
+            return ep in epoch_ids
+        policy = self._consolidation_policy
+        if policy is None:
+            return False
+        return coarse_id(ep, policy) in {coarse_id(e, policy) for e in epoch_ids}
+
+    async def _search_collection(
+        self,
+        name: str,
+        vector: list[float],
+        conditions: list[FieldCondition],
+        limit: int,
+        *,
+        summary: bool,
+    ) -> list[dict]:
+        """Run one vector search and return hit dicts.
+
+        Backend failures propagate once the retry budget is exhausted so a
+        broken backend never masquerades as an empty or partial result.
+        The one tolerated failure is a missing collection (deleted by
+        another writer or by an operator after this client cached it as
+        ready): that yields no hits and drops the readiness cache entry so
+        the next query re-probes.
+        """
+        query_filter = Filter(must=list(conditions)) if conditions else None
+        try:
+            resp = await self._retry(
+                self._qdrant.query_points,
+                collection_name=name,
+                query=vector,
+                query_filter=query_filter,
+                limit=limit,
+                with_vectors=True,
+            )
+        except Exception as exc:
+            if _is_missing_collection_error(exc):
+                logger.debug("Collection %s vanished during search; treating as empty", name)
+                self._collection_ready.pop(name, None)
+                return []
+            raise
+        return [self._hit_to_result(hit, summary=summary) for hit in resp.points]
+
+    def _hit_to_result(self, hit: Any, *, summary: bool) -> dict:
+        score = float(hit.score)
+        if self._distance == Distance.EUCLID:
+            # Qdrant returns raw euclidean distances (smaller is better);
+            # negate so all downstream code sees higher-is-better scores.
+            score = -score
+        payload = hit.payload or {}
+        return {
+            "score": score,
+            "timestamp_ms": payload.get("timestamp_ms", 0),
+            "payload": payload,
+            "vector": hit.vector,
+            "id": hit.id,
+            "summary": summary,
+        }
+
+    # ------------------------------------------------------------------
+    # Maintenance (consolidation first, then retention)
+    # ------------------------------------------------------------------
+
+    async def _maybe_purge(self) -> None:
+        """Run maintenance: consolidation first, then retention purge."""
+        now_ms = self._maintenance_now_ms()
+        await self._maybe_consolidate(now_ms)
+        if self._retention is None:
+            return
+        try:
+            await self._retention.maybe_purge_async(now_ms, self._delete_raw_before)
+        except Exception as exc:
+            logger.warning("Retention purge failed: %s", exc)
+
+    def _maintenance_now_ms(self) -> int:
+        """Maintenance clock: max(wall clock, newest inserted timestamp).
+
+        Future-dated streams (simulations, replays) advance the clock so
+        their old points still leave the raw/retention windows.
+        """
+        return max(int(time.time() * 1000), self._newest_timestamp_ms)
+
+    async def _delete_raw_before(self, cutoff_ms: int) -> None:
+        """Retention deleter: purge raw points below the cutoff.
+
+        Never touches the summary collection.  Qdrant deletes do not report
+        a count, so this returns None (the manager tolerates that).
+        """
+        await self._delete_time_range(self._data_collection, 0, cutoff_ms)
+
+    async def _delete_time_range(self, collection: str, t_min_ms: int, t_max_ms: int) -> None:
+        """Delete points with ``t_min_ms <= timestamp_ms < t_max_ms``."""
+        await self._retry(
+            self._qdrant.delete,
+            collection_name=collection,
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="timestamp_ms",
+                            range=Range(gte=t_min_ms, lt=t_max_ms),
+                        )
+                    ]
+                )
+            ),
+        )
+
+    async def _maybe_consolidate(self, now_ms: int) -> None:
+        """Fold raw epochs that left the raw window into the summary collection."""
+        policy = self._consolidation_policy
+        if policy is None:
+            return
+        cutoff_ms = fold_cutoff_ms(now_ms, self._epoch_size_ms, policy)
+        if cutoff_ms <= 0:
+            return
+        stale_filter = Filter(must=[FieldCondition(key="timestamp_ms", range=Range(lt=cutoff_ms))])
+        try:
+            # Cheap staleness probe (limit-1) before the full scan.
+            hits = await self._qdrant.scroll(
+                collection_name=self._data_collection,
+                scroll_filter=stale_filter,
+                limit=1,
+            )
+            probe = hits[0] if isinstance(hits, tuple) else hits
+            if not probe:
+                return
+            stale = await self._scroll_all(
+                collection=self._data_collection,
+                scroll_filter=stale_filter,
+                with_vectors=True,
+            )
+        except Exception:
+            logger.warning("Consolidation scan failed on %s", self._data_collection, exc_info=True)
+            return
+        by_epoch: dict[int, list[Any]] = {}
+        for pt in stale:
+            ep = epoch_id(_point_timestamp(pt), self._epoch_size_ms)
+            by_epoch.setdefault(ep, []).append(pt)
+        for ep in sorted(by_epoch):
+            try:
+                await self._consolidate_epoch(ep, by_epoch[ep], policy)
+            except Exception:
+                logger.warning("Consolidation failed for epoch %d", ep, exc_info=True)
+
+    async def _consolidate_epoch(
+        self, ep: int, raw_points: list[Any], policy: ConsolidationPolicy
+    ) -> None:
+        """Fold one raw epoch into its coarse summary group.
+
+        The coarse group's existing summaries (selected by timestamp Range
+        over its coarse time range) are combined with the epoch's raw
+        states and re-consolidated, keeping the group at
+        ``max_states_per_scene`` states per scene; the old summaries are
+        replaced (delete Range + upsert) and the epoch's raw points deleted.
+        """
+        coarse = coarse_id(ep, policy)
+        t_min, t_max = coarse_time_range(coarse, policy, self._epoch_size_ms)
+        summary_exists = await self._searchable(self._summary_collection)
+        existing: list[Any] = []
+        if summary_exists:
+            existing = await self._scroll_all(
+                collection=self._summary_collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="timestamp_ms", range=Range(gte=t_min, lte=t_max))]
+                ),
+                with_vectors=True,
+            )
+        combined = [
+            _payload_to_state(pt.payload, pt.id, _point_vector(pt))
+            for pt in [*existing, *raw_points]
+        ]
+        summaries = consolidate_states(combined, policy, seed=ep)
+        if summary_exists:
+            await self._delete_time_range(self._summary_collection, t_min, t_max + 1)
+        if summaries:
+            await self._ensure_summary_collection()
+            # Summaries carry no Hilbert payload; spatial queries reach them
+            # via the exact x/y/z Range conditions (plus the final post-check).
+            points = [
+                PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=s.vector,
+                    payload=_state_to_payload(s, {}),
+                )
+                for s in summaries
+            ]
+            await self._retry(
+                self._qdrant.upsert, collection_name=self._summary_collection, points=points
+            )
+        await self._delete_time_range(
+            self._data_collection, ep * self._epoch_size_ms, (ep + 1) * self._epoch_size_ms
+        )
+        logger.info("Consolidated epoch %d into %s", ep, self._summary_collection)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     async def _get_state_by_id(self, state_id: str) -> WorldState | None:
-        for col in list(self._known_collections):
+        """Retrieve a single state by ID (data collection first, then summaries)."""
+        for col in (self._data_collection, self._summary_collection):
             try:
                 results = await self._retry(
                     self._qdrant.retrieve,
@@ -847,86 +1204,67 @@ class AsyncLociClient:
                     with_payload=True,
                     with_vectors=True,
                 )
-                if results:
-                    vec = results[0].vector
-                    if isinstance(vec, dict):
-                        vec = list(vec.values())[0] if vec else []
-                    return _payload_to_state(results[0].payload, results[0].id, vec)
-            except Exception:  # noqa: S112  # retry loop across epochs
+            except Exception:  # noqa: S112  # missing collection or transient failure
                 continue
+            if results:
+                return _payload_to_state(
+                    results[0].payload, results[0].id, _point_vector(results[0])
+                )
         return None
 
-    async def _find_latest_predecessor(
-        self, scene_id: str, before_ms: int
-    ) -> tuple[str, str] | None:
+    async def _find_latest_predecessor(self, scene_id: str, before_ms: int) -> str | None:
+        """Latest raw point in *scene_id* strictly before *before_ms*.
+
+        A single filtered scroll over the data collection — summaries are
+        naturally excluded by collection and never become predecessors.
+        Scrolls unordered (server-side ordering breaks pagination) and
+        picks the max-timestamp point client-side.
+        """
         if not scene_id:
             return None
-        await self._discover_collections()
-        for collection in self._predecessor_search_collections(before_ms):
-            try:
-                points = await self._scroll_all(
-                    collection=collection,
-                    scroll_filter=Filter(
-                        must=[
-                            FieldCondition(key="scene_id", match=MatchValue(value=scene_id)),
-                            FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
-                        ]
-                    ),
-                    order_by="timestamp_ms",
-                )
-                if points:
-                    # Scroll returns ascending order; last item is the latest predecessor
-                    return str(points[-1].id), collection
-            except Exception:
-                logger.debug("Failed to find predecessor in %s", collection, exc_info=True)
+        try:
+            points = await self._scroll_all(
+                collection=self._data_collection,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(key="scene_id", match=MatchValue(value=scene_id)),
+                        FieldCondition(key="timestamp_ms", range=Range(lt=before_ms)),
+                    ]
+                ),
+            )
+        except Exception:
+            logger.debug("Failed to find predecessor in %s", self._data_collection, exc_info=True)
+            return None
+        if points:
+            return str(max(points, key=_point_timestamp).id)
         return None
 
-    async def _patch_next_link(
-        self, prev_id: str, next_id: str, collection_hint: str | None = None
-    ) -> None:
-        collections = list(self._known_collections)
-        if collection_hint is not None:
-            collections = [collection_hint] + [col for col in collections if col != collection_hint]
-        for col in collections:
-            try:
-                await self._retry(
-                    self._qdrant.set_payload,
-                    collection_name=col,
-                    payload={"next_state_id": next_id},
-                    points=[prev_id],
-                )
-                return
-            except Exception:  # noqa: S112  # retry loop across epochs
-                continue
-
-    async def _maybe_purge(self) -> None:
-        if self._retention is None:
-            return
-
-        async def delete_collection(name: str) -> None:
-            if await self._qdrant.delete_collection(name) is False:
-                raise RuntimeError(f"Backend did not delete collection {name}")
-
+    async def _patch_next_link(self, prev_id: str, next_id: str) -> None:
+        """Update the predecessor's next_state_id payload field (best effort)."""
         try:
-            await self._discover_collections()
-            dropped = await self._retention.maybe_purge_async(
-                active_epochs=self._list_active_epochs(),
-                now_ms=int(time.time() * 1000),
-                delete_fn=delete_collection,
+            await self._retry(
+                self._qdrant.set_payload,
+                collection_name=self._data_collection,
+                payload={"next_state_id": next_id},
+                points=[prev_id],
             )
-            self._known_collections.difference_update(dropped)
-        except Exception as exc:
-            logger.warning("Retention purge failed: %s", exc)
+        except Exception:
+            logger.debug("Failed to patch next link %s→%s", prev_id, next_id, exc_info=True)
 
     async def _scroll_all(
         self,
         *,
         collection: str,
         scroll_filter: Filter | None = None,
-        order_by: str | None = None,
         with_vectors: bool = False,
     ) -> list:
-        """Return the full ordered scroll result for a collection."""
+        """Return the full scroll result for a collection.
+
+        Scrolls unordered: Qdrant returns ``next_page_offset=None`` whenever
+        ``order_by`` is set (and rejects ``offset`` + ``order_by``), which
+        silently truncated ordered scrolls to a single page. Callers sort
+        client-side by ``timestamp_ms`` instead.
+        """
         offset: object | None = None
         all_points: list = []
         while True:
@@ -935,7 +1273,6 @@ class AsyncLociClient:
                 collection_name=collection,
                 scroll_filter=scroll_filter,
                 limit=_SCROLL_PAGE_SIZE,
-                order_by=order_by,
                 with_vectors=with_vectors,
                 offset=offset,
             )
@@ -946,25 +1283,58 @@ class AsyncLociClient:
             offset = next_offset
         return all_points
 
-    def _predecessor_search_collections(self, before_ms: int) -> list[str]:
-        target_epoch = epoch_id(before_ms, self._epoch_size_ms)
-        epochs = [ep for ep in self._list_active_epochs() if ep <= target_epoch]
-        return [self._col_name(ep) for ep in sorted(epochs, reverse=True)]
-
-    def _list_active_epochs(self) -> list[int]:
-        """Return epoch IDs for all known collections, respecting the tenant prefix."""
-        prefix = f"{self._collection_prefix}loci_" if self._collection_prefix else "loci_"
-        epochs: list[int] = []
-        for col in self._known_collections:
-            if col.startswith(prefix):
-                with contextlib.suppress(ValueError):
-                    epochs.append(int(col[len(prefix) :]))
-        return sorted(epochs) if epochs else []
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers (used by both sync and async clients)
 # ---------------------------------------------------------------------------
+
+
+def _normalize_id(point_id: object) -> str:
+    """Normalise a point ID for comparison.
+
+    Real Qdrant servers canonicalise UUID point IDs into lowercase hyphenated
+    form, while historic Loci clients generated hyphen-less ``uuid4().hex``
+    IDs. Comparing normalised forms keeps both representations matching.
+    """
+    return str(point_id).lower().replace("-", "")
+
+
+def _is_already_exists_error(exc: Exception) -> bool:
+    """Return True for Qdrant 'collection already exists' create conflicts."""
+    if getattr(exc, "status_code", None) == 409:
+        return True
+    return "already exists" in str(exc).lower()
+
+
+def _is_missing_collection_error(exc: Exception) -> bool:
+    """Return True when *exc* means the collection does not exist.
+
+    The HTTP server answers 404; qdrant-client's embedded (":memory:"/path)
+    engine raises ``ValueError("Collection <name> not found")`` instead.  The
+    match is anchored on that message because the same engine reports a
+    missing point or named vector with a similar ``... not found`` ValueError
+    that must propagate as a real error.
+    """
+    if isinstance(exc, UnexpectedResponse):
+        return exc.status_code == 404
+    if not isinstance(exc, ValueError):
+        return False
+    message = str(exc).strip().lower()
+    return message.startswith("collection ") and message.endswith(" not found")
+
+
+def _point_timestamp(point: Any) -> int:
+    """Timestamp of a scrolled Qdrant point (0 when payload is missing)."""
+    payload = getattr(point, "payload", None) or {}
+    return int(payload.get("timestamp_ms", 0))
+
+
+def _point_vector(point: Any) -> list[float]:
+    """Plain vector of a Qdrant point (unwraps single-entry named-vector dicts)."""
+    vec = point.vector
+    if isinstance(vec, dict):
+        vec = list(vec.values())[0] if vec else []
+    return vec if vec is not None else []
 
 
 def _normalise_time(timestamp_ms: int, ep: int, epoch_size_ms: int) -> float:

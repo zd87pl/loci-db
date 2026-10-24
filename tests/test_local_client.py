@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from loci.local_client import LocalLociClient
+from loci.backends.memory import _matches
+from loci.local_client import LocalLociClient, _conjoin_filter
 from loci.schema import ScoredWorldState, WorldState
 
 # ---------------------------------------------------------------------------
@@ -352,6 +353,147 @@ class TestPredictAndRetrieve:
 
 
 # ---------------------------------------------------------------------------
+# Vector dimension validation
+# ---------------------------------------------------------------------------
+
+
+class TestVectorValidation:
+    def test_insert_rejects_wrong_dimension(self, client):
+        with pytest.raises(ValueError, match="dimension"):
+            client.insert(_make_state(vector=[1.0, 0.0]))
+        assert client.store.total_points == 0
+
+    def test_insert_batch_rejects_wrong_dimension(self, client):
+        states = [_make_state(), _make_state(vector=[1.0])]
+        with pytest.raises(ValueError, match="dimension"):
+            client.insert_batch(states)
+        assert client.store.total_points == 0
+
+    def test_bad_insert_does_not_poison_collection(self, client):
+        """A rejected insert must leave the collection queryable."""
+        client.insert(_make_state())
+        with pytest.raises(ValueError):
+            client.insert(_make_state(vector=[1.0, 2.0, 3.0]))
+        results = client.query(vector=[1.0, 0.0, 0.0, 0.0], limit=5)
+        assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# min_confidence
+# ---------------------------------------------------------------------------
+
+
+class TestMinConfidence:
+    def test_full_limit_returned_when_enough_matches(self):
+        client = LocalLociClient(vector_size=VEC_SIZE, decay_lambda=0.0)
+        for i in range(10):
+            state = _make_state(ts=1000 + i, scene=f"s{i}")
+            state.confidence = 0.9
+            client.insert(state)
+
+        results = client.query(
+            vector=[1.0, 0.0, 0.0, 0.0],
+            limit=5,
+            min_confidence=0.5,
+        )
+        # All 10 stored states qualify; the query must return the full limit
+        # instead of post-filtering an under-fetched candidate set to zero.
+        assert len(results) == 5
+
+    def test_low_confidence_excluded(self):
+        client = LocalLociClient(vector_size=VEC_SIZE, decay_lambda=0.0)
+        low = _make_state(ts=1000, scene="a")
+        low.confidence = 0.2
+        high = _make_state(ts=1001, scene="b")
+        high.confidence = 0.9
+        client.insert(low)
+        high_id = client.insert(high)
+
+        results = client.query(
+            vector=[1.0, 0.0, 0.0, 0.0],
+            limit=5,
+            min_confidence=0.5,
+        )
+        assert [r.id for r in results] == [high_id]
+
+
+# ---------------------------------------------------------------------------
+# Decay-aware cross-epoch top-k merge
+# ---------------------------------------------------------------------------
+
+
+class TestDecayAwareMerge:
+    def test_decayed_top1_survives_per_shard_truncation(self):
+        """Without decay-aware overfetch the true decayed top-1 is lost.
+
+        Epoch A holds the raw-score winner (very old, decays to ~0) and the
+        true decayed winner (good score, recent). Epoch B holds a weak old
+        match. With shard_limit == limit == 1, only the raw winner would be
+        fetched from epoch A and the true decayed top-1 would never be seen.
+        """
+        import math
+
+        half_life_ms = 60_000.0
+        lam = math.log(2) / half_life_ms
+        epoch_ms = 3_600_000  # one-hour epochs → wide intra-epoch age spread
+        client = LocalLociClient(vector_size=VEC_SIZE, decay_lambda=lam, epoch_size_ms=epoch_ms)
+
+        epoch_start = 10 * epoch_ms
+        fixed_now_ms = epoch_start + 3_500_000  # deep into epoch 10
+
+        # Raw winner: perfect similarity, but ancient within the epoch
+        # (~58 half-lives old → decays to ~0).
+        client.insert(_make_state(ts=epoch_start, scene="s1", vector=[1.0, 0.0, 0.0, 0.0]))
+        # True decayed winner: slightly lower similarity, brand new.
+        winner_id = client.insert(
+            _make_state(ts=fixed_now_ms, scene="s1", vector=[0.99, 0.14, 0.0, 0.0])
+        )
+        # Previous epoch: weak old match.
+        client.insert(_make_state(ts=epoch_start - 1, scene="s2", vector=[0.3, 0.95, 0.0, 0.0]))
+
+        with patch("loci.local_client.time.time", return_value=fixed_now_ms / 1000.0):
+            results = client.query(vector=[1.0, 0.0, 0.0, 0.0], limit=1)
+
+        assert len(results) == 1
+        assert results[0].id == winner_id
+
+
+# ---------------------------------------------------------------------------
+# spatial_resolution constructor parameter
+# ---------------------------------------------------------------------------
+
+
+class TestSpatialResolution:
+    def test_spatial_resolution_produces_matching_payload_keys(self):
+        client = LocalLociClient(vector_size=VEC_SIZE, spatial_resolution=6)
+        state_id = client.insert(_make_state())
+
+        stored = client.store.retrieve("loci_data", [state_id])[0]
+        assert "hilbert_r6" in stored["payload"]
+        assert "hilbert_r4" not in stored["payload"]
+
+    def test_explicit_resolutions_win(self):
+        client = LocalLociClient(vector_size=VEC_SIZE, spatial_resolution=6, resolutions=[5, 9])
+        assert client._hilbert.resolutions == [5, 9]
+
+    def test_spatial_resolution_queries_still_match(self):
+        client = LocalLociClient(vector_size=VEC_SIZE, spatial_resolution=6, decay_lambda=0.0)
+        client.insert(_make_state(x=0.5, y=0.5, z=0.5))
+        results = client.query(
+            vector=[1.0, 0.0, 0.0, 0.0],
+            spatial_bounds={
+                "x_min": 0.4,
+                "x_max": 0.6,
+                "y_min": 0.4,
+                "y_max": 0.6,
+                "z_min": 0.4,
+                "z_max": 0.6,
+            },
+        )
+        assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
 # Distance metrics
 # ---------------------------------------------------------------------------
 
@@ -374,6 +516,58 @@ class TestDistanceMetrics:
 # ---------------------------------------------------------------------------
 # Metadata round-trip
 # ---------------------------------------------------------------------------
+
+
+class TestConjoinFilter:
+    """``_conjoin_filter`` ANDs a second predicate into a MemoryStore filter
+    key instead of replacing the first one (``_matches`` evaluates the merged
+    dict conjunctively)."""
+
+    def test_first_condition_is_stored_verbatim(self):
+        f: dict = {}
+        _conjoin_filter(f, "ts", {"gte": 1000, "lte": 2000})
+        assert f == {"ts": {"gte": 1000, "lte": 2000}}
+
+    def test_scalar_narrows_existing_range(self):
+        f = {"ts": {"gte": 1000, "lte": 2000}}
+        _conjoin_filter(f, "ts", 1001)
+        assert f == {"ts": {"gte": 1000, "lte": 2000, "any": [1001]}}
+        assert _matches({"ts": 1001}, f)
+        assert not _matches({"ts": 1500}, f)
+
+    def test_any_list_narrows_existing_range(self):
+        f = {"ts": {"gte": 1000, "lte": 2000}}
+        _conjoin_filter(f, "ts", {"any": [999, 1001]})
+        assert f == {"ts": {"gte": 1000, "lte": 2000, "any": [999, 1001]}}
+        assert not _matches({"ts": 999}, f)  # in the list, outside the range
+        assert _matches({"ts": 1001}, f)
+
+    def test_range_narrows_existing_scalar(self):
+        f = {"ts": 999}
+        _conjoin_filter(f, "ts", {"gte": 1000, "lte": 2000})
+        assert f == {"ts": {"any": [999], "gte": 1000, "lte": 2000}}
+        assert not _matches({"ts": 999}, f)
+
+    def test_any_lists_intersect(self):
+        f = {"scene": {"any": ["a", "b"]}}
+        _conjoin_filter(f, "scene", {"any": ["b", "c"]})
+        assert f == {"scene": {"any": ["b"]}}
+
+    def test_contradictory_scalars_match_nothing(self):
+        f = {"scene": "a"}
+        _conjoin_filter(f, "scene", "b")
+        assert f == {"scene": {"any": []}}
+        assert not _matches({"scene": "a"}, f)
+        assert not _matches({"scene": "b"}, f)
+
+    def test_overlapping_bounds_keep_the_tighter_limit(self):
+        f = {"c": {"gte": 0.2, "lte": 0.9, "gt": 0.1, "lt": 0.95}}
+        _conjoin_filter(f, "c", {"gte": 0.5, "lte": 0.7, "gt": 0.3, "lt": 0.8})
+        assert f == {"c": {"gte": 0.5, "lte": 0.7, "gt": 0.3, "lt": 0.8}}
+
+        wider = {"c": {"gte": 0.5, "lte": 0.7}}
+        _conjoin_filter(wider, "c", {"gte": 0.2, "lte": 0.9})
+        assert wider == {"c": {"gte": 0.5, "lte": 0.7}}
 
 
 class TestMetadataRoundTrip:

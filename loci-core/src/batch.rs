@@ -18,10 +18,10 @@ pub fn prepare_world_states(
     xs: &[f64],
     ys: &[f64],
     zs: &[f64],
-    timestamps_ms: &[u64],
-    epoch_size_ms: u64,
+    timestamps_ms: &[i64],
+    epoch_size_ms: i64,
     hilbert_order: u32,
-) -> Vec<(u64, u64, u64)> {
+) -> Vec<(u64, u64, i64)> {
     (0..xs.len())
         .into_par_iter()
         .map(|i| {
@@ -45,14 +45,18 @@ pub fn py_batch_prepare_world_states<'py>(
     xs: PyReadonlyArray1<'py, f64>,
     ys: PyReadonlyArray1<'py, f64>,
     zs: PyReadonlyArray1<'py, f64>,
-    timestamps_ms: PyReadonlyArray1<'py, u64>,
-    epoch_size_ms: u64,
+    timestamps_ms: PyReadonlyArray1<'py, i64>,
+    epoch_size_ms: i64,
     hilbert_order: u32,
 ) -> PyResult<(
     Bound<'py, PyArray1<u64>>,
     Bound<'py, PyArray1<u64>>,
-    Bound<'py, PyArray1<u64>>,
+    Bound<'py, PyArray1<i64>>,
 )> {
+    // The 4D encode is the binding constraint: 4 * order <= 64 bits.
+    hilbert::check_order(4, hilbert_order)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
     let xs_arr = xs.as_array();
     let ys_arr = ys.as_array();
     let zs_arr = zs.as_array();
@@ -68,7 +72,15 @@ pub fn py_batch_prepare_world_states<'py>(
     let xs_vec: Vec<f64> = xs_arr.iter().copied().collect();
     let ys_vec: Vec<f64> = ys_arr.iter().copied().collect();
     let zs_vec: Vec<f64> = zs_arr.iter().copied().collect();
-    let ts_vec: Vec<u64> = ts_arr.iter().copied().collect();
+    let ts_vec: Vec<i64> = ts_arr.iter().copied().collect();
+
+    for i in 0..n {
+        if !(xs_vec[i].is_finite() && ys_vec[i].is_finite() && zs_vec[i].is_finite()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "coordinates at index {i} contain a non-finite value"
+            )));
+        }
+    }
 
     let results = prepare_world_states(&xs_vec, &ys_vec, &zs_vec, &ts_vec, epoch_size_ms, hilbert_order);
 

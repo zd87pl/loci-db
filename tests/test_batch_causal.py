@@ -105,12 +105,14 @@ def test_batch_patches_next_links(client, mock_qdrant):
     assert "next_state_id" in call_kwargs["payload"]
 
 
-def test_batch_patches_cross_epoch_next_link_in_predecessor_collection(client, mock_qdrant):
+def test_batch_patches_cross_epoch_next_link_in_data_collection(client, mock_qdrant):
+    # The two states span a logical epoch boundary, but all raw points live
+    # in the single data collection — the next-link patch lands there.
     states = [_make(4_900), _make(5_100)]
     client.insert_batch(states)
 
     call_kwargs = mock_qdrant.set_payload.call_args.kwargs
-    assert call_kwargs["collection_name"] == "loci_0"
+    assert call_kwargs["collection_name"] == "loci_data"
 
 
 def test_batch_preserves_original_order(client, mock_qdrant):
@@ -119,3 +121,62 @@ def test_batch_preserves_original_order(client, mock_qdrant):
     ids = client.insert_batch(states)
     assert len(ids) == 3
     assert len(set(ids)) == 3
+
+
+def test_batch_links_first_state_to_stored_predecessor(client, mock_qdrant):
+    """The earliest batch state per scene links to the latest stored state."""
+    # A predecessor for scene_a already exists in the data collection.
+    stored = MagicMock()
+    stored.id = "stored-pred"
+    stored.payload = {"timestamp_ms": 9_000}
+
+    def _scroll(collection_name=None, **kwargs):
+        if collection_name == "loci_data":
+            return ([stored], None)
+        return ([], None)
+
+    mock_qdrant.scroll.side_effect = _scroll
+
+    states = [_make(10_000), _make(10_050)]
+    client.insert_batch(states)
+
+    all_points = []
+    for call in mock_qdrant.upsert.call_args_list:
+        all_points.extend(call.kwargs["points"])
+    all_points.sort(key=lambda p: p.payload["timestamp_ms"])
+
+    # First batch state links back to the stored predecessor …
+    assert all_points[0].payload["prev_state_id"] == "stored-pred"
+    # … and the chain continues within the batch.
+    assert all_points[1].payload["prev_state_id"] == all_points[0].id
+
+    # The stored predecessor's next link is patched in the data collection.
+    patched = [
+        call.kwargs
+        for call in mock_qdrant.set_payload.call_args_list
+        if call.kwargs["points"] == ["stored-pred"]
+    ]
+    assert len(patched) == 1
+    assert patched[0]["collection_name"] == "loci_data"
+    assert patched[0]["payload"]["next_state_id"] == all_points[0].id
+
+
+def test_batch_matches_sequential_chain_on_memory_backend():
+    """Batch and sequential inserts must build the same causal chain."""
+    from loci.local_client import LocalLociClient
+    from loci.schema import WorldState
+
+    def _state(ts: int) -> WorldState:
+        return WorldState(
+            x=0.5, y=0.5, z=0.5, timestamp_ms=ts, vector=[1.0, 0.0, 0.0, 0.0], scene_id="s1"
+        )
+
+    client = LocalLociClient(vector_size=4, epoch_size_ms=5000, decay_lambda=0.0)
+    first_id = client.insert(_state(1000))
+    batch_ids = client.insert_batch([_state(2000), _state(3000)])
+
+    traj = client.get_trajectory(batch_ids[1], steps_back=5, steps_forward=5)
+    assert [s.id for s in traj] == [first_id, *batch_ids]
+    # Explicit prev/next links across the store/batch boundary.
+    assert traj[1].prev_state_id == first_id
+    assert traj[0].next_state_id == batch_ids[0]

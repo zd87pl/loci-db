@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from loci import LocalLociClient, WorldState
-from loci.temporal.sharding import collection_name, epoch_id
+from loci.temporal.retention import RetentionPolicy
+from loci.temporal.sharding import epoch_id
 
 from .embeddings import EMBEDDING_DIM, generate_embedding
 
@@ -19,6 +20,13 @@ logger = logging.getLogger(__name__)
 GRID_W = 20
 GRID_H = 20
 TICK_INTERVAL_MS = 500
+EPOCH_SIZE_MS = 5000
+# Retention cap for the in-memory store. The tick loop inserts one WorldState
+# every TICK_INTERVAL_MS forever (and /api/simulation/start is unauthenticated),
+# so without a cap memory grows unbounded. Retention keeps a rolling window of
+# MEMORY_MAX_EPOCHS epoch-wide slots of raw points. At 500ms ticks each 5s
+# epoch holds ~10 points, so 5000 epochs ≈ 50k points ≈ 7 hours of patrol.
+MEMORY_MAX_EPOCHS = 5000
 PREDICT_MIN_MEMORIES = 12
 ANOMALY_MIN_MEMORIES = 8
 ROUTE_PREVIEW_STEPS = 8
@@ -120,16 +128,21 @@ class Simulation:
     recent_positions: list[tuple[int, int]] = field(default_factory=list)
     recent_state_ids: list[str] = field(default_factory=list)
 
+    # Retention cap (number of temporal epochs kept in memory)
+    memory_max_epochs: int = MEMORY_MAX_EPOCHS
+
     def __post_init__(self) -> None:
         self.client = LocalLociClient(
             vector_size=EMBEDDING_DIM,
-            epoch_size_ms=5000,
+            epoch_size_ms=EPOCH_SIZE_MS,
             decay_lambda=1e-4,
             distance="cosine",
+            retention_policy=RetentionPolicy(max_epochs=self.memory_max_epochs),
         )
         self.warehouse = generate_warehouse()
         self.warehouse_grid = {(o.x, o.y): o.obj_type for o in self.warehouse}
         self.patrol_route = generate_patrol_route()
+        self._eviction_logged = False
 
     @property
     def tick_interval_ms(self) -> int:
@@ -401,11 +414,20 @@ class Simulation:
             scene_id="warehouse",
             scale_level="patch",
         )
+        points_before = self.memory_count
         state_id = self.client.insert(state)
+        # Retention purge runs inside insert(); if the store did not grow,
+        # the oldest raw points were evicted to honour the cap.
+        if self.memory_count <= points_before and not self._eviction_logged:
+            logger.info(
+                "Memory retention cap reached (max_epochs=%d) — evicting oldest points",
+                self.memory_max_epochs,
+            )
+            self._eviction_logged = True
 
         # Build inference log entries for the UI
         ep = epoch_id(timestamp_ms, self.client._epoch_size_ms)
-        col = collection_name(ep)
+        col = self.client._data_collection
         t_norm = self.client._normalise_time(timestamp_ms, ep)
         hilbert_ids = self.client._hilbert.encode(nx, ny, 0.5, t_norm)
         hilbert_summary = ", ".join(
@@ -423,19 +445,12 @@ class Simulation:
             {
                 "ts": timestamp_ms,
                 "tag": "HILBERT",
-                "msg": (
-                    f"4D→1D  ({nx:.2f}, {ny:.2f}, 0.50, {t_norm:.2f})"
-                    f" → {hilbert_summary}"
-                ),
+                "msg": (f"4D→1D  ({nx:.2f}, {ny:.2f}, 0.50, {t_norm:.2f}) → {hilbert_summary}"),
             },
             {
                 "ts": timestamp_ms,
                 "tag": "STORE",
-                "msg": (
-                    f"Shard {col} (epoch {ep})"
-                    f" | id={state_id[:8]}…"
-                    f" | total={self.memory_count}"
-                ),
+                "msg": (f"{col} (epoch {ep}) | id={state_id[:8]}… | total={self.memory_count}"),
             },
         ]
 

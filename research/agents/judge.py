@@ -14,11 +14,19 @@ and measured outcomes.
 from __future__ import annotations
 
 import json
+import logging
 
 from anthropic import Anthropic
 
-from research._llm_utils import extract_text, parse_json_object, require_fields
+from research._llm_utils import (
+    LLMResponseError,
+    extract_text,
+    parse_json_object,
+    require_fields,
+)
 from research.models import EvalResult, Thesis, Verdict
+
+logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """\
 You are an impartial research judge evaluating the results of an
@@ -93,10 +101,7 @@ def judge(
         indent=2,
     )
 
-    user_content = (
-        f"THESIS:\n{thesis_block}\n\n"
-        f"EVAL RESULTS:\n{_format_results(eval_results)}"
-    )
+    user_content = f"THESIS:\n{thesis_block}\n\nEVAL RESULTS:\n{_format_results(eval_results)}"
 
     message = client.messages.create(
         model=model,
@@ -108,10 +113,40 @@ def judge(
     data = parse_json_object(raw)
     require_fields(data, ["winner_id", "reasoning"], context="Judge")
 
-    scores = {int(k): float(v) for k, v in data.get("scores", {}).items()}
+    # The judge runs LAST, after all paid API calls — a malformed number
+    # must produce a clear error (or a safe fallback), never a bare
+    # ValueError that loses the response context.
+    try:
+        winner_id = int(data["winner_id"])
+    except (TypeError, ValueError) as exc:
+        raise LLMResponseError(
+            f"Judge: winner_id is not an integer: {data['winner_id']!r} "
+            f"(response preview: {raw[:200]!r})"
+        ) from exc
+
+    scores: dict[int, float] = {}
+    for k, v in data.get("scores", {}).items():
+        try:
+            scores[int(k)] = float(v)
+        except (TypeError, ValueError) as exc:
+            raise LLMResponseError(
+                f"Judge: score entry {k!r}: {v!r} is not numeric (response preview: {raw[:200]!r})"
+            ) from exc
+
+    # A hallucinated winner_id would silently map to no content in
+    # get_winner_content(); fall back to -1 (keep original) instead.
+    valid_ids = {r.variant_id for r in eval_results}
+    if winner_id != -1 and winner_id not in valid_ids:
+        logger.warning(
+            "Judge picked winner_id=%s which is not among the evaluated variants %s; "
+            "falling back to -1 (keep original)",
+            winner_id,
+            sorted(valid_ids),
+        )
+        winner_id = -1
 
     return Verdict(
-        winner_id=int(data["winner_id"]),
+        winner_id=winner_id,
         reasoning=data["reasoning"],
         scores=scores,
         recommendation=data.get("recommendation", ""),

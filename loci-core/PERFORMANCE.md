@@ -42,7 +42,7 @@ Benchmark results from Criterion on Apple M5 Max (arm64), Rust 1.94.1 release pr
 
 | Operation                            | Time     |
 |--------------------------------------|----------|
-| `spatial_bounds_to_hilbert_buckets`  | 4.1 µs   |
+| `spatial_bounds_to_hilbert_buckets_3d` | 4.1 µs |
 | `compute_novelty_score` (512d, k=10) | 2.7 µs   |
 
 ## Python vs Rust Comparison

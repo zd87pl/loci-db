@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use LOCI in your research, please cite it as below."
+type: software
+title: "LOCI: Spatial Memory for Physical AI"
+abstract: >-
+  LOCI is a 4D spatiotemporal vector memory for world models and embodied
+  agents. Every memory carries an (x, y, z, t) address indexed with
+  multi-resolution Hilbert bucketing, so robots, drones and world models can
+  retrieve what they perceived by similarity, place and time, reconstruct
+  trajectories, and score how novel a predicted future is.
+authors:
+  - family-names: Dyras
+    given-names: Zygmunt
+repository-code: "https://github.com/zd87pl/loci-db"
+url: "https://github.com/zd87pl/loci-db"
+license: Apache-2.0
+version: 0.4.0
+keywords:
+  - physical AI
+  - embodied AI
+  - robotics
+  - spatial memory
+  - world models
+  - vector database
+  - spatiotemporal indexing
+  - Hilbert curve
+  - novelty detection

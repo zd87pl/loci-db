@@ -15,13 +15,30 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import secrets
 import sys
 
-try:
-    import psycopg2
-except ImportError:
-    sys.exit("Install psycopg2-binary: pip install psycopg2-binary")
+# Mirror of the server-side namespace rule (see server.py _NAMESPACE_RE and
+# migration 005_namespace_check.sql). Namespaces must NOT contain underscores:
+# each tenant owns exactly two Qdrant collections, ``{namespace}_loci_data``
+# and ``{namespace}_loci_summary``, and an underscore would make the
+# namespace/collection separator ambiguous (namespace "foo_loci" would
+# shadow namespace "foo"'s collections), risking cross-tenant collisions.
+_NAMESPACE_RE = re.compile(r"^[a-z0-9]{3,64}$")
+
+# Default namespace for ad-hoc admin keys — deliberately underscore-free.
+DEFAULT_NAMESPACE = "lociadmin"
+
+
+def validate_namespace(namespace: str) -> str:
+    """Return ``namespace`` if it satisfies the isolation rule, else raise ValueError."""
+    if not _NAMESPACE_RE.match(namespace):
+        raise ValueError(
+            "namespace must be 3-64 chars of lowercase letters and digits (no underscores); "
+            f"got {namespace!r}"
+        )
+    return namespace
 
 
 def generate_raw_key() -> str:
@@ -33,11 +50,20 @@ def hash_key(raw_key: str) -> str:
 
 
 def main() -> None:
+    try:
+        import psycopg2
+    except ImportError:
+        sys.exit("Install psycopg2-binary: pip install psycopg2-binary")
+
     parser = argparse.ArgumentParser(description="Generate a LOCI API key (admin or regular)")
     parser.add_argument("--name", required=True, help="Tenant display name")
     parser.add_argument("--email", required=True, help="Tenant email (unique)")
     parser.add_argument("--label", default="admin", help="Key label (default: admin)")
-    parser.add_argument("--namespace", default="loci_admin", help="Qdrant collection prefix")
+    parser.add_argument(
+        "--namespace",
+        default=DEFAULT_NAMESPACE,
+        help="Qdrant collection prefix (3-64 lowercase letters/digits, no underscores)",
+    )
     parser.add_argument(
         "--admin",
         action="store_true",
@@ -50,6 +76,11 @@ def main() -> None:
         help="Per-minute request limit (default: server default)",
     )
     args = parser.parse_args()
+
+    try:
+        validate_namespace(args.namespace)
+    except ValueError as exc:
+        sys.exit(f"ERROR: {exc}")
 
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:

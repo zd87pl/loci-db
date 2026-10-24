@@ -6,6 +6,10 @@
 //! C) Hierarchical coarse-to-fine with early termination
 //! D) Sampling-based bucket approximation
 
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
 use rayon::prelude::*;
 use std::collections::BTreeSet;
 
@@ -181,6 +185,55 @@ pub fn spatial_bounds_to_buckets_4d_parallel(
         merged.extend(s);
     }
     merged.into_iter().collect()
+}
+
+/// 4D bucket cover matching Python's `HilbertIndex.query_buckets()`.
+///
+/// Produces the sorted set of **4D** Hilbert IDs covering the expanded
+/// bounding box — compatible with the `hilbert_r{order}` payload fields
+/// written by the LOCI clients. The expand/quantise logic exactly mirrors
+/// `HilbertIndex._expanded_index_ranges` in `loci/spatial/hilbert.py`.
+#[cfg(feature = "python")]
+#[pyfunction]
+#[pyo3(name = "spatial_bounds_to_hilbert_buckets_4d")]
+#[allow(clippy::too_many_arguments)]
+pub fn py_spatial_bounds_to_hilbert_buckets_4d(
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    z_min: f64,
+    z_max: f64,
+    t_min: f64,
+    t_max: f64,
+    order: u32,
+    overlap_factor: f64,
+) -> PyResult<Vec<u64>> {
+    crate::hilbert::check_order(4, order).map_err(PyValueError::new_err)?;
+    crate::hilbert::check_finite(&[
+        ("x_min", x_min),
+        ("x_max", x_max),
+        ("y_min", y_min),
+        ("y_max", y_max),
+        ("z_min", z_min),
+        ("z_max", z_max),
+        ("t_min", t_min),
+        ("t_max", t_max),
+        ("overlap_factor", overlap_factor),
+    ])
+    .map_err(PyValueError::new_err)?;
+    Ok(spatial_bounds_to_buckets_4d(
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        z_min,
+        z_max,
+        t_min,
+        t_max,
+        order,
+        overlap_factor,
+    ))
 }
 
 // ===========================================================================

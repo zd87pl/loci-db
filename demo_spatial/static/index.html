@@ -391,6 +391,19 @@ function formatClockTime(timestampMs) {
   return `${h}:${m.toString().padStart(2, '0')} ${ampm}`;
 }
 
+// Escape untrusted strings before embedding in HTML template literals.
+// Labels come from VLM output and the unauthenticated detection-classes API,
+// so they must never reach innerHTML (or attribute contexts) unescaped.
+function escapeHtml(value) {
+  if (value == null) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // State
 // ─────────────────────────────────────────────────────────────────────────────
@@ -767,18 +780,31 @@ function updateObjectList() {
     const v = obj.cy < 0.4 ? 'back' : obj.cy > 0.7 ? 'front' : 'mid';
     const age_color = age < 10 ? 'var(--accent)' : age < 60 ? 'var(--yellow)' : 'var(--muted)';
     const clockTime = obj.last_seen_time || formatClockTime(obj.timestamp_ms);
+    const safeLabel = escapeHtml(obj.label);
+    const safeClock = escapeHtml(clockTime);
     return `<div class="obj-item${selectedObject === obj.label ? ' selected' : ''}"
-      onclick="selectObject('${obj.label}')"
+      data-label="${safeLabel}"
       role="button" tabindex="0"
-      aria-label="${obj.label}, ${ageStr} at ${clockTime}, ${h} ${v}"
-      onkeydown="if(event.key==='Enter')selectObject('${obj.label}')">
+      aria-label="${safeLabel}, ${ageStr} at ${safeClock}, ${h} ${v}">
       <div class="obj-dot" style="background:${age_color}"></div>
-      <span class="obj-label">${obj.label}</span>
+      <span class="obj-label">${safeLabel}</span>
       <span class="obj-pos" style="color:var(--muted)">${h}·${v}</span>
-      <span class="obj-age" title="Last seen at ${clockTime}">${ageStr} · ${clockTime}</span>
+      <span class="obj-age" title="Last seen at ${safeClock}">${ageStr} · ${safeClock}</span>
     </div>`;
   }).join('');
 }
+
+// Delegated handlers — labels are untrusted, so they are never injected into
+// JS contexts (inline onclick); the label is read back from data-label instead.
+document.getElementById('obj-list-items').addEventListener('click', (e) => {
+  const item = e.target.closest('.obj-item');
+  if (item && item.dataset.label !== undefined) selectObject(item.dataset.label);
+});
+document.getElementById('obj-list-items').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const item = e.target.closest('.obj-item');
+  if (item && item.dataset.label !== undefined) selectObject(item.dataset.label);
+});
 
 async function selectObject(label) {
   selectedObject = label;
@@ -808,9 +834,9 @@ async function loadHistory(label) {
       return `<div class="timeline-item">
         <div class="timeline-dot"></div>
         <div class="timeline-info">
-          <span class="timeline-label">${label}</span>
-          <span style="color:var(--accent);font-weight:500">${clockTime}</span> (${ageStr}) · ${h} ${v} · conf ${conf}%
-          ${clockFull ? `<br><span style="font-size:0.72rem;color:var(--muted);opacity:.7">${clockFull}</span>` : ''}
+          <span class="timeline-label">${escapeHtml(label)}</span>
+          <span style="color:var(--accent);font-weight:500">${escapeHtml(clockTime)}</span> (${ageStr}) · ${h} ${v} · conf ${conf}%
+          ${clockFull ? `<br><span style="font-size:0.72rem;color:var(--muted);opacity:.7">${escapeHtml(clockFull)}</span>` : ''}
         </div>
       </div>`;
     }).join('');
@@ -840,7 +866,7 @@ async function toggleMic() {
     document.getElementById('mic-hint').textContent = 'Recording... click again to stop';
     document.getElementById('transcript-box').innerHTML = '<span style="color:var(--accent)">Listening...</span>';
   } catch(e) {
-    document.getElementById('transcript-box').innerHTML = `<span style="color:var(--red)">Mic error: ${e.message}</span>`;
+    document.getElementById('transcript-box').innerHTML = `<span style="color:var(--red)">Mic error: ${escapeHtml(e.message)}</span>`;
   }
 }
 
@@ -880,7 +906,7 @@ async function sendVoiceQuery(audioBlob) {
     const data = await r.json();
     displayQueryResult(data);
   } catch(e) {
-    document.getElementById('answer-box').innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`;
+    document.getElementById('answer-box').innerHTML = `<span style="color:var(--red)">Error: ${escapeHtml(e.message)}</span>`;
     document.getElementById('mic-hint').textContent = 'Click to record · release to ask';
   }
 }
@@ -899,7 +925,7 @@ async function sendTextQuery(text) {
     displayQueryResult(data);
     if (guideStep === 3) advanceGuide(4);
   } catch(e) {
-    document.getElementById('answer-box').innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`;
+    document.getElementById('answer-box').innerHTML = `<span style="color:var(--red)">Error: ${escapeHtml(e.message)}</span>`;
   }
 }
 

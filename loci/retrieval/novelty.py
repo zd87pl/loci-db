@@ -7,17 +7,30 @@ based on a running historical distribution of match quality.
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections import deque
+
+# Floor for the window standard deviation. Near-constant score windows would
+# otherwise turn sub-percent fluctuations into full-scale novelty swings.
+_STDEV_FLOOR = 0.05
 
 
 class NoveltyCalibrator:
     """Calibrate novelty scores against a running historical distribution.
 
     As the agent operates, the calibrator collects best-match scores from
-    each ``predict_and_retrieve`` call. Novelty is reported as a z-score
-    relative to that history, making it robust across different predictor
-    functions and embedding spaces.
+    each ``predict_and_retrieve`` call. Novelty is reported as a smooth
+    logistic squash of the z-score relative to that history, making it robust
+    across different predictor functions and embedding spaces.
+
+    Mapping: ``novelty = 1 / (1 + exp(z))`` with
+    ``z = (best_score - mean) / max(stdev, 0.05)``. An average match scores
+    0.5; +/-2 sigma maps to roughly 0.12 / 0.88; the curve approaches 0 and 1
+    asymptotically with no hard saturation.
+
+    Score a sample with :meth:`calibrated_novelty` *before* recording it with
+    :meth:`observe`, so it is judged against history that excludes it.
 
     Example:
         >>> calibrator = NoveltyCalibrator(window_size=100)
@@ -38,6 +51,10 @@ class NoveltyCalibrator:
     def calibrated_novelty(self, best_score: float) -> float:
         """Return a calibrated novelty score in [0.0, 1.0].
 
+        Uses the logistic mapping described in the class docstring: 0.5 for an
+        average match, low novelty for better-than-average matches, high for
+        worse. Call before :meth:`observe` for the same sample.
+
         Before ``min_samples`` observations are collected, falls back to the
         raw heuristic ``1.0 - best_score``.
         """
@@ -49,14 +66,12 @@ class NoveltyCalibrator:
             sigma = statistics.stdev(self._window)
         except statistics.StatisticsError:
             sigma = 0.0
-
-        if sigma == 0.0:
-            return max(0.0, min(1.0, 1.0 - best_score))
+        sigma = max(sigma, _STDEV_FLOOR)
 
         z = (best_score - mu) / sigma
-        # Negative z = worse than average match → high novelty
-        novelty = max(0.0, min(1.0, -z * 0.5 + 0.5))
-        return novelty
+        # Better-than-average match (z > 0) → low novelty; worse → high.
+        bounded = max(-60.0, min(60.0, z))
+        return 1.0 / (1.0 + math.exp(bounded))
 
     def __len__(self) -> int:
         return len(self._window)

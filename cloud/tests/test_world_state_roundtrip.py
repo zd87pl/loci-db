@@ -104,7 +104,8 @@ async def test_world_state_roundtrip_and_confidence_filter(
         assert first.prev_state_id == "external-predecessor"
         assert first.next_state_id == "external-successor"
 
-        # A later insert in the same scene updates causal links across epochs.
+        # A later insert in the same scene is linked to its stored predecessor
+        # (prev on the new state, next patched onto the old one).
         later = WorldState(
             x=0.25,
             y=0.5,

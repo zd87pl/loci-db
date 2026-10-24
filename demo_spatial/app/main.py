@@ -41,7 +41,7 @@ from pydantic import BaseModel, Field
 
 from .scene_ingestion import SceneIngestion
 from .spatial_memory import SpatialMemory
-from .vlm_client import VLMClient
+from .vlm_client import VLMClient, sanitize_label
 from .voice_pipeline import VoicePipeline
 
 logger = logging.getLogger(__name__)
@@ -145,10 +145,10 @@ async def local_ip():
     return {"ip": ip}
 
 
-
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
+
 
 class FrameRequest(BaseModel):
     image_b64: str = Field(..., description="Base64-encoded JPEG/PNG frame (data URI or raw)")
@@ -188,6 +188,7 @@ class RegionQueryRequest(BaseModel):
 # Health
 # ---------------------------------------------------------------------------
 
+
 @app.get("/health")
 async def health():
     return {
@@ -204,6 +205,7 @@ async def health():
 # ---------------------------------------------------------------------------
 # Scene ingestion endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/ingest/frame")
 async def ingest_frame(req: FrameRequest):
@@ -305,6 +307,7 @@ async def ingestion_status():
 # Detection class configuration (YOLO-World open-vocabulary)
 # ---------------------------------------------------------------------------
 
+
 class DetectionClassesRequest(BaseModel):
     classes: list[str] = Field(
         ...,
@@ -336,7 +339,14 @@ async def set_detection_classes(req: DetectionClassesRequest):
             status_code=400,
             detail="Class configuration requires a YOLO-World model. Set YOLO_MODEL env var.",
         )
-    ingestion.set_classes(req.classes)
+    # Server-side hygiene: strip control chars, cap length, drop empties
+    sanitized = [s for s in (sanitize_label(c) for c in req.classes) if s]
+    if not sanitized:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid class names after sanitization.",
+        )
+    ingestion.set_classes(sanitized)
     return {
         "classes": ingestion.classes,
         "count": len(ingestion.classes),
@@ -346,6 +356,7 @@ async def set_detection_classes(req: DetectionClassesRequest):
 # ---------------------------------------------------------------------------
 # Spatial query endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.get("/api/objects")
 async def list_objects():
@@ -391,9 +402,7 @@ async def object_history(label: str, limit: int = 20):
 @app.post("/api/objects/region")
 async def objects_in_region(req: RegionQueryRequest):
     """Find all objects observed in a spatial region (normalized [0,1] coords)."""
-    results = memory.objects_in_region(
-        req.x_min, req.x_max, req.y_min, req.y_max, limit=req.limit
-    )
+    results = memory.objects_in_region(req.x_min, req.x_max, req.y_min, req.y_max, limit=req.limit)
     return {
         "region": {"x_min": req.x_min, "x_max": req.x_max, "y_min": req.y_min, "y_max": req.y_max},
         "objects": [o.to_dict() for o in results],
@@ -415,6 +424,7 @@ async def recent_changes(window_seconds: float = 30.0):
 # ---------------------------------------------------------------------------
 # Voice pipeline endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/voice/query")
 async def voice_query(file: UploadFile, language: str = "en", audio_response: bool = True):
@@ -485,6 +495,7 @@ async def text_to_speech(req: TextQueryRequest):
 # WebSocket — real-time object tracking feed
 # ---------------------------------------------------------------------------
 
+
 @app.websocket("/ws")
 async def ws_tracking(ws: WebSocket):
     """WebSocket stream for real-time object detections and memory updates.
@@ -530,6 +541,7 @@ async def ws_tracking(ws: WebSocket):
 # Stats
 # ---------------------------------------------------------------------------
 
+
 @app.get("/api/stats")
 async def stats():
     return {
@@ -543,6 +555,7 @@ async def stats():
 # ---------------------------------------------------------------------------
 # LiDAR point cloud upload (from Scaniverse / Polycam / 3D Scanner App)
 # ---------------------------------------------------------------------------
+
 
 def _parse_ply(data: bytes) -> list[dict]:
     """Parse a PLY file (ASCII or binary little-endian) and return point list.
@@ -627,14 +640,22 @@ def _parse_ply(data: bytes) -> list[dict]:
 
         else:  # binary
             _TYPE_FMT = {
-                "float": "f", "float32": "f",
-                "double": "d", "float64": "d",
-                "int": "i", "int32": "i",
-                "uint": "I", "uint32": "I",
-                "short": "h", "int16": "h",
-                "ushort": "H", "uint16": "H",
-                "char": "b", "int8": "b",
-                "uchar": "B", "uint8": "B",
+                "float": "f",
+                "float32": "f",
+                "double": "d",
+                "float64": "d",
+                "int": "i",
+                "int32": "i",
+                "uint": "I",
+                "uint32": "I",
+                "short": "h",
+                "int16": "h",
+                "ushort": "H",
+                "uint16": "H",
+                "char": "b",
+                "int8": "b",
+                "uchar": "B",
+                "uint8": "B",
             }
             endian = "<" if fmt == "binary_le" else ">"
             row_fmt = endian + "".join(_TYPE_FMT.get(t, "f") for _, t in props)
@@ -725,6 +746,8 @@ async def get_pointcloud(max_points: int = Query(5000, ge=100, le=50000)):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _b64(data: bytes) -> str:
     import base64
+
     return base64.b64encode(data).decode()

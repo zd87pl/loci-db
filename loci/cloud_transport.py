@@ -6,10 +6,18 @@ managed HTTP API instead of talking to a local Qdrant directly. Everything
 except the routing target (auth header, payload shape) is identical to the
 local path from the caller's point of view.
 
-Only ``insert`` and ``query`` are supported in cloud mode today. Other
-methods (trajectory, causal context, batch, predict_and_retrieve, funnel)
-raise :class:`CloudModeUnsupportedError` until the cloud API exposes matching
-endpoints.
+Only ``insert`` and ``query`` are supported in cloud mode today (plus the
+legacy ``predict_and_retrieve`` path, which is a plain query under the hood).
+Other methods (``insert_batch``, ``query_scored``, ``get_trajectory``,
+``get_causal_context``, ``funnel_query``, and the extended
+``predict_and_retrieve`` path) raise :class:`CloudModeUnsupportedError` until
+the cloud API exposes matching endpoints.
+
+The wire format round-trips every :class:`~loci.schema.WorldState` field:
+``metadata``, ``scale_level``, ``confidence`` and the causal links
+(``prev_state_id``/``next_state_id``) are sent on insert and read back on
+query; ``min_confidence`` is forwarded to ``/query``.  Optional fields are
+omitted when unset and parsed tolerantly so older servers keep working.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ class _CloudError(RuntimeError):
 
 
 def _insert_payload(state: WorldState) -> dict[str, Any]:
-    return {
+    payload = {
         "x": state.x,
         "y": state.y,
         "z": state.z,
@@ -42,10 +50,17 @@ def _insert_payload(state: WorldState) -> dict[str, Any]:
         "scene_id": state.scene_id,
         "scale_level": state.scale_level,
         "confidence": state.confidence,
-        "metadata": state.metadata,
-        "prev_state_id": state.prev_state_id,
-        "next_state_id": state.next_state_id,
     }
+    # Only send metadata and causal links when present: newer servers store
+    # them, older servers ignore unknown fields, and omitting them keeps the
+    # wire format minimal.
+    if state.metadata:
+        payload["metadata"] = state.metadata
+    if state.prev_state_id is not None:
+        payload["prev_state_id"] = state.prev_state_id
+    if state.next_state_id is not None:
+        payload["next_state_id"] = state.next_state_id
+    return payload
 
 
 def _query_payload(
@@ -80,6 +95,12 @@ def _query_payload(
 
 
 def _parse_query_results(payload: dict[str, Any]) -> list[WorldState]:
+    """Map cloud query result items to WorldStates.
+
+    ``scale_level``, ``confidence``, ``metadata`` and the causal links are
+    parsed tolerantly: older servers omit them, in which case the WorldState
+    defaults apply.
+    """
     results = []
     for r in payload.get("results", []):
         results.append(

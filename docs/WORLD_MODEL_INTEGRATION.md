@@ -146,7 +146,7 @@ client.insert(ws)
 
 For a physical robot running on Orange Pi 5:
 
-1. Install LOCI: `pip install loci-db`
+1. Install LOCI: `pip install loci-stdb`
 2. Run Qdrant locally: `docker run -p 6333:6333 qdrant/qdrant`
 3. Use the generic adapter with your robot's sensor pipeline:
 

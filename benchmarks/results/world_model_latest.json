@@ -1,58 +1,58 @@
 {
   "config": {
-    "trace_points": 240,
-    "horizon_steps": 12,
-    "horizon_ms": 1200,
+    "trace_points": 80,
+    "horizon_steps": 4,
+    "horizon_ms": 400,
     "vector_dim": 16,
-    "platform": "arm64",
+    "platform": "x86_64",
     "python": "3.11.15"
   },
   "insert": {
-    "states": 240,
-    "insert_ms": 3.625,
-    "insert_rate": 66213.0
+    "states": 80,
+    "insert_ms": 1.708,
+    "insert_rate": 46851.7
   },
   "historical_analog": {
-    "query_ms": 0.377,
-    "expected_step": 48,
-    "top_step": 48,
+    "query_ms": 1.07,
+    "expected_step": 16,
+    "top_step": 16,
     "top_step_error": 0,
     "results": 5,
-    "shards_searched": 24,
-    "candidates": 120
+    "shards_searched": 8,
+    "candidates": 40
   },
   "prediction_grounded_retrieval": {
-    "query_ms": 0.304,
-    "current_step": 48,
-    "expected_future_step": 60,
-    "baseline_top_step": 48,
-    "baseline_query_ms": 0.203,
-    "baseline_step_error": 12,
-    "predicted_top_step": 60,
+    "query_ms": 1.452,
+    "current_step": 16,
+    "expected_future_step": 20,
+    "baseline_top_step": 16,
+    "baseline_query_ms": 0.371,
+    "baseline_step_error": 4,
+    "predicted_top_step": 20,
     "predicted_step_error": 0,
-    "prediction_novelty": 0.134,
+    "prediction_novelty": 0.0,
     "results": 5
   },
   "novelty": {
-    "familiar_median": 0.134,
-    "familiar_min": 0.134,
-    "familiar_max": 0.134,
+    "familiar_median": 0.25,
+    "familiar_min": 0.0,
+    "familiar_max": 0.5,
     "novel_corner": 1.0,
     "novel_results": 0,
-    "novelty_gap": 0.866,
+    "novelty_gap": 0.75,
     "calibrator": {
       "count": 13,
-      "mean": 0.7989501132138483,
-      "stdev": 0.24005463331085747,
+      "mean": 0.9230769230769231,
+      "stdev": 0.2773500981126146,
       "min": 0.0,
-      "max": 0.8655292893150024
+      "max": 1.0
     }
   },
   "trajectory": {
-    "query_ms": 0.161,
-    "anchor_step": 120,
+    "query_ms": 0.899,
+    "anchor_step": 40,
     "states": 21,
-    "first_step": 110,
-    "last_step": 130
+    "first_step": 30,
+    "last_step": 50
   }
 }

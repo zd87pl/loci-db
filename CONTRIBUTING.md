@@ -17,6 +17,32 @@ Thank you for your interest in contributing to loci-db!
    pytest
    ```
 
+## Where to start
+
+The highest-impact contributions right now are **integrations with the tools
+physical-AI builders already use**. Each one is self-contained and a great
+first project:
+
+- **ROS 2**: a node that turns odometry + camera embeddings into LOCI memories
+  and exposes recall/novelty as services.
+- **LeRobot**: a dataset loader and a policy-memory example.
+- **NVIDIA Isaac Sim / Habitat**: an end-to-end example with real embeddings.
+- **World-model adapters**: new models alongside `loci/adapters/` (V-JEPA 2,
+  DreamerV3 and a generic adapter exist today).
+- **Benchmarks**: the world-model memory benchmark described in
+  [RFC-0001](docs/RFC-0001-memory-for-world-models.md) (R3).
+
+Open an issue with the **Integration proposal** template first so we can agree
+on the shape. Smaller fixes (docs, examples, bugs) are always welcome without
+prior discussion.
+
+To see LOCI working end to end before diving in, run the demo:
+
+```bash
+pip install -e . fastapi "uvicorn[standard]"
+uvicorn demo.app.main:app   # http://localhost:8000
+```
+
 ## Submitting changes
 
 - Open an issue before starting non-trivial work so we can discuss the approach.

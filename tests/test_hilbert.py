@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import os
+import random
 
 import pytest
+from hilbertcurve.hilbertcurve import HilbertCurve
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from loci.spatial.hilbert import decode, encode
+import loci.spatial.hilbert as hilbert_module
+from loci.spatial.hilbert import HilbertIndex, SpatialBounds, _clamp, decode, encode
+
+try:
+    import loci_core as _rust
+except ImportError:
+    _rust = None
+
+requires_rust = pytest.mark.skipif(_rust is None, reason="loci_core extension not importable")
 
 # ------------------------------------------------------------------
 # Roundtrip property test
@@ -207,11 +217,195 @@ def test_lut_performance() -> None:
     assert elapsed < 0.020, f"query_buckets took {elapsed * 1000:.1f}ms, expected < 20ms"
 
 
-def test_lut_precomputed_for_small_resolutions() -> None:
-    """LUT is precomputed for resolutions with grid side <= 16."""
-    from loci.spatial.hilbert import HilbertIndex
+def test_lut_built_lazily_for_small_resolutions() -> None:
+    """LUT is built lazily on first query, only for grid side <= 16.
 
+    Construction must not pay the ~350ms LUT build cost — clients create
+    HilbertIndex instances eagerly and only some of them ever run spatial
+    queries.
+    """
     index = HilbertIndex(resolutions=[2, 4, 8])
+    assert index._luts == {}  # nothing built at construction time
+
+    narrow = SpatialBounds(
+        x_min=0.5, x_max=0.5, y_min=0.5, y_max=0.5, z_min=0.5, z_max=0.5, t_min=0.5, t_max=0.5
+    )
+    index.query_buckets(narrow, resolution=2)
     assert 2 in index._luts  # 2^2 = 4 <= 16
+    index.query_buckets(narrow, resolution=4)
     assert 4 in index._luts  # 2^4 = 16 <= 16
-    assert 8 not in index._luts  # 2^8 = 256 > 16
+    index.query_buckets(narrow, resolution=8)
+    assert 8 not in index._luts  # 2^8 = 256 > 16: itertools fallback, no LUT
+
+
+# ------------------------------------------------------------------
+# Input validation — both backends must fail identically
+# ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_encode_rejects_non_finite(bad: float) -> None:
+    """encode() raises ValueError for NaN/inf on whichever backend is active."""
+    with pytest.raises(ValueError, match="finite"):
+        encode(bad, 0.5, 0.5, 0.5)
+    with pytest.raises(ValueError, match="finite"):
+        encode(0.5, 0.5, 0.5, bad)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_encode_rejects_non_finite_python_fallback(bad: float, monkeypatch) -> None:
+    """The pure-Python path raises the same ValueError as the Rust path."""
+    monkeypatch.setattr(hilbert_module, "_RUST_AVAILABLE", False)
+    with pytest.raises(ValueError, match="finite"):
+        encode(0.5, bad, 0.5, 0.5)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_hilbert_index_encode_rejects_non_finite(bad: float) -> None:
+    index = HilbertIndex(resolutions=[4])
+    with pytest.raises(ValueError, match="finite"):
+        index.encode(0.5, 0.5, bad, 0.5)
+
+
+@requires_rust
+def test_rust_rejects_invalid_order() -> None:
+    """Orders that would truncate the u64 Hilbert distance raise ValueError."""
+    with pytest.raises(ValueError, match="order"):
+        _rust.encode_hilbert_4d(0.5, 0.5, 0.5, 0.5, 0)
+    with pytest.raises(ValueError, match="order"):
+        _rust.encode_hilbert_4d(0.5, 0.5, 0.5, 0.5, 17)  # 4 * 17 > 64 bits
+    with pytest.raises(ValueError, match="order"):
+        _rust.encode_hilbert_3d(0.5, 0.5, 0.5, 22)  # 3 * 22 > 64 bits
+    with pytest.raises(ValueError, match="order"):
+        _rust.decode_hilbert_3d(0, 0)
+    with pytest.raises(ValueError, match="order"):
+        _rust.spatial_bounds_to_hilbert_buckets_4d(0.4, 0.6, 0.4, 0.6, 0.4, 0.6, 0.0, 1.0, 17, 1.2)
+    # Maximum valid orders are accepted.
+    assert _rust.encode_hilbert_4d(1.0, 1.0, 1.0, 1.0, 16) > 0
+    assert _rust.encode_hilbert_3d(1.0, 1.0, 1.0, 21) > 0
+
+
+@requires_rust
+def test_rust_rejects_non_finite_coordinates() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        _rust.encode_hilbert_4d(float("nan"), 0.5, 0.5, 0.5, 4)
+    with pytest.raises(ValueError, match="finite"):
+        _rust.encode_hilbert_3d(0.5, float("inf"), 0.5, 4)
+
+
+def test_encode_high_order_falls_back_to_python() -> None:
+    """Orders beyond the Rust u64 limit still work via the big-int Python path.
+
+    order=17 needs 68 bits for a 4D Hilbert distance; the Rust extension
+    rejects it, so encode() must fall back to pure Python instead of
+    silently truncating.
+    """
+    expected = HilbertCurve(p=17, n=4).distance_from_point([(1 << 17) - 1] * 4)
+    assert encode(1.0, 1.0, 1.0, 1.0, resolution_order=17) == int(expected)
+
+
+# ------------------------------------------------------------------
+# Rust <-> Python parity (bit-for-bit)
+# ------------------------------------------------------------------
+
+
+def _python_reference_encode(
+    curve: HilbertCurve, side: int, x: float, y: float, z: float, t: float
+) -> int:
+    """The pure-Python quantise-and-encode reference used by the parity tests."""
+    coords = [
+        _clamp(int(round(x * side)), 0, side),
+        _clamp(int(round(y * side)), 0, side),
+        _clamp(int(round(z * side)), 0, side),
+        _clamp(int(round(t * side)), 0, side),
+    ]
+    return int(curve.distance_from_point(coords))
+
+
+@requires_rust
+def test_rust_python_encode_parity_randomized() -> None:
+    """Rust and pure-Python encoders agree bit-for-bit over a randomized grid,
+    including exact half-cell boundary values where the rounding mode matters."""
+    rng = random.Random(20260717)
+    for order in (1, 2, 4, 8, 12, 16):
+        curve = HilbertCurve(p=order, n=4)
+        side = (1 << order) - 1
+
+        points: list[tuple[float, float, float, float]] = [
+            tuple(rng.random() for _ in range(4))  # type: ignore[misc]
+            for _ in range(64)
+        ]
+        points += [(0.0,) * 4, (1.0,) * 4, (0.5,) * 4]
+
+        # Half-cell boundary values: x * side lands exactly on k + 0.5 where
+        # banker's rounding (Python round) and round-half-away (old Rust
+        # f64::round) disagree for even k.
+        ties = 0
+        for k in range(0, min(side, 64)):
+            x = (k + 0.5) / side
+            if x * side == k + 0.5:  # exact tie in f64
+                ties += 1
+                points.append((x, x, x, x))
+        assert side == 1 or ties > 0, f"no exact ties generated at order {order}"
+
+        for x, y, z, t in points:
+            expected = _python_reference_encode(curve, side, x, y, z, t)
+            assert _rust.encode_hilbert_4d(x, y, z, t, order) == expected, (
+                f"parity mismatch at order {order} for {(x, y, z, t)}"
+            )
+
+
+@requires_rust
+def test_rust_matches_python_bankers_rounding_at_half_boundary() -> None:
+    """0.5/side * side == 0.5 exactly; Python round(0.5) == 0 (banker's).
+
+    A half-away-from-zero Rust quantiser would round to cell 1 and produce a
+    nonzero Hilbert distance — this is the regression guard for that bug.
+    """
+    for order in (1, 2, 4, 8, 12, 16):
+        side = (1 << order) - 1
+        x = 0.5 / side
+        assert x * side == 0.5  # exact tie
+        assert _rust.encode_hilbert_4d(x, x, x, x, order) == 0
+        assert encode(x, x, x, x, resolution_order=order) == 0
+
+
+@requires_rust
+def test_hilbert_index_encode_uses_rust_and_matches_python(monkeypatch) -> None:
+    """HilbertIndex.encode routes through Rust and matches the Python path."""
+    rng = random.Random(42)
+    index = HilbertIndex(resolutions=[4, 8, 12])
+    points = [tuple(rng.random() for _ in range(4)) for _ in range(32)]
+    points += [(0.0,) * 4, (1.0,) * 4, (0.5,) * 4]
+
+    rust_results = [index.encode(*p) for p in points]
+    monkeypatch.setattr(hilbert_module, "_RUST_AVAILABLE", False)
+    python_results = [index.encode(*p) for p in points]
+
+    assert rust_results == python_results
+
+
+@requires_rust
+def test_rust_bucket_cover_4d_matches_python_query_buckets() -> None:
+    """spatial_bounds_to_hilbert_buckets_4d matches HilbertIndex.query_buckets."""
+    index = HilbertIndex(resolutions=[4, 6])
+    cases = [
+        (SpatialBounds(0.2, 0.6, 0.3, 0.7, 0.0, 1.0, 0.0, 1.0), 4, 1.2),
+        (SpatialBounds(0.4, 0.6, 0.4, 0.6, 0.4, 0.6, 0.4, 0.6), 4, 1.0),
+        (SpatialBounds(0.45, 0.55, 0.45, 0.55, 0.45, 0.55, 0.1, 0.2), 6, 1.2),
+    ]
+    for bounds, order, overlap in cases:
+        expected = index.query_buckets(bounds, resolution=order, overlap_factor=overlap)
+        got = _rust.spatial_bounds_to_hilbert_buckets_4d(
+            bounds.x_min,
+            bounds.x_max,
+            bounds.y_min,
+            bounds.y_max,
+            bounds.z_min,
+            bounds.z_max,
+            bounds.t_min,
+            bounds.t_max,
+            order,
+            overlap,
+        )
+        assert [int(b) for b in got] == expected

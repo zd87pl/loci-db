@@ -20,7 +20,7 @@ export LOCI_BASE_URL=https://api.loci.ai
 
 loci cloud keys create \
   --email app@example.com \
-  --namespace myapp_prod \
+  --namespace myappprod \
   --label "production"
 ```
 
@@ -30,7 +30,7 @@ Output (the raw key is shown **once** — save it immediately):
 === API key created ===
 Key ID    : 5bf1e7d9-...
 Tenant ID : 9a4de8f0-...
-Namespace : myapp_prod
+Namespace : myappprod
 Admin     : False
 Prefix    : loci_8fa3c21
 
@@ -55,7 +55,7 @@ curl -X POST https://api.loci.ai/admin/keys \
   -H "Content-Type: application/json" \
   -d '{
     "tenant_email": "app@example.com",
-    "namespace": "myapp_prod",
+    "namespace": "myappprod",
     "label": "production"
   }'
 ```
@@ -76,10 +76,19 @@ curl -X POST https://api.loci.ai/insert \
     "vector": [0.1, 0.2, ... 512 dims ...],
     "scene_id": "scene_001",
     "scale_level": "patch",
-    "confidence": 0.95
+    "confidence": 0.95,
+    "metadata": {"label": "doorway", "source": "lidar"}
   }'
 # → {"id": "7f3c8a4b..."}
 ```
+
+`metadata` is optional (defaults to `{}`): an arbitrary JSON object stored with
+the vector and returned verbatim by `/query`. It is capped at **16 KB
+JSON-serialized** — larger payloads are rejected with `422`.
+
+`prev_state_id` / `next_state_id` (optional, max 256 chars each) carry causal
+links. When omitted, the server links the new state to the latest earlier
+state in the same `scene_id`; `/query` returns both links with every result.
 
 ### Python SDK — cloud mode
 
@@ -88,12 +97,14 @@ from loci import LociClient, WorldState
 
 client = LociClient(
     base_url="https://api.loci.ai",
-    api_key="loci_...",          # your API key
+    api_key="loci_...",  # your API key
     vector_size=512,
 )
 
 state = WorldState(
-    x=0.42, y=0.17, z=0.88,
+    x=0.42,
+    y=0.17,
+    z=0.88,
     timestamp_ms=1713628800000,
     vector=[0.1] * 512,
     scene_id="scene_001",
@@ -131,9 +142,39 @@ curl -X POST https://api.loci.ai/query \
     "z_min": 0.0, "z_max": 1.0,
     "time_start_ms": 1713628000000,
     "time_end_ms":   1713629000000,
+    "min_confidence": 0.8,
     "limit": 10
   }'
 ```
+
+`min_confidence` (optional, `0.0`–`1.0`) drops results whose stored
+`confidence` is below the threshold before the top-`limit` cut, so a filtered
+query still fills `limit` when enough matches exist.
+
+Each result item includes the stored `metadata`, `scale_level`, `confidence`
+and causal links alongside the coordinates:
+
+```json
+{
+  "results": [
+    {
+      "id": "7f3c8a4b...",
+      "x": 0.42, "y": 0.17, "z": 0.88,
+      "timestamp_ms": 1713628800000,
+      "scene_id": "scene_001",
+      "scale_level": "patch",
+      "confidence": 0.95,
+      "metadata": {"label": "doorway", "source": "lidar"},
+      "prev_state_id": "2b9d0e61...",
+      "next_state_id": null,
+      "vector": [0.1, 0.2, "..."]
+    }
+  ]
+}
+```
+
+Pass `"include_vectors": false` to omit the (large) `vector` field from each
+result.
 
 ### Python SDK
 
@@ -141,11 +182,15 @@ curl -X POST https://api.loci.ai/query \
 hits = client.query(
     vector=[0.1] * 512,
     spatial_bounds={
-        "x_min": 0.0, "x_max": 1.0,
-        "y_min": 0.0, "y_max": 1.0,
-        "z_min": 0.0, "z_max": 1.0,
+        "x_min": 0.0,
+        "x_max": 1.0,
+        "y_min": 0.0,
+        "y_max": 1.0,
+        "z_min": 0.0,
+        "z_max": 1.0,
     },
     time_window_ms=(1713628000000, 1713629000000),
+    min_confidence=0.8,
     limit=10,
 )
 for s in hits:
@@ -160,20 +205,26 @@ for s in hits:
 import asyncio
 from loci import AsyncLociClient, WorldState
 
+
 async def main():
     async with AsyncLociClient(
         base_url="https://api.loci.ai",
         api_key="loci_...",
         vector_size=512,
     ) as client:
-        await client.insert(WorldState(
-            x=0.5, y=0.5, z=0.5,
-            timestamp_ms=1713628800000,
-            vector=[0.0] * 512,
-            scene_id="s",
-        ))
+        await client.insert(
+            WorldState(
+                x=0.5,
+                y=0.5,
+                z=0.5,
+                timestamp_ms=1713628800000,
+                vector=[0.0] * 512,
+                scene_id="s",
+            )
+        )
         hits = await client.query(vector=[0.0] * 512, limit=5)
         print(hits)
+
 
 asyncio.run(main())
 ```
@@ -204,7 +255,8 @@ affect other keys or tenants.
 | 403 | Forbidden | Non-admin key calling `/admin/*` |
 | 404 | Not Found | Key id does not exist (revoke) |
 | 409 | Conflict | Namespace already taken (`POST /admin/keys`) |
-| 422 | Unprocessable Entity | Validation error — see `detail` for field paths |
+| 413 | Payload Too Large | Request body exceeds `LOCI_MAX_BODY_BYTES` (default 5 MB) |
+| 422 | Unprocessable Entity | Validation error — see `detail` for field paths (e.g. `metadata` over 16 KB) |
 | 429 | Too Many Requests | Rate limit exceeded |
 | 503 | Service Unavailable | `/ready` returned degraded — check upstream health |
 

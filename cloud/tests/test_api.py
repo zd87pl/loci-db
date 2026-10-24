@@ -232,12 +232,12 @@ def _fake_result() -> SimpleNamespace:
         z=0.3,
         timestamp_ms=1000,
         scene_id="s",
-        vector=VEC,
         scale_level="frame",
-        confidence=0.8,
-        metadata={"source": "robot"},
+        confidence=0.9,
+        metadata={"label": "doorway"},
         prev_state_id="before",
         next_state_id="after",
+        vector=VEC,
     )
 
 
@@ -256,11 +256,6 @@ def test_query_returns_vectors_by_default(client):
         assert resp.status_code == 200
         results = resp.json()["results"]
         assert results[0]["vector"] == VEC
-        assert results[0]["scale_level"] == "frame"
-        assert results[0]["confidence"] == 0.8
-        assert results[0]["metadata"] == {"source": "robot"}
-        assert results[0]["prev_state_id"] == "before"
-        assert results[0]["next_state_id"] == "after"
     finally:
         mock_client.query.return_value = []
 
@@ -283,11 +278,15 @@ def test_query_omits_vectors_when_disabled(client):
         mock_client.query.return_value = []
 
 
-def test_per_key_rate_limit_returns_429(client):
+def test_per_key_rate_limit_returns_429(client, monkeypatch):
     """Once a tenant exceeds its rate_limit_rpm, further requests get 429."""
     import auth
 
     import server as srv
+
+    # Freeze the counter window so the test cannot straddle a real wall-clock
+    # minute rollover (which would reset the count mid-test and flake).
+    monkeypatch.setattr(auth.FixedWindowCounter, "_window", staticmethod(lambda: 12345))
 
     ns = "rltestns"
     low_rpm_row = {
@@ -321,9 +320,10 @@ def test_per_key_rate_limit_returns_429(client):
         srv._key_rate_counter._windows.pop(ns, None)
 
 
-def test_fixed_window_counter_semantics():
+def test_fixed_window_counter_semantics(monkeypatch):
     from auth import FixedWindowCounter
 
+    monkeypatch.setattr(FixedWindowCounter, "_window", staticmethod(lambda: 777))
     c = FixedWindowCounter()
     assert c.hit("k", 2) is True  # 1
     assert c.over("k", 2) is False
@@ -382,3 +382,241 @@ def test_insert_invalid_scale_level_rejected_as_422(client):
         headers={"Authorization": f"Bearer loci_{'a' * 64}"},
     )
     assert resp.status_code == 422
+
+
+# ── Metadata round-trip & size cap ────────────────────────────────────────
+
+
+AUTH_HEADERS = {"Authorization": f"Bearer loci_{'a' * 64}"}
+
+
+def test_insert_metadata_reaches_world_state(client):
+    """Client-supplied metadata must be stored on the WorldState, not dropped."""
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.insert.reset_mock()
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 1000,
+            "vector": VEC,
+            "scene_id": "s",
+            "metadata": {"label": "doorway", "source": "lidar"},
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    state = mock_client.insert.call_args.args[0]
+    assert state.metadata == {"label": "doorway", "source": "lidar"}
+
+
+def test_insert_metadata_defaults_to_empty_dict(client):
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.insert.reset_mock()
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 1000,
+            "vector": VEC,
+            "scene_id": "s",
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    assert mock_client.insert.call_args.args[0].metadata == {}
+
+
+def test_insert_metadata_over_16kb_rejected_as_422(client):
+    import server as srv
+
+    big = {"blob": "x" * (srv.MAX_METADATA_BYTES + 1)}
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 1000,
+            "vector": VEC,
+            "scene_id": "s",
+            "metadata": big,
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 422
+    assert any("metadata" in str(d) for d in resp.json()["detail"])
+
+
+def test_query_result_includes_metadata_scale_level_confidence(client):
+    """Query results carry metadata, scale_level, confidence and causal links."""
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.query.return_value = [_fake_result()]
+    try:
+        resp = client.post("/query", json={"vector": VEC}, headers=AUTH_HEADERS)
+        assert resp.status_code == 200
+        item = resp.json()["results"][0]
+        assert item["metadata"] == {"label": "doorway"}
+        assert item["scale_level"] == "frame"
+        assert item["confidence"] == 0.9
+        assert item["prev_state_id"] == "before"
+        assert item["next_state_id"] == "after"
+    finally:
+        mock_client.query.return_value = []
+
+
+# ── Causal links & confidence filter round-trip ───────────────────────────
+
+
+def test_insert_causal_links_reach_world_state(client):
+    """Caller-supplied prev/next_state_id must reach the WorldState, not be dropped."""
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.insert.reset_mock()
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 1000,
+            "vector": VEC,
+            "scene_id": "s",
+            "prev_state_id": "before",
+            "next_state_id": "after",
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    state = mock_client.insert.call_args.args[0]
+    assert state.prev_state_id == "before"
+    assert state.next_state_id == "after"
+
+
+def test_insert_causal_links_default_to_none(client):
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.insert.reset_mock()
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 1000,
+            "vector": VEC,
+            "scene_id": "s",
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    state = mock_client.insert.call_args.args[0]
+    assert state.prev_state_id is None
+    assert state.next_state_id is None
+
+
+@pytest.mark.parametrize("field", ["prev_state_id", "next_state_id"])
+def test_insert_overlong_causal_link_rejected_as_422(client, field):
+    """Causal link IDs are bounded like scene_id so payloads stay small."""
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 1000,
+            "vector": VEC,
+            "scene_id": "s",
+            field: "i" * 257,
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 422
+    assert any(field in str(d.get("loc", ())) for d in resp.json()["detail"])
+
+
+def test_query_forwards_min_confidence(client):
+    """The confidence filter is applied by the backend, not post-hoc by the API."""
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.query.reset_mock()
+    resp = client.post("/query", json={"vector": VEC, "min_confidence": 0.5}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    assert mock_client.query.call_args.kwargs["min_confidence"] == 0.5
+
+
+def test_query_min_confidence_defaults_to_none(client):
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.query.reset_mock()
+    resp = client.post("/query", json={"vector": VEC}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    assert mock_client.query.call_args.kwargs["min_confidence"] is None
+
+
+# ── Body size cap (LOCI_MAX_BODY_BYTES) ───────────────────────────────────
+
+
+def test_oversized_content_length_rejected_413(client):
+    import server as srv
+
+    body = b"x" * (srv.MAX_BODY_BYTES + 1)
+    resp = client.post(
+        "/insert",
+        content=body,
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["detail"] == "Request body too large"
+
+
+def test_oversized_streamed_body_without_content_length_rejected_413(client):
+    """Chunked bodies with no Content-Length must be capped mid-stream."""
+    import server as srv
+
+    chunk = b"x" * 4096
+    n_chunks = srv.MAX_BODY_BYTES // len(chunk) + 2
+
+    def gen():
+        for _ in range(n_chunks):
+            yield chunk
+
+    resp = client.post(
+        "/insert",
+        content=gen(),
+        headers={**AUTH_HEADERS, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 413
+
+
+def test_huge_vector_rejected(client):
+    """A vector beyond MAX_VECTOR_ITEMS fails validation (or the body cap)."""
+    import server as srv
+
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 0,
+            "vector": [0.0] * (srv.MAX_VECTOR_ITEMS + 1),
+            "scene_id": "s",
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code in (413, 422)

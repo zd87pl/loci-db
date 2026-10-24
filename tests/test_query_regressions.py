@@ -1,4 +1,9 @@
-"""Exercise ranking and filtering through each real backend implementation."""
+"""Exercise ranking and filtering through each real backend implementation.
+
+Every test runs against the local in-memory client and against the sync and
+async Qdrant clients backed by qdrant-client's embedded ``:memory:`` engine,
+so the three clients are held to identical ranking and filtering semantics.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ from qdrant_client import AsyncQdrantClient, QdrantClient
 
 from loci import AsyncLociClient, LocalLociClient, LociClient, WorldState
 from loci.cloud_transport import CloudModeUnsupportedError
+from loci.temporal.decay import apply_decay
 
 
 async def _call(method, *args, **kwargs):
@@ -21,17 +27,20 @@ async def _call(method, *args, **kwargs):
 @pytest_asyncio.fixture(params=["local", "qdrant", "async_qdrant"])
 async def client(request, monkeypatch):
     options = {"vector_size": 2, "distance": "euclidean", "decay_lambda": 0.0}
+    # No retry sleeps: the failure tests raise non-transient errors anyway,
+    # but keep the suite fast if that ever changes.
+    qdrant_options = {**options, "max_retries": 0}
     backend = None
     if request.param == "local":
         result = LocalLociClient(**options)
     elif request.param == "qdrant":
         backend = QdrantClient(":memory:")
         monkeypatch.setattr("loci.client.QdrantClient", lambda **_: backend)
-        result = LociClient("http://unused", **options)
+        result = LociClient("http://unused", **qdrant_options)
     else:
         backend = AsyncQdrantClient(":memory:")
         monkeypatch.setattr("loci.async_client.AsyncQdrantClient", lambda **_: backend)
-        result = AsyncLociClient("http://unused", **options)
+        result = AsyncLociClient("http://unused", **qdrant_options)
     yield result
     if backend is not None:
         await _call(backend.close)
@@ -49,7 +58,10 @@ def _state(vector, timestamp_ms=1000, x=0.5, confidence=1.0):
 
 
 @pytest.mark.asyncio
-async def test_euclidean_nearest_first_across_shards(client):
+async def test_euclidean_nearest_first_across_epochs(client):
+    # Three states in three logical epochs (epoch_size_ms=5000): ranking must
+    # be nearest-first regardless of age, with raw score == -distance and
+    # decayed score == 1 / (1 + distance) at decay_lambda == 0.
     ids = await _call(
         client.insert_batch,
         [_state([5.0, 0.0]), _state([1.0, 0.0], 6000), _state([3.0, 0.0], 11000)],
@@ -76,6 +88,21 @@ async def test_euclidean_decay_penalizes_old_matches(client):
     assert [hit.state.id for hit in hits] == [ids[1], ids[0]]
     assert hits[0].decayed_score > hits[1].decayed_score
     assert [hit.score for hit in hits] == [-1.0, -1.0]
+
+
+def test_apply_decay_euclidean_older_ranks_lower():
+    """Unit-level twin of the client test: decay on a negative raw score
+    must not promote the older hit (it would with plain multiplication)."""
+    results = [
+        {"score": -1.0, "timestamp_ms": 0},  # older
+        {"score": -1.0, "timestamp_ms": 10_000},  # newer
+    ]
+    apply_decay(results, now_ms=10_000, lambda_=1e-3, distance="euclidean")
+
+    assert [r["timestamp_ms"] for r in results] == [10_000, 0]
+    assert results[0]["decayed_score"] == pytest.approx(0.5)
+    assert all(0.0 < r["decayed_score"] <= 1.0 for r in results)
+    assert [r["score"] for r in results] == [-1.0, -1.0]  # raw scores untouched
 
 
 @pytest.mark.asyncio
@@ -117,10 +144,15 @@ async def test_exact_spatial_filter_precedes_top_k(client):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("timestamp_filter", [1001, [999, 1001]])
 async def test_exact_ranges_and_extra_predicates_are_conjoined(client, timestamp_filter):
-    ids = await _call(
-        client.insert_batch,
-        [_state([1.0, 0.0], timestamp_ms=ts) for ts in (999, 1000, 1001)],
-    )
+    # The only state satisfying BOTH the time window and the extra predicate
+    # (ts == 1001) is deliberately the farthest from the query vector.  If a
+    # same-key extra predicate replaced the window instead of narrowing it,
+    # the nearer decoys at ts == 999 would take the limit=1 slot and the
+    # exact post-filter would then empty the result.
+    decoys = [_state([1.0, 0.0], timestamp_ms=999) for _ in range(4)]
+    in_window_decoy = _state([1.0, 0.0], timestamp_ms=1000)
+    target = _state([0.9, 0.0], timestamp_ms=1001)
+    ids = await _call(client.insert_batch, [*decoys, in_window_decoy, target])
 
     hits = await _call(
         client.query,
@@ -131,6 +163,18 @@ async def test_exact_ranges_and_extra_predicates_are_conjoined(client, timestamp
     )
 
     assert [hit.id for hit in hits] == [ids[-1]]
+
+
+@pytest.mark.asyncio
+async def test_inverted_window_and_out_of_range_confidence_select_nothing(client):
+    """Degenerate predicates yield an empty result, not an exception: the REST
+    servers forward caller-supplied windows unchecked, and this matches the
+    pre-0.4.0 behaviour of all three clients."""
+    await _call(client.insert, _state([1.0, 0.0], timestamp_ms=1500, confidence=0.9))
+
+    assert await _call(client.query, [1.0, 0.0], time_window_ms=(1000, 2000)) != []
+    assert await _call(client.query, [1.0, 0.0], time_window_ms=(2000, 1000)) == []
+    assert await _call(client.query, [1.0, 0.0], min_confidence=1.5) == []
 
 
 @pytest.mark.asyncio
@@ -157,17 +201,23 @@ async def test_backend_query_failures_are_not_reported_as_empty_results(client, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client_type", [LociClient, AsyncLociClient])
 @pytest.mark.parametrize(
-    ("operation", "args"),
+    ("operation", "args", "kwargs"),
     [
-        ("query_scored", ([1.0, 0.0],)),
-        ("insert_batch", ([],)),
-        ("predict_and_retrieve", ([1.0, 0.0], lambda vector: vector)),
-        ("funnel_query", ([1.0, 0.0],)),
-        ("get_trajectory", ("missing-id",)),
-        ("get_causal_context", ("missing-id",)),
+        ("query_scored", ([1.0, 0.0],), {}),
+        ("insert_batch", ([],), {}),
+        # The legacy predict_and_retrieve path (plain query on the predicted
+        # vector) is supported in cloud mode; the scored path is not.
+        (
+            "predict_and_retrieve",
+            ([1.0, 0.0], lambda vector: vector),
+            {"current_position": (0.5, 0.5, 0.5)},
+        ),
+        ("funnel_query", ([1.0, 0.0],), {}),
+        ("get_trajectory", ("missing-id",), {}),
+        ("get_causal_context", ("missing-id",), {}),
     ],
 )
-async def test_cloud_unsupported_operations_fail_explicitly(client_type, operation, args):
+async def test_cloud_unsupported_operations_fail_explicitly(client_type, operation, args, kwargs):
     client = client_type(base_url="https://example.com", api_key="test")
     with pytest.raises(CloudModeUnsupportedError, match=operation):
-        await _call(getattr(client, operation), *args)
+        await _call(getattr(client, operation), *args, **kwargs)

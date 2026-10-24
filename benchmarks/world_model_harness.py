@@ -286,6 +286,15 @@ def format_markdown(result: dict[str, Any]) -> str:
     novelty = result["novelty"]
     trajectory = result["trajectory"]
 
+    baseline_error = prediction["baseline_step_error"]
+    predicted_error = prediction["predicted_step_error"]
+    if predicted_error < baseline_error:
+        error_clause = f"reduced future-step error from {baseline_error} to {predicted_error}"
+    elif predicted_error > baseline_error:
+        error_clause = f"increased future-step error from {baseline_error} to {predicted_error}"
+    else:
+        error_clause = f"left future-step error unchanged at {baseline_error}"
+
     lines = [
         "",
         "## LOCI World-Model Harness",
@@ -313,10 +322,8 @@ def format_markdown(result: dict[str, Any]) -> str:
         f"| Trajectory | reconstructed states | {trajectory['states']} |",
         "",
         (
-            "**Headline:** prediction-grounded retrieval reduced future-step error "
-            f"from {prediction['baseline_step_error']} to "
-            f"{prediction['predicted_step_error']}, while the novel probe scored "
-            f"{novelty['novel_corner']:.3f} novelty."
+            f"**Headline:** prediction-grounded retrieval {error_clause}, "
+            f"while the novel probe scored {novelty['novel_corner']:.3f} novelty."
         ),
         "",
     ]

@@ -7,22 +7,44 @@ allow-direct-references = true
 
 [project]
 name = "loci-stdb"
-version = "0.3.0"
-description = "4D spatiotemporal vector database middleware for AI world models"
+version = "0.4.0"
+description = "Spatial memory for Physical AI: a 4D (x, y, z, t) vector memory that lets robots, drones and world models remember what they saw, where and when, and detect what's new."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 authors = [
-    { name = "Loci Contributors" },
+    { name = "Zygmunt Dyras" },
+    { name = "LOCI contributors" },
 ]
-keywords = ["vector-database", "spatiotemporal", "world-models", "qdrant", "hilbert-curve"]
+keywords = [
+    "physical-ai",
+    "embodied-ai",
+    "robotics",
+    "robot-memory",
+    "spatial-memory",
+    "world-models",
+    "agent-memory",
+    "vector-database",
+    "spatiotemporal",
+    "novelty-detection",
+    "hilbert-curve",
+    "qdrant",
+    "mcp",
+    "v-jepa",
+    "dreamerv3",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 dependencies = [
     "qdrant-client>=1.7.0",
@@ -33,18 +55,17 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/zd87pl/loci-db"
 Repository = "https://github.com/zd87pl/loci-db"
+Documentation = "https://github.com/zd87pl/loci-db#readme"
 Issues = "https://github.com/zd87pl/loci-db/issues"
+Changelog = "https://github.com/zd87pl/loci-db/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-# Note: with uv this resolves to the local ./loci-core path via [tool.uv.sources]
-# below. With plain pip, `pip install .[native]` will look for loci-core on PyPI
-# (where it does not exist) — pip users should instead run `pip install -e ./loci-core`.
-native = [
-    "loci-core",
-]
 research = [
     "anthropic>=0.94.0",
     "click>=8.0",
+]
+mcp = [
+    "mcp>=1.2,<2",
 ]
 dev = [
     "pytest>=7.0",
@@ -63,13 +84,26 @@ dev = [
 
 [project.scripts]
 loci = "loci.cli:main"
+loci-mcp = "loci.mcp.server:main"
+
+# The native Rust bindings are a local-only dependency GROUP (PEP 735), not a
+# published extra: `loci-core` is not registered on PyPI, so shipping it in
+# [project.optional-dependencies] would put an unregistered name in the
+# published metadata — a dependency-confusion vector where anyone squatting
+# the name gets code execution on `pip install "loci-stdb[native]"`.
+# Install with uv:  uv sync --group native   (resolves via [tool.uv.sources])
+# Install with pip: pip install -e ./loci-core
+[dependency-groups]
+native = [
+    "loci-core",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["loci"]
 
-# uv-specific: resolve the `native` extra's loci-core dependency to the local
+# uv-specific: resolve the `native` group's loci-core dependency to the local
 # Rust crate instead of PyPI. pip ignores this table; see the comment on the
-# `native` optional-dependency above for the pip equivalent.
+# `native` dependency group above for the pip equivalent.
 [tool.uv.sources]
 loci-core = { path = "loci-core", editable = true }
 
@@ -107,8 +141,8 @@ warn_unused_ignores = true
 module = [
     "qdrant_client.*",
     "hilbertcurve.*",
-    "segno.*",
-    "faster_whisper.*",
-    "edge_tts.*",
+    # Optional native Rust extension: not installed in environments without the
+    # `native` dependency group (e.g. the CI typecheck job) and ships no stubs.
+    "loci_core",
 ]
 ignore_missing_imports = true

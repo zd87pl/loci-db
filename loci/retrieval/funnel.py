@@ -64,6 +64,14 @@ def funnel_search(
     Searches from coarsest (sequence) to finest (patch) granularity.
     Returns results at the finest scale that produced any hits.
 
+    Coarse-to-fine gating (intentional): each finer pass only searches the
+    epochs and scene_ids surfaced by the coarser passes before it. Fine-scale
+    points that live in an epoch or scene with no coarse-scale entries are
+    deliberately never returned, even when they are the globally best matches
+    — the funnel trades exhaustiveness for locality. Callers who need an
+    exhaustive fine-scale search should query that scale directly, e.g.
+    ``client.query(..., _extra_payload_filter={"scale_level": "patch"})``.
+
     Args:
         client: Initialised :class:`LociClient`.
         vector: Query embedding.
@@ -106,7 +114,11 @@ async def async_funnel_search(
     time_window_ms: tuple[int, int] | None = None,
     limit: int = 10,
 ) -> list[WorldState]:
-    """Async variant of funnel_search with epoch carry-over."""
+    """Async variant of funnel_search with epoch carry-over.
+
+    See :func:`funnel_search` for the coarse-to-fine gating semantics —
+    finer passes only search epochs/scenes surfaced by coarser passes.
+    """
     best: list[WorldState] = []
     candidate_epochs: set[int] | None = None
     candidate_scene_ids: set[str] | None = None

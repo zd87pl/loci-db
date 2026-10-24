@@ -107,6 +107,26 @@ class TestAdaptiveEnabled:
         stats = c.density_stats
         assert stats.hot_cells >= 1
 
+    def test_hot_cell_detected_across_time_bins(self):
+        """Density is per spatial cell: inserts spread across the whole epoch
+        (every point in a distinct epoch-relative time bin) still aggregate
+        into one hot cell instead of being diluted across time bins."""
+        from loci.spatial.adaptive import AdaptiveResolution
+
+        c = LocalLociClient(
+            vector_size=VEC_SIZE,
+            decay_lambda=0,
+            adaptive=True,
+        )
+        c._adaptive = AdaptiveResolution(base_order=4, max_order=6, density_threshold=3)
+        # epoch_size_ms=5000: spread timestamps across the epoch so each
+        # insert lands in a different t bin at p=4.
+        for i in range(8):
+            c.insert(_make_state(ts=i * 625))
+        stats = c.density_stats
+        assert stats.hot_cells == 1
+        assert stats.max_density == 8
+
     def test_query_uses_finer_hilbert_field_in_hot_region(self):
         from loci.spatial.adaptive import AdaptiveResolution
 

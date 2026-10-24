@@ -10,7 +10,7 @@ provisional first workflow; confirm it with an existing user or partner.
 - [ ] Agree one workflow, dataset, buyer, acceptance thresholds, and paid continuation decision
 - [ ] Define coordinate frames, embedding versions, timestamps, and source provenance
 - [ ] Verify failure handling, persistence/recovery, concurrent writers, and expected scale
-- [ ] Benchmark the current client on live Qdrant against tuned filters and time-sharding-only at equal recall
+- [ ] Benchmark the current client on live Qdrant against tuned range filters and a timestamp-range-only (no Hilbert) baseline at equal recall
 - [ ] Evaluate a real predictor on held-out episodes against retrieval without prediction
 - [ ] Measure incident investigation time and useful regression cases with pilot users
 - [ ] Proceed only when agreed reliability, quality, cost, and commercial gates pass
@@ -19,7 +19,8 @@ provisional first workflow; confirm it with an existing user or partner.
 
 - [x] WorldState data model with validation
 - [x] Hilbert curve spatial encoding (4D)
-- [x] Temporal sharding with epoch-based collections
+- [x] Temporal epoch model (since superseded: epochs are now purely logical
+      over the bounded two-collection layout)
 - [x] LociClient: insert, insert_batch, query
 - [x] Predict-then-retrieve primitive
 - [x] Temporal decay scoring
@@ -27,7 +28,7 @@ provisional first workflow; confirm it with an existing user or partner.
 
 ## v0.2 — Robustness
 
-- [x] AsyncLociClient with parallel shard fan-out
+- [x] AsyncLociClient with concurrent search execution
 - [x] Causal chain linking in insert and insert_batch
 - [x] Configurable distance metrics (cosine, dot, euclidean)
 - [x] Input validation (confidence, timestamps, spatial bounds)
@@ -35,9 +36,10 @@ provisional first workflow; confirm it with an existing user or partner.
 - [x] CI pipeline (GitHub Actions, Python 3.11 + 3.12)
 - [x] Comprehensive test suite (70+ tests)
 - [x] Connection retry logic with exponential backoff
-- [ ] Shard lifecycle: warm → cold migration policy
+- [x] Warm → cold data aging (delivered as memory consolidation: stale raw
+      epochs fold into the summary collection; see v0.4)
 
-## v0.3 — Performance (current)
+## v0.3 — Performance
 
 - [x] Integrate adaptive Hilbert resolution into clients (density tracking + stats)
 - [x] Integrate funnel search into client API (`funnel_query()` on all clients)
@@ -45,10 +47,53 @@ provisional first workflow; confirm it with an existing user or partner.
 - [ ] Benchmarks against Milvus and Weaviate spatial filters
 - [ ] Batch predict-then-retrieve (multiple context vectors)
 
-## v0.4 — Multi-Scale
+## v0.4 — Multi-Scale & Memory Semantics (current; 0.4.0 ships the checked items)
 
+Direction set by [RFC-0001](docs/RFC-0001-memory-for-world-models.md)
+("the memory system for world models"): invest above the filter layer.
+
+- [x] Memory consolidation v1 — episodic→semantic aging on all three clients
+      (`ConsolidationPolicy`; RFC-0001 R1)
+- [x] MCP server — spatial memory for agents (`loci-stdb[mcp]`, `loci-mcp`;
+      RFC-0001 P2)
+- [x] Consolidation for the Qdrant clients (sync + async)
+- [ ] Multi-tier consolidation fidelity curves (raw → k-centroids → scene digest)
+- [ ] Conformal novelty — false-alarm-rate guarantees (RFC-0001 R2)
+- [ ] World-model memory benchmark suite (RFC-0001 R3)
+- [ ] Adaptive query planner: Hilbert range-runs vs buckets vs naive filters
+      chosen per query (RFC-0001 R4)
 - [ ] Cross-scale causal linking
 - [ ] Scale-aware temporal decay
+
+## Ecosystem integrations (help wanted)
+
+Meet physical-AI builders where they already work. See
+[CONTRIBUTING.md](CONTRIBUTING.md#where-to-start).
+
+- [x] MCP server for LLM agents (`loci-mcp`)
+- [x] World-model adapters: V-JEPA 2, DreamerV3, generic numpy/torch
+- [ ] ROS 2 node (odometry + camera embeddings → memories; recall/novelty services)
+- [ ] LeRobot dataset loader + policy-memory example
+- [ ] NVIDIA Isaac Sim and Habitat end-to-end examples with real embeddings
+- [ ] Hosted interactive demo (Hugging Face Space)
+- [ ] Colab quick-start notebook
+
+## Deferred architecture refactors
+
+Known structural debts, documented in ARCHITECTURE.md ("Known Limitations and
+Planned Refactors"):
+
+- [x] Bounded epoch storage — **done**: exactly two collections per tenant
+      (`{prefix}loci_data` + `{prefix}loci_summary`) with payload-indexed
+      timestamps and Hilbert buckets; epochs are now purely logical and every
+      operation is O(1) in collection count. Existing per-epoch deployments
+      migrate with `loci migrate-layout`
+- [ ] Shared client core — extract common query planning, filter construction,
+      and result assembly to eliminate the ~77% duplicated logic across
+      `LociClient` / `AsyncLociClient` / `LocalLociClient`
+- [ ] loci-core distribution — register `loci-core` on PyPI and publish maturin
+      wheels (restoring a safe `[native]` extra), or commit to the local-only
+      dependency-group install path
 
 ## v1.0 — Production Ready
 

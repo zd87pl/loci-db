@@ -5,8 +5,12 @@ Compares four query methods against brute-force ground truth:
 1. Naive Qdrant — single collection, 3 float-range filters (x, y, z) + timestamp
 2. LOCI r4 — historical fixed-r4 baseline without query-time 4D routing
 3. LOCI r4 + overlap — same with overlap_factor=1.2 (20% expanded search)
-4. LOCI current — mirrors the shipped query path: epoch-local 4D bounds,
-   per-shard overfetch, exact post-filtering, and overlap-based Hilbert routing
+4. LOCI current — the shipped query strategy (epoch-local 4D bounds,
+   overfetch, exact post-filtering, overlap-based Hilbert routing), run here
+   over this benchmark's own hand-rolled per-epoch collections.  The shipped
+   clients now store all raw points in a single ``loci_data`` collection and
+   carry the epoch in a timestamp Range condition instead; the indexing
+   pipeline (Hilbert payloads + timestamp filter) is the same.
 
 Four benchmark scenarios:
 A. Tight spatial query  (radius 0.05)
@@ -396,7 +400,12 @@ def query_loci_current(
     now_ms: int | None = None,
     decay_lambda: float = DECAY_LAMBDA,
 ) -> list[str]:
-    """Run the shipped LOCI query path with epoch-local 4D Hilbert routing."""
+    """Run the shipped LOCI query strategy with epoch-local 4D Hilbert routing.
+
+    Uses this benchmark's hand-rolled per-epoch collections; the shipped
+    clients apply the same Hilbert + timestamp filtering over one
+    ``loci_data`` collection.
+    """
     epochs = epochs_in_range(q["t_start"], q["t_end"], EPOCH_SIZE_MS)
     time_window = (q["t_start"], q["t_end"])
     spatial_bounds = {

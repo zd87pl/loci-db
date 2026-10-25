@@ -44,3 +44,8 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # same region. Smaller queues leave it enough room (20/20 left ~0 and aborted boot on this board).
 CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=8
 CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=8
+
+# Run the ISP pipeline controller (IPA auto-exposure, white balance, denoise); without it the raw
+# sensor data is demosaiced with fixed gains and the picture is dark with a colour cast.
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+CONFIG_ISP_PIPELINE_CONTROLLER_TASK_STACK_USE_PSRAM=y

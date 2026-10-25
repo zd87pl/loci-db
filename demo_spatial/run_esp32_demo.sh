@@ -14,6 +14,7 @@
 #   LOCI_ESP32_MAX_FPS=4      host-side cap on frames processed per second
 #   LOCI_ESP32_MIN_CONF=0.4   YOLO confidence floor for the small camera
 #   LOCI_ESP32_WARMUP=1       load YOLO at startup instead of on the first frame
+#   LOCI_DATA_DIR             memory snapshot dir (default ~/.local/share/loci-esp32, separate from the handheld)
 
 set -euo pipefail
 
@@ -28,6 +29,8 @@ export TTS_ENGINE="${TTS_ENGINE:-edge}"
 export LOCI_ESP32_MAX_FPS="${LOCI_ESP32_MAX_FPS:-4}"
 export LOCI_ESP32_MIN_CONF="${LOCI_ESP32_MIN_CONF:-0.4}"
 export LOCI_ESP32_WARMUP="${LOCI_ESP32_WARMUP:-1}"
+# Keep the ESP32 demo's memory apart from the handheld demo's (both default to ~/.local/share/loci-handheld)
+export LOCI_DATA_DIR="${LOCI_DATA_DIR:-$HOME/.local/share/loci-esp32}"
 # The OpenAI key in many shells is a placeholder; the ESP32 path never needs it.
 unset OPENAI_API_KEY
 

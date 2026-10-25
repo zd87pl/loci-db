@@ -79,6 +79,10 @@ class Esp32Config:
     audio_gain: float = 1.0  # LOCI_ESP32_AUDIO_GAIN: linear gain applied before queueing
     audio_queue_max: int = 8  # oldest clip is dropped when a device falls this far behind
     stale_after_s: float = 10.0  # device reported "offline" after this many silent seconds
+    dataset_dir: str = (
+        ""  # LOCI_ESP32_DATASET_DIR: save every Nth frame + detections here ("" = off)
+    )
+    dataset_every: int = 10  # LOCI_ESP32_DATASET_EVERY
     default_device: str = DEFAULT_DEVICE  # LOCI_ESP32_DEVICE: id used when the board sends none
     warmup: bool = False  # LOCI_ESP32_WARMUP=1: load YOLO in a thread at install time
     depth: str = "none"  # LOCI_ESP32_DEPTH: "none" | "mono" (needs a plugged-in estimator)
@@ -101,6 +105,8 @@ class Esp32Config:
             audio_gain=_env_float(env, "LOCI_ESP32_AUDIO_GAIN", 1.0),
             audio_queue_max=_env_int(env, "LOCI_ESP32_AUDIO_QUEUE_MAX", 8),
             stale_after_s=_env_float(env, "LOCI_ESP32_STALE_S", 10.0),
+            dataset_dir=env.get("LOCI_ESP32_DATASET_DIR") or "",
+            dataset_every=max(1, _env_int(env, "LOCI_ESP32_DATASET_EVERY", 10)),
             default_device=env.get("LOCI_ESP32_DEVICE") or DEFAULT_DEVICE,
             warmup=env.get("LOCI_ESP32_WARMUP", "0") == "1",
             depth=(env.get("LOCI_ESP32_DEPTH") or "none").lower(),
@@ -118,6 +124,8 @@ class Esp32Config:
             "audio_gain": self.audio_gain,
             "audio_queue_max": self.audio_queue_max,
             "stale_after_s": self.stale_after_s,
+            "dataset_dir": self.dataset_dir,
+            "dataset_every": self.dataset_every,
             "default_device": self.default_device,
             "depth": self.depth,
             "white_balance": self.white_balance,
@@ -350,6 +358,7 @@ class Esp32Device:
     last_detections: list[Detection] = field(default_factory=list)
     last_infer_ms: float = 0.0
     backlog_frames: int = 0  # frames uploaded late from the board's card
+    dataset_frames: int = 0  # frames saved to LOCI_ESP32_DATASET_DIR on the host
     fps: float = 0.0
     rssi: int | None = None
     device_ms: int | None = None  # the board's millis() of the last frame, for the status page
@@ -372,6 +381,7 @@ class Esp32Device:
             "frames_processed": self.frames_processed,
             "frames_dropped": self.frames_dropped,
             "backlog_frames": self.backlog_frames,
+            "dataset_frames": self.dataset_frames,
             "errors": self.errors,
             "fps": round(self.fps, 2),
             "last_seq": self.last_seq,
@@ -564,6 +574,8 @@ class Esp32Hub:
         dev.last_detections = detections
         dev.last_infer_ms = infer_ms
         dev.last_size = jpeg_size(jpeg) or dev.last_size
+        if self.cfg.dataset_dir and dev.frames_processed % self.cfg.dataset_every == 0:
+            await loop.run_in_executor(None, self._dataset_save, dev, jpeg, ts, detections)
         result = FrameResult(
             device_id=dev.device_id,
             seq=dev.last_seq,
@@ -654,6 +666,33 @@ class Esp32Hub:
     def pending_audio(self, device_id: str | None = None) -> int:
         dev = self._devices.get(device_id or self.cfg.default_device)
         return len(dev.audio_queue) if dev else 0
+
+    # -- dataset recording (host side) -------------------------------------------
+
+    def _dataset_save(
+        self, dev: Esp32Device, jpeg: bytes, ts: int, detections: list[Detection]
+    ) -> None:
+        """Write <dataset_dir>/<device>/<ts>.jpg and .json (pseudo-labels for a custom detector)."""
+        import json
+        from pathlib import Path
+
+        try:
+            folder = Path(self.cfg.dataset_dir).expanduser() / dev.device_id
+            folder.mkdir(parents=True, exist_ok=True)
+            stem = f"{ts}-{dev.frames_processed:06d}"  # unique even when two frames share a ms
+            (folder / f"{stem}.jpg").write_bytes(jpeg)
+            record = {
+                "timestamp_ms": ts,
+                "device": dev.device_id,
+                "width": dev.last_size[0] if dev.last_size else None,
+                "height": dev.last_size[1] if dev.last_size else None,
+                "model": getattr(self._detector, "model_path", None),
+                "detections": [d.to_dict() for d in detections],
+            }
+            (folder / f"{stem}.json").write_text(json.dumps(record))
+            dev.dataset_frames += 1
+        except Exception as e:
+            logger.warning("dataset save failed: %s", e)
 
     # -- memory snapshot for the board's local cache -----------------------------
 

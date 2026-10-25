@@ -39,6 +39,8 @@ export LOCI_ESP32_WB="${LOCI_ESP32_WB:-gray}"
 export LOCI_ESP32_IMGSZ="${LOCI_ESP32_IMGSZ:-960}"
 # Keep the ESP32 demo's memory apart from the handheld demo's (both default to ~/.local/share/loci-handheld)
 export LOCI_DATA_DIR="${LOCI_DATA_DIR:-$HOME/.local/share/loci-esp32}"
+# Every 10th frame + detections on disk: the training material for a detector that knows your objects
+export LOCI_ESP32_DATASET_DIR="${LOCI_ESP32_DATASET_DIR:-$LOCI_DATA_DIR/dataset}"
 # The OpenAI key in many shells is a placeholder; the ESP32 path never needs it.
 unset OPENAI_API_KEY
 

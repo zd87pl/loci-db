@@ -39,7 +39,7 @@
 <main>
   <section>
     <h2>Camera, as received from the board</h2>
-    <img id="frame" src="/api/esp32/stream.mjpg" alt="waiting for the first frame">
+    <img id="frame" alt="waiting for the first frame">
     <div id="dets" style="margin-top:8px"></div>
     <small id="framemeta"></small>
   </section>
@@ -73,6 +73,7 @@
 const $ = (s) => document.querySelector(s);
 const device = new URLSearchParams(location.search).get('device') || null;
 const q = (path) => device ? `${path}${path.includes('?') ? '&' : '?'}device=${encodeURIComponent(device)}` : path;
+$('#frame').src = q('/api/esp32/stream.mjpg');
 
 async function refresh() {
   try {

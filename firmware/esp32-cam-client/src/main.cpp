@@ -13,7 +13,8 @@
 //
 // Serial console (115200): type  ask where is my cup | say hello | beep | status | fps 3
 //
-// Built against the Arduino-ESP32 2.x core (ESP-IDF 4.4 legacy I2S driver) through PlatformIO.
+// Builds with the Arduino-ESP32 2.x (ESP-IDF 4.4) and 3.x (ESP-IDF 5.x) cores through PlatformIO;
+// it uses the legacy I2S driver API, which both cores ship (deprecated but supported on 3.x).
 
 #include <Arduino.h>
 #include <HTTPClient.h>
@@ -416,18 +417,20 @@ static bool postFrame(camera_fb_t* fb, bool& audio_pending) {
     g_frame_interval_ms = (next_ms > (int)own_ms) ? (uint32_t)next_ms : own_ms;
     g_last_labels = jsonArray(body, "labels");
     bool dropped = jsonInt(body, "dropped", 0) == 1;
-    Serial.printf("[frame] #%u %ux%u %u B -> %s%s%s\n", g_seq, fb->width, fb->height, fb->len,
+    Serial.printf("[frame] #%lu %ux%u %u B -> %s%s%s\n", (unsigned long)g_seq, (unsigned)fb->width,
+                  (unsigned)fb->height, (unsigned)fb->len,
                   dropped ? "(dropped by host) " : "", g_last_labels.length() ? g_last_labels.c_str() : "-",
                   audio_pending ? "  [audio waiting]" : "");
     ok = true;
   } else {
-    Serial.printf("[frame] #%u POST -> %d %s\n", g_seq, code,
+    Serial.printf("[frame] #%lu POST -> %d %s\n", (unsigned long)g_seq, code,
                   code < 0 ? http.errorToString(code).c_str() : "");
   }
   http.end();
   return ok;
 }
 
+#if LOCI_HAS_MIC
 // Send a push-to-talk clip; the host transcribes, answers and queues the speech.
 static void postVoice(const uint8_t* pcm, size_t len) {
   HTTPClient http;
@@ -448,6 +451,7 @@ static void postVoice(const uint8_t* pcm, size_t len) {
   Serial.printf("[voice] POST -> %d\n", code);
   http.end();
 }
+#endif
 
 // Typed question (serial console or button without a microphone).
 static void askHost(const String& text) {
@@ -547,9 +551,10 @@ static void printStatus() {
   Serial.printf("[status] fw %s board %s cam %d spk %d mic %d wifi %d rssi %d ip %s\n", FW_VERSION,
                 LOCI_BOARD_NAME, g_cam_ok, g_spk_ok, g_mic_ok, WiFi.status() == WL_CONNECTED, WiFi.RSSI(),
                 WiFi.localIP().toString().c_str());
-  Serial.printf("[status] frames sent %u failed %u interval %u ms audio clips %u heap %u psram %u\n",
-                g_frames_sent, g_frames_failed, g_frame_interval_ms, g_audio_clips, ESP.getFreeHeap(),
-                ESP.getFreePsram());
+  Serial.printf("[status] frames sent %lu failed %lu interval %lu ms audio clips %lu heap %lu psram %lu\n",
+                (unsigned long)g_frames_sent, (unsigned long)g_frames_failed,
+                (unsigned long)g_frame_interval_ms, (unsigned long)g_audio_clips,
+                (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
   Serial.printf("[status] last labels: %s\n", g_last_labels.length() ? g_last_labels.c_str() : "-");
 }
 
@@ -577,7 +582,7 @@ static void handleSerial() {
       int fps = line.substring(4).toInt();
       if (fps > 0 && fps <= 15) {
         g_frame_interval_ms = 1000 / fps;
-        Serial.printf("[cfg] interval %u ms\n", g_frame_interval_ms);
+        Serial.printf("[cfg] interval %lu ms\n", (unsigned long)g_frame_interval_ms);
       }
     } else if (line == "audio") {
       fetchAndPlayAudio(2);
@@ -595,9 +600,10 @@ void setup() {
   Serial.begin(115200);
   delay(400);
   Serial.printf("\n=== LOCI ESP32 thin client v%s — %s ===\n", FW_VERSION, LOCI_BOARD_NAME);
-  Serial.printf("chip %s rev %d, %u MB flash, PSRAM %s (%u B free), device id \"%s\"\n",
-                ESP.getChipModel(), ESP.getChipRevision(), ESP.getFlashChipSize() / (1024 * 1024),
-                psramFound() ? "yes" : "no", ESP.getFreePsram(), LOCI_DEVICE_ID);
+  Serial.printf("chip %s rev %d, %lu MB flash, PSRAM %s (%lu B free), device id \"%s\"\n",
+                ESP.getChipModel(), ESP.getChipRevision(),
+                (unsigned long)(ESP.getFlashChipSize() / (1024 * 1024)), psramFound() ? "yes" : "no",
+                (unsigned long)ESP.getFreePsram(), LOCI_DEVICE_ID);
   Serial.printf("camera XCLK=%d SIOD=%d SIOC=%d VSYNC=%d HREF=%d PCLK=%d  speaker BCLK=%d LRC=%d DIN=%d  "
                 "mic CLK=%d DATA=%d  button=%d\n",
                 LOCI_CAM_XCLK, LOCI_CAM_SIOD, LOCI_CAM_SIOC, LOCI_CAM_VSYNC, LOCI_CAM_HREF, LOCI_CAM_PCLK,

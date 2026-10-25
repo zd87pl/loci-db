@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -171,10 +172,15 @@ def install_esp32_routes(
 
         async def gen():
             last: bytes | None = None
+            last_sent = 0.0
             while True:
                 jpeg = hub.latest_jpeg(device_id)
-                if jpeg is not None and jpeg is not last:
+                now = time.monotonic()
+                # Browsers only show a multipart frame once the next boundary arrives, so
+                # repeat the latest frame every 2 s even when the board has gone quiet.
+                if jpeg is not None and (jpeg is not last or now - last_sent >= 2.0):
                     last = jpeg
+                    last_sent = now
                     yield (
                         b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
                         + str(len(jpeg)).encode()

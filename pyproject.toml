@@ -76,6 +76,7 @@ dev = [
     "mypy>=1.10",
     "fastapi[standard]>=0.100.0",
     "httpx>=0.24.0",
+    "pillow>=10.0",  # demo_spatial tests build JPEG frames for the ESP32 thin-client API
     "bandit[toml]>=1.7",
     "pip-audit>=2.7",
     "anthropic>=0.94.0",

@@ -98,6 +98,19 @@ static void console_task(void *arg) {
       print_status();
     } else if (!strcmp(line, "beep")) {
       audio_beep(660.0f, 150);
+    } else if (!strcmp(line, "snap")) {  // capture + encode one frame without the host (self-test)
+      uint8_t *jpeg = NULL;
+      size_t len = 0;
+      uint32_t w = 0, h = 0;
+      int64_t t0 = esp_timer_get_time();
+      if (s_cam_ok && camera_capture_jpeg(&jpeg, &len, &w, &h) == ESP_OK) {
+        bool soi = len > 4 && jpeg[0] == 0xFF && jpeg[1] == 0xD8;
+        ESP_LOGI(TAG, "[snap] %lux%lu -> %u B JPEG in %lld ms (SOI %s)", (unsigned long)w, (unsigned long)h,
+                 (unsigned)len, (esp_timer_get_time() - t0) / 1000, soi ? "ok" : "MISSING");
+        camera_release();
+      } else {
+        ESP_LOGW(TAG, "[snap] capture failed (camera %s)", s_cam_ok ? "ok" : "unavailable");
+      }
     } else if (!strcmp(line, "audio")) {
       host_fetch_and_play_audio(2);
     } else if (!strncmp(line, "ask ", 4)) {
@@ -111,7 +124,7 @@ static void console_task(void *arg) {
     } else if (!strncmp(line, "vol ", 4)) {
       audio_set_volume(atoi(line + 4));
     } else {
-      ESP_LOGI(TAG, "commands: status | beep | audio | ask <question> | say <text> | fps <n> | vol <0-100>");
+      ESP_LOGI(TAG, "commands: status | snap | beep | audio | ask <question> | say <text> | fps <n> | vol <0-100>");
     }
   }
   vTaskDelete(NULL);

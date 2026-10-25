@@ -155,8 +155,10 @@ YOLO_MODEL=yolov8n.pt demo_spatial/run_esp32_demo.sh
 ```
 
 Defaults set by the script: `WHISPER_LOCAL=1`, `WHISPER_LOCAL_MODEL=tiny`, `TTS_ENGINE=edge`
-(needs internet; use `TTS_ENGINE=piper PIPER_MODEL_PATH=…onnx` for offline), `LOCI_ESP32_MAX_FPS=4`,
-`LOCI_ESP32_MIN_CONF=0.4`, `LOCI_ESP32_WARMUP=1`. `OPENAI_API_KEY` is unset on purpose: the ESP32
+(needs internet; use `TTS_ENGINE=piper PIPER_MODEL_PATH=…onnx` for offline),
+`EDGE_TTS_VOICE=en-US-JennyNeural` (an adult female voice; the pipeline's own default is the child
+voice Ana), `LOCI_DATA_DIR=~/.local/share/loci-esp32` (memory kept apart from the handheld demo's),
+`LOCI_ESP32_MAX_FPS=4`, `LOCI_ESP32_MIN_CONF=0.4`, `LOCI_ESP32_WARMUP=1`. `OPENAI_API_KEY` is unset on purpose: the ESP32
 path never calls OpenAI. `yolov8n.pt` is the plain COCO model (no CLIP download, unlike YOLO-World);
 it knows cup, bottle, laptop, cell phone, banana, book, keyboard, mouse, chair… but **not keys**.
 
@@ -240,9 +242,15 @@ Pillow-made JPEGs for the camera, a callable for YOLO, a coroutine for STT, a WA
 - ✅ Verified on the Mac without hardware: the fake board's frames become observations, typed
   and spoken questions ("where is the bus?" synthesized, transcribed by faster-whisper tiny in
   ~0.6 s) come back as 16 kHz PCM; ask-to-audio 2.4–3.5 s with edge-tts.
-- 🔧 Board on the desk: at the time of writing it did not enumerate on the Mac's USB, so the
-  flash, the speaker pins and the camera orientation are unverified. Checklist in the firmware
-  README, "Board on the desk".
+- ✅ Board on the desk (2026-10-25): it is a **Waveshare ESP32-P4-NANO**, flashed with
+  `firmware/esp32-p4-client`. Measured: Wi-Fi via the C6 at −40 to −50 dBm; 800×800 JPEGs of
+  45–90 kB at 2.0 fps with 180–340 ms per POST; YOLOv8n 30–40 ms per frame on the Mac; typed
+  "where is my cup" answered from the board's own observations and the 12 s reply played on the
+  board's speaker; push-to-talk through the onboard mic transcribed "Where is my cup?" twice
+  (3.8 s and 3.3 s clips), the second answer starting 1.3 s after the button was released.
+- ⬜ Picture quality on the P4: exposure is right with the ISP pipeline controller, but frames keep
+  a blue-grey cast (white balance) and the fixed-focus OV5647 must be aimed and focused on the
+  desk; detections were only reliable with objects close to the lens.
 - ✅ Rebased on `feat/handheld-oak-voice-demo`; the hub feeds `SceneIngestion.process_detections`.
   ⬜ Drop the legacy `_update_consensus` fallback once that branch is on `main`.
 - ⬜ Push-to-talk over WebSocket (streaming STT) instead of one POST per utterance.

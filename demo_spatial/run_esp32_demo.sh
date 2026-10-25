@@ -11,6 +11,7 @@
 #   WHISPER_LOCAL=1           faster-whisper on CPU
 #   WHISPER_LOCAL_MODEL=tiny  ~1 s for a short question
 #   TTS_ENGINE=edge           edge-tts (needs internet); set TTS_ENGINE=piper + PIPER_MODEL_PATH for offline
+#   EDGE_TTS_VOICE            en-US-JennyNeural (adult female); e.g. en-GB-SoniaNeural, en-US-GuyNeural
 #   LOCI_ESP32_MAX_FPS=4      host-side cap on frames processed per second
 #   LOCI_ESP32_MIN_CONF=0.4   YOLO confidence floor for the small camera
 #   LOCI_ESP32_WARMUP=1       load YOLO at startup instead of on the first frame
@@ -26,6 +27,8 @@ export YOLO_MODEL="${YOLO_MODEL:-yolov8n.pt}"
 export WHISPER_LOCAL="${WHISPER_LOCAL:-1}"
 export WHISPER_LOCAL_MODEL="${WHISPER_LOCAL_MODEL:-tiny}"
 export TTS_ENGINE="${TTS_ENGINE:-edge}"
+# edge-tts voice: an adult female voice (the pipeline default, en-US-AnaNeural, is a child voice)
+export EDGE_TTS_VOICE="${EDGE_TTS_VOICE:-en-US-JennyNeural}"
 export LOCI_ESP32_MAX_FPS="${LOCI_ESP32_MAX_FPS:-4}"
 export LOCI_ESP32_MIN_CONF="${LOCI_ESP32_MIN_CONF:-0.4}"
 export LOCI_ESP32_WARMUP="${LOCI_ESP32_WARMUP:-1}"

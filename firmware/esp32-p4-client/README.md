@@ -67,19 +67,29 @@ minimum v1.0). IDF 6 builds for v3.x silicon by default and its bootloader then 
 v1.3 board ("requires chip revision in range [v3.1 - v3.99]"). Boards with v3.x silicon need the
 opposite setting; the two are mutually exclusive.
 
-## What you should see
+## What you should see (real log from the desk test, 2026-10-25)
 
 ```
-I (..) loci: === LOCI thin client v0.2.0-p4 on Waveshare ESP32-P4-NANO (ESP32-P4 rev v1.3, 2 cores) ===
-I (..) audio: ES8311 ready: 16000 Hz mono, volume 75%, mic gain 36 dB, PA on GPIO53
-I (..) camera: /dev/video0: driver MIPI-CSI, card OV5647 ...
-I (..) camera: capture 800x800, pixel format RGBP, JPEG quality 80
-I (..) wifi: got ip 192.168.x.y
-I (..) loci: [frame] #1 800x800 61234 B in 180 ms -> "cup","laptop"
-I (..) host: played 99200 bytes (3.1 s) in 3200 ms
+I (1597) loci: === LOCI thin client v0.2.0-p4 on Waveshare ESP32-P4-NANO (ESP32-P4 rev v1.3, 2 cores) ===
+I (1700) audio: ES8311 ready: 16000 Hz mono, volume 75%, mic gain 36 dB, PA on GPIO53
+I (1877) ov5647: Detected Camera sensor PID=0x5647
+I (1936) camera: /dev/video0: driver MIPI-CSI, card MIPI-CSI, version 2.1.0
+I (1937) camera: /dev/video10: driver JPEG, card JPEG, version 2.1.0
+I (1938) camera: capture 800x800, pixel format RGBP, JPEG quality 80
+I (9455) wifi: got ip 172.20.1.183
+I (9780) loci: [frame] #1 800x800 20758 B in 239 ms -> -
+I (24833) loci: [frame] #31 800x800 81376 B in 240 ms -> "person"
+I (478311) loci: [ptt] recording... release the button to ask
+I (482137) loci: [ptt] 3.8 s captured
+I (487758) host: heard: "Where is my cup?"
+I (487758) host: answer: Your cup was last seen in the center, in the middle area. That was 3 minutes ago, at 10:19 AM. It's to the left of the scissors.
+I (499689) host: played 383232 bytes (12.0 s) in 11904 ms
 ```
 
-Two rising beeps at boot mean the codec and amplifier work; a third beep means Wi-Fi is up.
+Two rising beeps at boot mean the codec and amplifier work; a third beep means Wi-Fi is up. A
+short high beep after releasing BOOT means the clip was captured; a low beep means the press was
+too short. `snap` on the console captures and encodes one frame without a host (800×800 → ~20–90 kB
+in ~36 ms).
 
 ## Tuning (`main/board_p4_nano.h`, overridable with `-D`)
 
@@ -108,3 +118,11 @@ Two rising beeps at boot mean the codec and amplifier work; a third beep means W
 * **No IP / `esp_wifi_init` error** — the C6 slave firmware must speak ESP-Hosted 2.x; the log prints
   the slave's version at start. Reset GPIO54 is pulsed on every boot (`HOST_CP_RESET_STRATEGY_ALWAYS`).
 * **Image upside down** — rotate on the host with `LOCI_ESP32_ROTATE=180` (no sensor flip is wired yet).
+* **Flat blue-grey frames, nothing detected** — the fixed-focus OV5647 is looking at a blank surface
+  or is out of focus: prop the board so the lens faces the desk from 0.5–1 m and check the live
+  view at `http://<host>:8002/esp32?device=p4-nano`; the lens barrel can be turned a little to
+  focus. The blue cast is white balance (the ISP pipeline controller runs AE/AWB from
+  `esp_ipa`; tuning is a follow-up) and does not stop YOLO.
+* **Serial tools reboot the board** — opening the CH343 port with RTS asserted then dropping DTR
+  pulses EN. `idf.py monitor` handles it; for scripts, leave DTR and RTS asserted (see the
+  `serial_cmd.py` helper in the notes) or accept the reset.

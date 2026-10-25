@@ -51,6 +51,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .esp32_api import install_esp32_routes
 from .handheld import (
     HandheldConfig,
     HandheldRuntime,
@@ -1086,3 +1087,13 @@ def _b64(data: bytes) -> str:
     import base64
 
     return base64.b64encode(data).decode()
+
+
+# ---------------------------------------------------------------------------
+# ESP32 thin client — camera + speaker board streaming frames to this host
+# (routes under /api/esp32/*, page at /esp32; see docs/ESP32_THIN_CLIENT_DEMO.md)
+# ---------------------------------------------------------------------------
+
+esp32_hub = install_esp32_routes(
+    app, ingestion=ingestion, memory=memory, voice=voice, subscribers=_ws_subscribers
+)

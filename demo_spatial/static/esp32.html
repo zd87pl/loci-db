@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LOCI · ESP32 thin client</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --ink:#e8eaf0; --mute:#8a90a0; --ok:#3ddc84; --bad:#ff5c5c; --acc:#5aa9ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 -apple-system, system-ui, Segoe UI, Roboto, sans-serif; }
+  header { padding:14px 18px; border-bottom:1px solid #23262f; display:flex; gap:14px; align-items:baseline; }
+  header h1 { font-size:17px; margin:0; font-weight:600; }
+  header a { color:var(--acc); text-decoration:none; font-size:13px; }
+  main { display:grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr); gap:14px; padding:14px 18px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--panel); border:1px solid #23262f; border-radius:10px; padding:14px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:0 0 10px; }
+  img#frame { width:100%; border-radius:8px; background:#000; aspect-ratio:4/3; object-fit:contain; }
+  .row { display:flex; gap:8px; margin-top:10px; }
+  input[type=text] { flex:1; background:#0f1115; color:var(--ink); border:1px solid #2b2f3a; border-radius:8px; padding:10px 12px; font-size:15px; }
+  button { background:var(--acc); color:#06121f; border:0; border-radius:8px; padding:10px 14px; font-weight:600; cursor:pointer; }
+  button.ghost { background:#262a35; color:var(--ink); }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; background:#262a35; margin:2px 4px 2px 0; }
+  .on { color:var(--ok); } .off { color:var(--bad); }
+  pre { background:#0f1115; border-radius:8px; padding:10px; font-size:12px; overflow:auto; max-height:260px; margin:0; }
+  #answer { min-height:44px; padding:10px 12px; background:#0f1115; border-radius:8px; margin-top:10px; }
+  ul { margin:0; padding-left:18px; }
+  li { margin:2px 0; }
+  small { color:var(--mute); }
+</style>
+</head>
+<body>
+<header>
+  <h1>ESP32 thin client</h1>
+  <span id="online" class="off">offline</span>
+  <a href="/">main demo</a>
+  <a href="/docs">API</a>
+</header>
+<main>
+  <section>
+    <h2>Camera, as received from the board</h2>
+    <img id="frame" alt="waiting for the first frame">
+    <div id="dets" style="margin-top:8px"></div>
+    <small id="framemeta"></small>
+  </section>
+
+  <section>
+    <h2>Ask (the answer is spoken on the board)</h2>
+    <div class="row">
+      <input id="q" type="text" placeholder="where is my cup · what do you see · what changed" autocomplete="off">
+      <button id="ask">Ask</button>
+    </div>
+    <div class="row">
+      <button class="ghost" data-q="what do you see">what do you see</button>
+      <button class="ghost" data-q="where is my cup">where is my cup</button>
+      <button class="ghost" data-q="where is my laptop">where is my laptop</button>
+    </div>
+    <div class="row">
+      <input id="say" type="text" placeholder="say something on the speaker" autocomplete="off">
+      <button id="saybtn" class="ghost">Say</button>
+    </div>
+    <div id="answer"><small>answers appear here and play on the ESP32 speaker</small></div>
+    <h2 style="margin-top:14px">Objects in memory</h2>
+    <ul id="objects"><li><small>nothing yet — point the board at a cup, a bottle, a laptop…</small></li></ul>
+  </section>
+
+  <section style="grid-column: 1 / -1">
+    <h2>Status <small>(polled every 2 s)</small></h2>
+    <pre id="status">loading…</pre>
+  </section>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const device = new URLSearchParams(location.search).get('device') || null;
+const q = (path) => device ? `${path}${path.includes('?') ? '&' : '?'}device=${encodeURIComponent(device)}` : path;
+$('#frame').src = q('/api/esp32/stream.mjpg');
+
+async function refresh() {
+  try {
+    const st = await (await fetch(q('/api/esp32/status'))).json();
+    $('#status').textContent = JSON.stringify(st, null, 2);
+    const devs = Object.values(st.devices || {});
+    const dev = device ? devs.find(d => d.device_id === device) : devs[0];
+    const online = !!(dev && dev.online);
+    $('#online').textContent = online ? `online · ${dev.fps} fps · ${dev.last_labels.join(', ') || 'no objects'}` : 'offline';
+    $('#online').className = online ? 'on' : 'off';
+    if (dev) {
+      $('#framemeta').textContent = `frame ${dev.last_seq} · ${dev.last_size ? dev.last_size.join('×') : '?'} · infer ${dev.last_infer_ms} ms · dropped ${dev.frames_dropped}`;
+      $('#dets').innerHTML = dev.last_labels.map(l => `<span class="pill">${l}</span>`).join('');
+    }
+    const objs = await (await fetch('/api/objects')).json();
+    const list = (objs.objects || objs || []);
+    if (list.length) {
+      $('#objects').innerHTML = list.map(o => `<li><b>${o.label}</b> <small>${o.position_description || ''} · ${o.last_seen_at || ''} · ${Math.round((o.confidence||0)*100)}%</small></li>`).join('');
+    }
+  } catch (e) { $('#status').textContent = 'status unavailable: ' + e; }
+}
+
+async function ask(text) {
+  if (!text) return;
+  $('#answer').innerHTML = `<small>asking “${text}”…</small>`;
+  try {
+    const r = await fetch('/api/esp32/ask', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text, device})});
+    const j = await r.json();
+    const spoken = j.audio_queued ? `queued ${j.audio_seconds}s of speech for the board` : `no speech (${j.tts_error || 'tts off'})`;
+    $('#answer').innerHTML = `<div>${j.answer}</div><small>${j.intent.kind} · ${spoken} · ${j.latency_ms} ms</small>`;
+  } catch (e) { $('#answer').textContent = 'ask failed: ' + e; }
+}
+
+$('#ask').onclick = () => ask($('#q').value.trim());
+$('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') ask($('#q').value.trim()); });
+document.querySelectorAll('button[data-q]').forEach(b => b.onclick = () => { $('#q').value = b.dataset.q; ask(b.dataset.q); });
+$('#saybtn').onclick = async () => {
+  const text = $('#say').value.trim(); if (!text) return;
+  const r = await fetch('/api/esp32/say', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text, device})});
+  const j = await r.json();
+  $('#answer').innerHTML = r.ok ? `<small>speaking: “${text}” (${j.audio_seconds}s)</small>` : `<small>say failed: ${j.detail || r.status}</small>`;
+};
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

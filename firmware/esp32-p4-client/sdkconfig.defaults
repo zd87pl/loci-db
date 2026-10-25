@@ -1,0 +1,82 @@
+# LOCI thin client on the Waveshare ESP32-P4-NANO (ESP32-P4 + ESP32-C6 for Wi-Fi over SDIO)
+CONFIG_IDF_TARGET="esp32p4"
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+
+# The ESP32-P4-NANO on the desk is silicon v1.3 (ECO2); IDF 6 defaults to v3.x-only builds
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+
+# Flash and PSRAM as on the board: 16 MB QIO flash, 32 MB hex PSRAM at 200 MHz
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+
+# CPU / RTOS
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Wi-Fi lives on the ESP32-C6 companion, reached through ESP-Hosted over SDIO
+CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y
+CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
+
+# Camera: OV5647 on the 2-lane MIPI-CSI connector, ISP pipeline, hardware JPEG encoder as a V4L2 M2M device
+CONFIG_CAMERA_OV5647=y
+CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_ENC_VIDEO_DEVICE=y
+CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE=n
+
+# HTTP client only (no TLS on the LAN demo)
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=n
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ESP-Hosted allocates its SDIO buffers from internal DMA RAM at startup; the P4 heap serves those from
+# the 131 KiB RETENT_RAM region first, and the sleep-clock init later needs RETENTION memory from the
+# same region. Smaller queues leave it enough room (20/20 left ~0 and aborted boot on this board).
+CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=8
+CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=8
+
+# Run the ISP pipeline controller (IPA auto-exposure, white balance, denoise); without it the raw
+# sensor data is demosaiced with fixed gains and the picture is dark with a colour cast.
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+CONFIG_ISP_PIPELINE_CONTROLLER_TASK_STACK_USE_PSRAM=y
+
+
+# esp_video registers each /dev/video* node with the VFS; the default table of 8 is full before the
+# card gets its entry (esp_vfs_fat_register then fails with ESP_ERR_NO_MEM). The camera examples use 15.
+CONFIG_VFS_MAX_COUNT=15
+CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
+
+# OV5647 format: 1280x960 with 2x2 binning (RAW10) — twice the light per pixel of the 800x800 mode and
+# more detail for objects across a room. A format must be enabled before it can be the default.
+CONFIG_CAMERA_OV5647_MIPI_RAW10_1280X960_BINNING_45FPS=y
+CONFIG_CAMERA_OV5647_MIPI_DEFAULT_FMT_RAW10_1280X960_BINNING_45FPS=y
+
+# Big TCP windows for the 140 kB frame uploads (defaults are 5.7 kB each) and deeper lwIP mailboxes
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
+CONFIG_LWIP_TCP_WND_DEFAULT=65534
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=16
+
+# ESP-SR: MultiNet7 English + WebRTC noise suppression from the "model" flash partition; no wake word
+# (the button is the trigger). esp-sr adds the model image to `idf.py flash`.
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_WN_NONE=y
+CONFIG_SR_MN_EN_MULTINET7_QUANT=y
+
+# Keep the internal RETENT_RAM region free for the system's sleep-retention init, which runs after
+# ESP-Hosted's constructor has taken its share (README → Troubleshooting): speech-library .bss goes
+# to PSRAM (main/linker.lf), Hosted task stacks go to PSRAM, heap code goes to flash.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y
+CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y

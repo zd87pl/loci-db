@@ -218,16 +218,21 @@ Ask-to-answer is typically 2–3 s for a typed question and 3–4 s spoken.
 
 `tests/test_pcm_audio.py`, `tests/test_esp32_source.py`, `tests/test_esp32_api.py` — fakes only:
 Pillow-made JPEGs for the camera, a callable for YOLO, a coroutine for STT, a WAV tone for TTS, a
-`MagicMock` for `SpatialMemory`. The two `Esp32DetectionSource` tests skip until
-`app.detection_source` exists on the branch. `ruff check demo_spatial/ tests/` must stay clean.
+`MagicMock` for `SpatialMemory`. The `Esp32DetectionSource` tests skip on trees without
+`app.detection_source`. `ruff check demo_spatial/ tests/` must stay clean.
 
 ## 6. Status and next steps
 
 - ✅ Host: hub, voice bridge, PCM helpers, routes, status page, fake board, tests, run script.
 - ✅ Firmware: PlatformIO project for XIAO ESP32S3 Sense, AI-Thinker ESP32-CAM, Freenove ESP32-S3 CAM.
-- 🔧 Board on the desk: identified and flashed → see the firmware README "Board on the desk".
-- ⬜ Rebase on `feat/handheld-oak-voice-demo` once its runtime lands; switch the hub to
-  `process_detections` only and drop the legacy fallback.
+- ✅ Verified on the Mac without hardware: the fake board's frames become observations, typed
+  and spoken questions ("where is the bus?" synthesized, transcribed by faster-whisper tiny in
+  ~0.6 s) come back as 16 kHz PCM; ask-to-audio 2.4–3.5 s with edge-tts.
+- 🔧 Board on the desk: at the time of writing it did not enumerate on the Mac's USB, so the
+  flash, the speaker pins and the camera orientation are unverified. Checklist in the firmware
+  README, "Board on the desk".
+- ✅ Rebased on `feat/handheld-oak-voice-demo`; the hub feeds `SceneIngestion.process_detections`.
+  ⬜ Drop the legacy `_update_consensus` fallback once that branch is on `main`.
 - ⬜ Push-to-talk over WebSocket (streaming STT) instead of one POST per utterance.
 - ⬜ Optional monocular depth plug-in behind `LOCI_ESP32_DEPTH=mono`.
 - ⬜ Pi as host: same script, `LOCI_HOST=http://loci-pi.local:8002` in `secrets.h`.

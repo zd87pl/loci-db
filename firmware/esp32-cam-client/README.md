@@ -121,4 +121,21 @@ PDM microphone uses I2S0 and the speaker I2S1.
 
 ## Board on the desk
 
-*Filled in after hardware discovery; see the session notes until then.*
+At the time of writing the board on the Mac's desk did **not** enumerate over USB (no
+`/dev/cu.usb*`; `ioreg -p IOUSB` listed only the dock, a LAN adapter and a DisplayPort cable),
+so it has not been identified or flashed yet. Discovery checklist, in order:
+
+```bash
+ls /dev/cu.usb*                                   # a data cable shows cu.usbmodem* (native USB) or cu.usbserial* (CP210x/CH34x)
+system_profiler SPUSBDataType | grep -iA8 -E "espressif|cp210|ch34|ftdi|usb jtag"
+venv/bin/python -m esptool chip_id                # chip family, MAC, features (hold BOOT while plugging an S3 if it is silent)
+venv/bin/python -m esptool flash_id               # flash size → partition table choice
+pio device monitor -b 115200                      # press RESET: capture the ORIGINAL firmware banner before flashing over it
+```
+
+Then: match the camera pins to the board's silkscreen or vendor pinout (ESP32-S3 + OV2640 on a
+XIAO Sense, a Freenove or a generic "ESP32-S3-CAM" all differ), confirm the speaker is driven by
+an I2S amplifier and note its BCLK/LRC/DIN wiring, pick the matching `[env:…]` (or
+`LOCI_BOARD_CUSTOM`), fill `include/secrets.h`, flash, and check the first frames on
+`http://<host>:8002/esp32` (set `LOCI_CAM_VFLIP`/`LOCI_CAM_HMIRROR` if the image is upside down).
+Record the banner and the final pin map here.

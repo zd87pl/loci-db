@@ -38,3 +38,9 @@ CONFIG_ESP_VIDEO_ENABLE_DVP_VIDEO_DEVICE=n
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=n
 
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ESP-Hosted allocates its SDIO buffers from internal DMA RAM at startup; the P4 heap serves those from
+# the 131 KiB RETENT_RAM region first, and the sleep-clock init later needs RETENTION memory from the
+# same region. Smaller queues leave it enough room (20/20 left ~0 and aborted boot on this board).
+CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=8
+CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=8

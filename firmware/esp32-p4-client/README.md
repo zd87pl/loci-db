@@ -94,6 +94,14 @@ Two rising beeps at boot mean the codec and amplifier work; a third beep means W
 
 ## Troubleshooting
 
+* **Boot loop with `sleep_clock: failed to allocate memory for system sleep clock ICG` then
+  `cpu_start: init function ... has failed (0x101), aborting`** — the P4 heap hands ordinary
+  internal allocations out of its 131 KiB `RETENT_RAM` region first, and ESP-Hosted allocates its
+  SDIO buffers from a C constructor that runs before the system's sleep-clock init, which needs
+  RETENTION memory from that same region. With the default 20+20 queue entries the region was
+  within a few hundred bytes of full on this board, so any `.bss` growth tipped it into a boot loop.
+  `sdkconfig.defaults` sets `CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE`/`RX_Q_SIZE` to 8 to leave headroom;
+  if it comes back after adding code, lower them further or move more static data to PSRAM.
 * **`esp_video_init failed`** — camera ribbon not seated or a sensor other than OV5647: enable it
   under `Component config → Camera sensor configuration` (SC2336 is the other one Waveshare ships).
 * **`ES8311 not found on I2C 0x18`** — I2C pull-ups or a hung bus; power-cycle the board.

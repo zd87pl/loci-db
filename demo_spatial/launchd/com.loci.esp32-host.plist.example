@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job that keeps the LOCI ESP32 host (demo_spatial/run_esp32_demo.sh, port 8002) running on a
+  Mac across logouts and reboots. Pair it with demo_spatial/cloudflare/com.loci.esp32-tunnel.plist.example
+  for the Cloudflare side.
+
+  1. Replace /Users/you/git/loci-db with the checkout that holds this branch (the venv and
+     yolov8n.pt paths too), and the PATH entry if Homebrew lives elsewhere.
+  2. Copy to ~/Library/LaunchAgents/com.loci.esp32-host.plist
+  3. launchctl load -w ~/Library/LaunchAgents/com.loci.esp32-host.plist
+     (launchctl unload -w ... to stop it; log: ~/Library/Logs/loci-esp32-host.log;
+     `launchctl list | grep com.loci` shows the PID)
+
+  The script creates the device token on first start (LOCI_DATA_DIR/device_token) and prints the
+  LAN URL for the board. Other knobs (voice, model, auth mode) go into EnvironmentVariables below.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.loci.esp32-host</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/you/git/loci-db/demo_spatial/run_esp32_demo.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/you/git/loci-db</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PYTHON</key>
+    <string>/Users/you/git/loci-db/venv/bin/python</string>
+    <key>YOLO_MODEL</key>
+    <string>/Users/you/git/loci-db/yolov8n.pt</string>
+    <key>PORT</key>
+    <string>8002</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/you/Library/Logs/loci-esp32-host.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/you/Library/Logs/loci-esp32-host.log</string>
+</dict>
+</plist>

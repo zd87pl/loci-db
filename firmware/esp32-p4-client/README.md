@@ -159,8 +159,10 @@ hotspot, the LTE pendant later) without opening a port, put the host behind a Cl
    tunnel, cloudflared resolves a tunnel *name* to that one (`cloudflared tunnel info loci-esp32`
    shows the other tunnel) and the CNAME lands on the wrong tunnel, whose catch-all then answers an
    empty 404. `--overwrite-dns` replaces such a record.
-   `demo_spatial/cloudflare/com.loci.esp32-tunnel.plist.example` is a launchd job that keeps it up
-   across logouts and reboots.
+   Two launchd jobs keep the whole chain up across logouts and reboots on a Mac:
+   `demo_spatial/launchd/com.loci.esp32-host.plist.example` for the host (port 8002) and
+   `demo_spatial/cloudflare/com.loci.esp32-tunnel.plist.example` for the connector; both log to
+   `~/Library/Logs/`.
 3. On the board's console, once: `token <contents of the token file>`, then `host https://<url>`.
    Both live in NVS, so neither needs a reflash or a change to `secrets.h`; `host default` returns
    to the compiled-in LAN URL and `token clear` removes the token. `status` shows the host in use

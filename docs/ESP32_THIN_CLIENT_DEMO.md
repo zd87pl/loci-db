@@ -245,6 +245,36 @@ venv/bin/python demo_spatial/tools/esp32_fake_board.py --host http://localhost:8
     --frames 8 --ask "what do you see"
 ```
 
+### Online mode: the host behind a Cloudflare Tunnel
+
+The LAN setup above is the default. For a board on another network (phone hotspot, the LTE
+pendant) the same host is published through a Cloudflare Tunnel instead of an open port:
+`demo_spatial/run_esp32_tunnel.sh` runs `cloudflared` next to the host, as a *quick tunnel*
+(random `https://….trycloudflare.com` URL, no account, for tests) or as a named tunnel on your
+hostname (`TUNNEL_NAME`, `TUNNEL_HOSTNAME`; the one-time `cloudflared tunnel login` / `create` /
+`route dns` is yours to run). Three things make that safe enough for a demo:
+
+* **Device token.** `run_esp32_demo.sh` creates one in `$LOCI_DATA_DIR/device_token` (0600, never
+  printed). The board sends it as `X-Device-Token` (or `Authorization: Bearer`); the host checks it
+  with a constant-time compare (`demo_spatial/app/esp32_auth.py`). `LOCI_ESP32_TOKENS=dev:token,…`
+  gives each board its own token, which also pins the device id the board may post as.
+* **LAN / public split.** With `LOCI_ESP32_AUTH=auto` (default) the token is required only for
+  requests that arrive from outside: through the tunnel (cloudflared adds `CF-Connecting-IP`) or
+  from a non-private address. A board on the LAN keeps working untouched. `always` requires it
+  everywhere; `off` disables the checks (the tunnel script refuses to start in that mode). With no
+  token configured, public requests are refused rather than let through.
+* **Board surface only.** From outside, the app answers 404 to everything except `/api/esp32/*`
+  and the `/esp32` page (a middleware installed by `install_esp32_routes`), so the main demo UI,
+  its WebSocket and `/docs` stay private. The named-tunnel ingress repeats that rule at the edge.
+
+On the board the host URL and the token are runtime settings in NVS (`host https://<url>`,
+`token <value>`; `host default` / `token clear` undo them), `https://` is verified against the
+IDF certificate bundle, and the keep-alive frame connection carries the TLS session across
+frames. Nothing changes for the offline path: when the tunnel or the host disappears the board
+stores frames on the card and answers from its cache and the on-device recogniser as before.
+The `/esp32` page asks for the token when the host returns 401 and keeps it in the tab's session
+storage; its live image is polled as single JPEGs so the request can carry the header.
+
 ### Environment variables (host)
 
 | Variable | Default | Meaning |
@@ -256,6 +286,9 @@ venv/bin/python demo_spatial/tools/esp32_fake_board.py --host http://localhost:8
 | `LOCI_ESP32_AUDIO_RATE` | 16000 | PCM rate the board plays/records |
 | `LOCI_ESP32_AUDIO_GAIN` | 1.0 | Linear gain applied to answers before queueing |
 | `LOCI_ESP32_AUDIO_QUEUE_MAX` | 8 | Oldest clip dropped when a device falls this far behind |
+| `LOCI_ESP32_AUTH` | `auto` | Device token required for requests from outside the LAN (`auto`), everywhere (`always`) or never (`off`) |
+| `LOCI_ESP32_TOKEN` / `LOCI_ESP32_TOKEN_FILE` | – / `$LOCI_DATA_DIR/device_token` | The shared device token, inline or in a file (`run_esp32_demo.sh` creates the file) |
+| `LOCI_ESP32_TOKENS` | – | `device:token,device:token` for one token per board; such a token also pins the device id |
 | `LOCI_ESP32_STALE_S` | 10 | Device shown offline after this many silent seconds |
 | `LOCI_ESP32_DEVICE` | `esp32` | Device id used when the board sends none |
 | `LOCI_ESP32_WARMUP` | 0 | `1` loads YOLO in a thread at startup |

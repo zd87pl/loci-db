@@ -42,11 +42,15 @@
 #endif
 
 static const char *TAG = "loci";
-static const char *FW_VERSION = "0.3.0-p4";
+static const char *FW_VERSION = "0.4.0-p4";
 
 static bool s_cam_ok;
 static uint32_t s_interval_ms = 1000 / LOCI_FPS;
 static uint32_t s_seq, s_sent, s_failed, s_backlog_sent;
+#ifndef LOCI_DEVICE_TOKEN
+#define LOCI_DEVICE_TOKEN ""  // older secrets.h without a token: LAN-only unless `token <value>` is used
+#endif
+
 static char s_last_labels[96];
 static int16_t *s_ptt_buf;
 static size_t s_ptt_cap_samples;
@@ -61,9 +65,10 @@ static bool button_down(void) {
 
 static void print_status(void) {
   storage_info_t si = storage_info();
-  ESP_LOGI(TAG, "fw %s | %s | cam %d %lux%lu | audio %d | wifi %d ip %s rssi %d | host %s", FW_VERSION,
+  ESP_LOGI(TAG, "fw %s | %s | cam %d %lux%lu | audio %d | wifi %d ip %s rssi %d | host %s %s%s", FW_VERSION,
            BOARD_NAME, s_cam_ok, (unsigned long)camera_width(), (unsigned long)camera_height(), audio_ready(),
-           wifi_link_connected(), wifi_link_ip(), wifi_link_rssi(), host_reachable() ? "reachable" : "OFFLINE");
+           wifi_link_connected(), wifi_link_ip(), wifi_link_rssi(), host_link_base(),
+           host_reachable() ? "reachable" : "OFFLINE", host_link_has_token() ? " (token)" : "");
   ESP_LOGI(TAG,
            "frames sent %lu failed %lu backlog sent %lu interval %lu ms | clips %lu | heap %u (retention %u) psram %u",
            (unsigned long)s_sent, (unsigned long)s_failed, (unsigned long)s_backlog_sent,
@@ -240,6 +245,15 @@ static void console_task(void *arg) {
       local_memory_cache_object_phrases();
       refresh_offline_commands();
       ESP_LOGI(TAG, "[cache] done");
+    } else if (!strncmp(line, "host ", 5)) {  // runtime host URL, kept in NVS; "host default" restores secrets.h
+      const char *arg = line + 5;
+      while (*arg == ' ') arg++;
+      if (host_link_set_host(!strcmp(arg, "default") ? NULL : arg)) ESP_LOGI(TAG, "host is now %s", host_link_base());
+    } else if (!strncmp(line, "token ", 6)) {  // device token for the host, kept in NVS and never printed
+      const char *arg = line + 6;
+      while (*arg == ' ') arg++;
+      host_link_set_token(!strcmp(arg, "clear") ? NULL : arg);
+      ESP_LOGI(TAG, "device token %s", host_link_has_token() ? "stored" : "cleared");
     } else if (!strcmp(line, "offline")) {
       answer_offline();
     } else if (!strcmp(line, "recog")) {  // self-test: record 4 s from the mic, recognise on the board
@@ -297,7 +311,7 @@ static void console_task(void *arg) {
       audio_set_volume(atoi(line + 4));
     } else {
       ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | offline | recog | snap | beep | audio "
-                    "| ask <question> | say <text> | fps <n> | vol <0-100>");
+                    "| ask <question> | say <text> | fps <n> | vol <0-100> | host <url>|default | token <value>|clear");
     }
   }
   vTaskDelete(NULL);
@@ -361,7 +375,7 @@ void app_main(void) {
   s_ptt_cap_samples = (size_t)LOCI_AUDIO_RATE * LOCI_PTT_MAX_S;
   s_ptt_buf = heap_caps_malloc(s_ptt_cap_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
-  host_link_init(LOCI_HOST, LOCI_DEVICE_ID);
+  host_link_init(LOCI_HOST, LOCI_DEVICE_ID, LOCI_DEVICE_TOKEN);
   console_start();
 
   if (wifi_link_start(WIFI_SSID, WIFI_PASS) == ESP_OK && wifi_link_wait(20000)) {

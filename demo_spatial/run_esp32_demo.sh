@@ -18,6 +18,10 @@
 #   LOCI_ESP32_WB=gray        gray-world white balance before detection (none to disable)
 #   LOCI_ESP32_IMGSZ=960      YOLO inference size, matched to the P4 camera's 1280x960 frames (640 is faster)
 #   LOCI_DATA_DIR             memory snapshot dir (default ~/.local/share/loci-esp32, separate from the handheld)
+#   LOCI_ESP32_TOKEN_FILE     device token for the online mode (default $LOCI_DATA_DIR/device_token, created once)
+#   LOCI_ESP32_AUTH=auto      token required for requests from outside the LAN (Cloudflare Tunnel); always | off
+#
+# Online mode: demo_spatial/run_esp32_tunnel.sh puts this host behind a Cloudflare Tunnel (HTTPS).
 
 set -euo pipefail
 
@@ -41,6 +45,10 @@ export LOCI_ESP32_IMGSZ="${LOCI_ESP32_IMGSZ:-960}"
 export LOCI_DATA_DIR="${LOCI_DATA_DIR:-$HOME/.local/share/loci-esp32}"
 # Every 10th frame + detections on disk: the training material for a detector that knows your objects
 export LOCI_ESP32_DATASET_DIR="${LOCI_ESP32_DATASET_DIR:-$LOCI_DATA_DIR/dataset}"
+# Device token: requests that arrive through the Cloudflare Tunnel must carry it (the LAN needs none
+# unless LOCI_ESP32_AUTH=always). Created once with 0600 permissions and never printed.
+export LOCI_ESP32_TOKEN_FILE="${LOCI_ESP32_TOKEN_FILE:-$LOCI_DATA_DIR/device_token}"
+export LOCI_ESP32_AUTH="${LOCI_ESP32_AUTH:-auto}"
 # The OpenAI key in many shells is a placeholder; the ESP32 path never needs it.
 unset OPENAI_API_KEY
 
@@ -49,6 +57,11 @@ if [[ -z "$PYTHON" ]]; then
   for candidate in "$REPO_ROOT/venv/bin/python" "$REPO_ROOT/.venv/bin/python" python3; do
     if command -v "$candidate" >/dev/null 2>&1 || [[ -x "$candidate" ]]; then PYTHON="$candidate"; break; fi
   done
+fi
+
+if [[ -z "${LOCI_ESP32_TOKEN:-}" && ! -s "$LOCI_ESP32_TOKEN_FILE" ]]; then
+  mkdir -p "$(dirname "$LOCI_ESP32_TOKEN_FILE")"
+  (umask 077; "$PYTHON" -c 'import secrets; print(secrets.token_hex(24))' > "$LOCI_ESP32_TOKEN_FILE")
 fi
 
 LAN_IP="$("$PYTHON" - <<'EOF' 2>/dev/null || echo "<this-mac-ip>"
@@ -67,6 +80,10 @@ echo "Board posts frames to:  http://${LAN_IP}:${PORT}/api/esp32/frame"
 echo "Board fetches audio:    http://${LAN_IP}:${PORT}/api/esp32/audio/next"
 echo "Status page:            http://localhost:${PORT}/esp32"
 echo "Main demo UI:           http://localhost:${PORT}/"
+TOKEN_WHERE="$LOCI_ESP32_TOKEN_FILE"
+[[ -n "${LOCI_ESP32_TOKEN:-}" ]] && TOKEN_WHERE="(the LOCI_ESP32_TOKEN variable)"
+echo "Device token:           ${TOKEN_WHERE}  (auth mode ${LOCI_ESP32_AUTH}; board console: token <value>)"
+echo "Online mode:            demo_spatial/run_esp32_tunnel.sh  (Cloudflare Tunnel, HTTPS; board console: host https://<url>)"
 echo "YOLO: ${YOLO_MODEL}  STT: faster-whisper ${WHISPER_LOCAL_MODEL}  TTS: ${TTS_ENGINE}"
 echo
 

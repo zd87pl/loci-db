@@ -105,7 +105,7 @@ async def fake_transcriber(samples: np.ndarray, language: str) -> str:
     return "where is my cup" if samples.size >= 8000 else ""
 
 
-def _build(detector=None, voice: FakeVoice | None = None, **cfg_kwargs):
+def _build(detector=None, voice: FakeVoice | None = None, auth=None, **cfg_kwargs):
     memory = MagicMock()
     memory.observe = MagicMock(return_value="s1")
     memory.observation_count = 0
@@ -131,6 +131,7 @@ def _build(detector=None, voice: FakeVoice | None = None, **cfg_kwargs):
         cfg=cfg,
         hub=hub,
         bridge=bridge,
+        auth=auth,
     )
     client = TestClient(app)
     return SimpleNamespace(

@@ -6,10 +6,12 @@
 #include <unistd.h>
 
 #include "esp_check.h"
+#include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
 
 #include "audio.h"
 #include "board_p4_nano.h"
@@ -18,7 +20,9 @@
 static const char *TAG = "host";
 
 static char s_base[128];
+static char s_default_base[128];  // from secrets.h; `host default` goes back to it
 static char s_device[32];
+static char s_token[80];  // X-Device-Token; empty on a LAN-only setup
 static uint32_t s_clips;
 #define RESP_CAP 8192  // host replies are small, flat JSON (8 kB covers a long detections list)
 static char *s_resp;  // RESP_CAP bytes, allocated in PSRAM (internal RAM is scarce, see README)
@@ -40,6 +44,8 @@ int64_t host_now_ms(void) {
 }
 const char *host_last_reply(void) { return s_resp ? s_resp : ""; }
 const char *host_device_id(void) { return s_device; }
+const char *host_link_base(void) { return s_base; }
+bool host_link_has_token(void) { return s_token[0] != 0; }
 bool host_reachable(void) { return s_failures < 2; }
 void host_set_frame_timeout_ms(int ms) { s_frame_timeout_ms = ms; }
 
@@ -103,8 +109,11 @@ static esp_http_client_handle_t client_new(const char *url, esp_http_client_meth
       .buffer_size = 4096,
       .buffer_size_tx = 2048,
       .keep_alive_enable = false,
+      .crt_bundle_attach = esp_crt_bundle_attach,  // https:// hosts (the Cloudflare Tunnel) verify against the IDF CA bundle
   };
-  return esp_http_client_init(&cfg);
+  esp_http_client_handle_t c = esp_http_client_init(&cfg);
+  if (c && s_token[0]) esp_http_client_set_header(c, "X-Device-Token", s_token);
+  return c;
 }
 
 // One persistent, keep-alive connection for the frame stream: a fresh TCP connection per frame
@@ -112,8 +121,17 @@ static esp_http_client_handle_t client_new(const char *url, esp_http_client_meth
 // requests and only closed (not freed) after an error so the next frame reconnects.
 static esp_http_client_handle_t s_frame_client;
 static int64_t s_frame_last_ms;  // when the last frame exchange finished
+// The frame loop task owns s_frame_client. The console task must not free it (it may be in the
+// middle of a TLS handshake); it only marks it stale and the next frame recreates it.
+static volatile bool s_frame_client_stale;
 
 static esp_http_client_handle_t frame_client(const char *url) {
+  if (s_frame_client && s_frame_client_stale) {  // host URL or token changed since the last frame
+    esp_http_client_cleanup(s_frame_client);
+    s_frame_client = NULL;
+    s_frame_last_ms = 0;
+  }
+  s_frame_client_stale = false;
   if (s_frame_client && s_frame_last_ms && esp_timer_get_time() / 1000 - s_frame_last_ms > 4000) {
     // the host (uvicorn) drops idle keep-alive connections after 5 s; writing into that half-closed
     // socket fails and costs a frame, so after a long pause reconnect on purpose
@@ -130,14 +148,23 @@ static esp_http_client_handle_t frame_client(const char *url) {
         .keep_alive_idle = 10,
         .keep_alive_interval = 5,
         .keep_alive_count = 3,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     s_frame_client = esp_http_client_init(&cfg);
-    return s_frame_client;
+  } else {
+    esp_http_client_set_url(s_frame_client, url);
+    esp_http_client_set_method(s_frame_client, HTTP_METHOD_POST);
+    esp_http_client_set_timeout_ms(s_frame_client, s_frame_timeout_ms);
   }
-  esp_http_client_set_url(s_frame_client, url);
-  esp_http_client_set_method(s_frame_client, HTTP_METHOD_POST);
-  esp_http_client_set_timeout_ms(s_frame_client, s_frame_timeout_ms);
+  if (s_frame_client && s_token[0]) esp_http_client_set_header(s_frame_client, "X-Device-Token", s_token);
   return s_frame_client;
+}
+
+// Ask the frame loop to drop its keep-alive connection (the host URL, scheme or token changed).
+// Called from the console task, so nothing is freed here; see s_frame_client_stale.
+static void frame_client_reset(void) {
+  s_frame_client_stale = true;
+  s_failures = 0;
 }
 
 // Send `len` bytes of body, then read the (small) response into s_resp. Returns the HTTP status.
@@ -166,9 +193,70 @@ static int exchange(esp_http_client_handle_t c, const uint8_t *body, size_t len)
   return status;
 }
 
-void host_link_init(const char *base_url, const char *device_id) {
-  snprintf(s_base, sizeof(s_base), "%s", base_url);
+// --- settings in NVS (namespace "loci": "host", "token") ------------------------------------
+#define NVS_NS "loci"
+
+static bool nvs_get_string(const char *key, char *out, size_t cap) {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+  size_t len = cap;
+  esp_err_t err = nvs_get_str(h, key, out, &len);
+  nvs_close(h);
+  if (err != ESP_OK) out[0] = 0;
+  return err == ESP_OK && out[0];
+}
+
+static void nvs_put_string(const char *key, const char *value) {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+  if (value && value[0]) {
+    nvs_set_str(h, key, value);
+  } else {
+    nvs_erase_key(h, key);
+  }
+  nvs_commit(h);
+  nvs_close(h);
+}
+
+static void trim_url(char *url) {
+  size_t n = strlen(url);
+  while (n && (url[n - 1] == '/' || url[n - 1] == ' ')) url[--n] = 0;
+}
+
+bool host_link_set_host(const char *url) {
+  if (url && url[0]) {
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+      ESP_LOGW(TAG, "host must start with http:// or https://");
+      return false;
+    }
+    snprintf(s_base, sizeof(s_base), "%s", url);
+    trim_url(s_base);
+    nvs_put_string("host", s_base);
+  } else {
+    snprintf(s_base, sizeof(s_base), "%s", s_default_base);
+    nvs_put_string("host", NULL);
+  }
+  frame_client_reset();
+  s_clock_synced = false;
+  return true;
+}
+
+void host_link_set_token(const char *token) {
+  snprintf(s_token, sizeof(s_token), "%s", token ? token : "");
+  nvs_put_string("token", s_token);
+  frame_client_reset();  // the keep-alive handle carries the old header
+}
+
+void host_link_init(const char *base_url, const char *device_id, const char *token) {
+  snprintf(s_default_base, sizeof(s_default_base), "%s", base_url);
+  trim_url(s_default_base);
   snprintf(s_device, sizeof(s_device), "%s", device_id);
+  snprintf(s_token, sizeof(s_token), "%s", token ? token : "");
+  if (!nvs_get_string("host", s_base, sizeof(s_base))) snprintf(s_base, sizeof(s_base), "%s", s_default_base);
+  char stored[sizeof(s_token)];
+  if (nvs_get_string("token", stored, sizeof(stored))) snprintf(s_token, sizeof(s_token), "%s", stored);
+  ESP_LOGI(TAG, "host %s%s, device token %s", s_base, strcmp(s_base, s_default_base) ? " (from NVS)" : "",
+           s_token[0] ? "set" : "none");
   if (!s_resp) s_resp = heap_caps_calloc(1, RESP_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!s_resp) s_resp = calloc(1, RESP_CAP);
   if (!s_resp) ESP_LOGE(TAG, "no memory for the reply buffer; host requests will fail");

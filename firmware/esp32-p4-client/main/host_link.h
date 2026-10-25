@@ -16,7 +16,16 @@ typedef struct {
   char memory_rev[24]; // digest of the host's remembered objects (refresh the card cache when it changes)
 } host_frame_result_t;
 
-void host_link_init(const char *base_url, const char *device_id);
+// `base_url`, `device_id` and `token` are the compile-time defaults (secrets.h); a host URL or
+// token stored in NVS by the console commands `host <url>` / `token <value>` overrides them.
+void host_link_init(const char *base_url, const char *device_id, const char *token);
+
+// Runtime host URL (http:// or https://, no trailing slash), kept in NVS; NULL restores the default.
+bool host_link_set_host(const char *url);
+// Device token sent as X-Device-Token (needed from outside the LAN); NULL clears it. Never logged.
+void host_link_set_token(const char *token);
+const char *host_link_base(void);
+bool host_link_has_token(void);
 
 esp_err_t host_post_frame(const uint8_t *jpeg, size_t len, uint32_t seq, host_frame_result_t *out);
 // Same, for a frame kept on the card: captured_ms (Unix, 0 = unknown) and the backlog flag go in headers.

@@ -74,6 +74,18 @@ CONFIG_MODEL_IN_FLASH=y
 CONFIG_SR_WN_NONE=y
 CONFIG_SR_MN_EN_MULTINET7_QUANT=y
 
+# Online mode: https:// hosts (the Cloudflare Tunnel) need the TLS transport in esp_http_client; the
+# server certificate is checked against the IDF CA bundle (on by default). The ECDSA peripheral is
+# absent on P4 silicon before v3.0 and the PSA driver fails instead of falling back, which breaks every
+# ECDSA-signed chain (Cloudflare's is), so signature verification stays in software.
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
+CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY=n
+# Cloudflare's edge sends "GTS Root R4" cross-signed by "GlobalSign Root CA"; the bundle verifier only
+# looks up the issuer of the last certificate it receives, and that root left Mozilla's list (so the
+# IDF bundle), hence certs/extra_roots.pem (valid to 2028-01-28; drop it when the cross-sign goes).
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH="certs/extra_roots.pem"
+
 # Keep the internal RETENT_RAM region free for the system's sleep-retention init, which runs after
 # ESP-Hosted's constructor has taken its share (README → Troubleshooting): speech-library .bss goes
 # to PSRAM (main/linker.lf), Hosted task stacks go to PSRAM, heap code goes to flash.

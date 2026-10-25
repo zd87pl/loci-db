@@ -134,6 +134,36 @@ microphone, prints the recognised command and plays the cached answer, which mak
 testable without taking the host down; `cache` fetches any per-object answers the card lacks right
 away.
 
+## Online mode (Cloudflare Tunnel, HTTPS, device token)
+
+The board talks plain HTTP to a host on the LAN. To reach the same host from any network (a phone
+hotspot, the LTE pendant later) without opening a port, put the host behind a Cloudflare Tunnel:
+
+1. Start the host as usual (`demo_spatial/run_esp32_demo.sh`). On first start it creates a device
+   token in `~/.local/share/loci-esp32/device_token` (mode 0600, never printed) and shows the path.
+2. Start the tunnel: `demo_spatial/run_esp32_tunnel.sh`. Without a Cloudflare account it opens a
+   *quick tunnel* and prints a random `https://….trycloudflare.com` URL (new on every start; for
+   tests). With `TUNNEL_NAME=… TUNNEL_HOSTNAME=…` it runs a named tunnel on your own hostname after
+   a one-time `cloudflared tunnel login` / `create` / `route dns` done by you
+   (`demo_spatial/cloudflare/esp32-tunnel.yml.example` shows the ingress it writes).
+3. On the board's console, once: `token <contents of the token file>`, then `host https://<url>`.
+   Both live in NVS, so neither needs a reflash or a change to `secrets.h`; `host default` returns
+   to the compiled-in LAN URL and `token clear` removes the token. `status` shows the host in use
+   and whether a token is set.
+
+On the wire every request now carries `X-Device-Token`; `https://` hosts are verified against the
+IDF certificate bundle (Cloudflare's edge certificates are in it); the keep-alive frame connection
+is reused across TLS, so only the first frame pays the handshake. On the host, requests that arrive
+from outside the LAN see only `/api/esp32/*` and the `/esp32` page (everything else answers 404)
+and need the token, while the LAN keeps working with none (`LOCI_ESP32_AUTH=auto`; `always`
+requires it on the LAN too). The offline path is untouched: when the tunnel or the host goes
+away, the board stores frames on the card, answers from the cached memory and recognises
+questions on-device as before.
+
+Known gap: `CONFIG_MBEDTLS_HAVE_TIME_DATE` is off (the IDF default), so certificate validity dates
+are not checked; the board has no clock before its first host reply. Turning it on needs SNTP
+before the first HTTPS request, a follow-up for a production pendant.
+
 ## Tuning (`main/board_p4_nano.h`, overridable with `-D`)
 
 | Macro | Default | Meaning |
@@ -168,6 +198,22 @@ away.
   (`CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y`), heap code in flash
   (`CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y`), the 8+8 SDIO queue entries, and the firmware's own
   big buffers (HTTP reply, clip playback, push-to-talk) allocated from PSRAM.
+* **`HTTP_CLIENT: No transport found … enable HTTPS at menuconfig`** after `host https://…` — the
+  HTTP client was built without TLS; `CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y` is in
+  `sdkconfig.defaults` now (delete `sdkconfig` to re-apply defaults). Until the reflash the board
+  simply runs its offline path.
+* **`esp-x509-crt-bundle: Failed to verify certificate` right after
+  `psa_crypto_driver_esp_ecdsa: ECDSA peripheral not supported on this chip revision`** — IDF
+  enables hardware ECDSA verification for every P4, but silicon before v3.0 has no such peripheral
+  and the PSA driver fails instead of falling back, so any ECDSA-signed chain (Cloudflare, Let's
+  Encrypt E-series) is rejected. `CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY=n` keeps verification in
+  software.
+* **`esp-x509-crt-bundle: No matching trusted root certificate found`** on a Cloudflare hostname —
+  Cloudflare's edge sends `GTS Root R4` cross-signed by `GlobalSign Root CA`, the bundle verifier
+  only looks up the issuer of the *last* certificate it receives, and that 1998 root is no longer in
+  Mozilla's list (so not in the IDF bundle) although it is valid until 2028 and still shipped by
+  Apple and Microsoft. `certs/extra_roots.pem` adds it through
+  `CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH`; remove it once Cloudflare drops the cross-sign.
 * **`esp_video_init failed`** — camera ribbon not seated or a sensor other than OV5647: enable it
   under `Component config → Camera sensor configuration` (SC2336 is the other one Waveshare ships).
 * **`ES8311 not found on I2C 0x18`** — I2C pull-ups or a hung bus; power-cycle the board.

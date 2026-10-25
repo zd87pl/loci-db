@@ -19,6 +19,10 @@ Protocol (full description in ``docs/ESP32_THIN_CLIENT_DEMO.md``):
   board; ``POST /api/esp32/say`` ``{"text"}`` — speak arbitrary text.
 * debugging     ``GET /api/esp32/status``, ``/api/esp32/frame.jpg``, ``/api/esp32/stream.mjpg``,
   and the page at ``/esp32``.
+
+Online mode: requests that arrive from outside the LAN (through the Cloudflare Tunnel) must
+carry the device token (``X-Device-Token``) and only reach these routes; see
+:mod:`esp32_auth`.
 """
 
 from __future__ import annotations
@@ -32,10 +36,11 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from .esp32_auth import Esp32Auth, public_surface_middleware
 from .esp32_source import Esp32Config, Esp32Hub, HostYoloDetector
 from .esp32_voice import Esp32VoiceBridge
 from .pcm_audio import decode_to_pcm16, pcm16_duration_s, resample_pcm16, sniff_mime
@@ -76,21 +81,26 @@ def install_esp32_routes(
     cfg: Esp32Config | None = None,
     hub: Esp32Hub | None = None,
     bridge: Esp32VoiceBridge | None = None,
+    auth: Esp32Auth | None = None,
 ) -> Esp32Hub:
     """Mount the ESP32 endpoints on ``app`` and return the hub (also on ``app.state``).
 
     ``subscribers`` is the demo's live WebSocket set: processed frames are fanned out to
     it as ``{"type": "detections", "source": "esp32", ...}`` so the browser page draws
-    the board's detections like its own camera's. ``hub``/``bridge`` are injectable for
-    tests (fake detector, fake STT/TTS); by default a :class:`HostYoloDetector` and the
-    pipeline's own STT/TTS are used.
+    the board's detections like its own camera's. ``hub``/``bridge``/``auth`` are
+    injectable for tests (fake detector, fake STT/TTS, fixed tokens); by default a
+    :class:`HostYoloDetector`, the pipeline's own STT/TTS and the token settings from the
+    environment are used.
     """
     cfg = cfg or Esp32Config.from_env()
     if hub is None:
         hub = Esp32Hub(ingestion, cfg, memory=memory)
     if bridge is None:
         bridge = Esp32VoiceBridge(voice, rate=cfg.audio_rate, gain=cfg.audio_gain)
-    router = APIRouter(tags=["esp32"])
+    auth = auth or Esp32Auth.from_env()
+    # every board endpoint checks the device token; the page itself is open and asks for it
+    router = APIRouter(tags=["esp32"], dependencies=[Depends(auth.dependency)])
+    pages = APIRouter(tags=["esp32"])
     rate = cfg.audio_rate
 
     async def _broadcast(msg: dict) -> None:
@@ -108,6 +118,9 @@ def install_esp32_routes(
                 subscribers.discard(ws)  # type: ignore[union-attr]
 
     def _device(request: Request, device: str | None) -> str:
+        pinned = getattr(request.state, "esp32_device", None)  # set by a per-device token
+        if pinned:
+            return pinned
         return device or request.headers.get("x-device-id") or cfg.default_device
 
     # -- frames ------------------------------------------------------------------
@@ -198,11 +211,12 @@ def install_esp32_routes(
 
     @router.get("/api/esp32/audio/next")
     async def esp32_audio_next(
+        request: Request,
         device: str | None = None,
         wait: float = Query(0.0, ge=0.0, le=25.0, description="Long-poll seconds"),
     ):
         """Next queued PCM clip for the board's speaker, or 204 when nothing is waiting."""
-        device_id = device or cfg.default_device
+        device_id = _device(request, device)
         pcm = await hub.next_audio(device_id, wait_s=wait)
         if pcm is None:
             return Response(status_code=204)
@@ -349,9 +363,10 @@ def install_esp32_routes(
                 "observation_count": getattr(memory, "observation_count", None),
                 "tracked_labels": list(getattr(memory, "tracked_labels", []) or []),
             },
+            "auth": auth.status(),
         }
 
-    @router.get("/esp32")
+    @pages.get("/esp32")
     async def esp32_page():
         page = os.path.join(_STATIC_DIR, "esp32.html")
         if os.path.exists(page):
@@ -359,8 +374,13 @@ def install_esp32_routes(
         return {"message": "ESP32 thin client", "status": "/api/esp32/status"}
 
     app.include_router(router)
+    app.include_router(pages)
+    if auth.enabled:
+        # from outside the LAN only the board's routes exist; the rest of the demo stays private
+        app.middleware("http")(public_surface_middleware(auth))
     app.state.esp32_hub = hub
     app.state.esp32_voice = bridge
+    app.state.esp32_auth = auth
 
     detector = hub.detector
     if cfg.warmup and isinstance(detector, HostYoloDetector):

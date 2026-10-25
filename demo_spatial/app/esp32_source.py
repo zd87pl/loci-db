@@ -657,12 +657,14 @@ class Esp32DetectionSource:
             self.start()
         assert self._q is not None
         label_ids = {name: i for i, name in enumerate(COCO80)}
-        while not self._stopped.is_set():
+        while True:
             try:
                 item = self._q.get(timeout=0.5)
             except queue.Empty:
+                if self._stopped.is_set():
+                    break
                 continue
-            if item is None:
+            if item is None:  # stop() sentinel: everything queued before it has been yielded
                 break
             result: FrameResult = item
             if result.device_id != self._device_id:

@@ -1,0 +1,22 @@
+{
+  "format": 1,
+  "tag_size_m": 0.160,
+  "tag_family": "tag36h11",
+  "rooms": [
+    {
+      "name": "kitchen",
+      "anchor_tag": 0,
+      "anchor_height_m": 1.4,
+      "anchor_name": "door tag",
+      "extents_m": {"x": [-3.0, 3.0], "y": [0.0, 2.5], "z": [0.0, 6.0]},
+      "landmarks": {"table": [1.0, 0.75, 1.2]},
+      "extra_tags": {}
+    },
+    {
+      "name": "living_room",
+      "anchor_tag": 1,
+      "anchor_height_m": 1.4,
+      "anchor_name": "door tag"
+    }
+  ]
+}

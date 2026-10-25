@@ -8,6 +8,13 @@ Architecture:
                  → POST /api/voice/query   (voice queries)
                  → WebSocket /ws           (real-time tracking feed)
                  → GET /api/objects/*      (spatial query API)
+  Handheld (Pi 5 + OAK-D Lite, design docs/HANDHELD_DEMO_DESIGN.md §4.11):
+    handheld-runtime thread → SceneIngestion.process_detections → SpatialMemory
+                 → POST /api/query        (text-first answers, TTS on request)
+                 → GET /phone             (mobile page)
+                 → /api/rooms /api/anchor /api/objects?room= /api/objects/changes
+                 → /api/handheld/status /api/handheld/snapshot /api/memory/clear
+                 → WebSocket /ws pushes "detections" (≤ LOCI_WS_PUSH_HZ) and "anchor" (1 Hz)
 
 Environment variables:
   OPENAI_API_KEY   — enables Whisper STT, GPT-4o mini VLM, OpenAI TTS
@@ -18,11 +25,15 @@ Environment variables:
   PIPER_MODEL_PATH — path to .onnx Piper model file (if TTS_ENGINE=piper)
   CORS_ORIGINS     — comma-separated allowed origins (default: "*" for local dev;
                      set to your domain in production, e.g. "https://example.com")
+  LOCI_*           — handheld knobs (design §4.12): LOCI_DETECTION_SOURCE none|sim|oak|replay,
+                     LOCI_DATA_DIR, LOCI_PERSIST, LOCI_ROOMS_FILE, LOCI_LABEL_EMBEDDER,
+                     LOCI_WS_PUSH_HZ, LOCI_VOICE none|headset, ... (see deploy/handheld/env.example)
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import logging
@@ -30,15 +41,30 @@ import os
 import random
 import socket
 import struct
+import time
 from contextlib import asynccontextmanager
+from typing import Any
 
-import segno
 from fastapi import FastAPI, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .handheld import (
+    HandheldConfig,
+    HandheldRuntime,
+    VoiceLoopHandle,
+    answer_text,
+    build_handheld,
+    camera_only_pose,
+    load_rooms,
+    make_embedder_safe,
+    start_voice_loop,
+    voice_enabled,
+)
+from .persistence import MemoryPersistence
+from .room_anchor import RoomLocalizer
 from .scene_ingestion import SceneIngestion
 from .spatial_memory import SpatialMemory
 from .vlm_client import VLMClient, sanitize_label
@@ -48,30 +74,199 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # ---------------------------------------------------------------------------
-# App state
+# App state (construction order of design §4.11)
 # ---------------------------------------------------------------------------
 
-memory = SpatialMemory(epoch_size_ms=5000)
+cfg = HandheldConfig.from_env()
+_handheld_errors: dict[str, str] = {}
+
+rooms = load_rooms(cfg)
+_embedder, _embedder_error = make_embedder_safe(cfg)
+if _embedder_error:
+    _handheld_errors["embedder"] = _embedder_error
+persistence: MemoryPersistence | None = (
+    MemoryPersistence(
+        cfg.data_dir,
+        snapshot_interval_s=cfg.snapshot_interval_s,
+        journal_fsync_s=cfg.journal_fsync_s,
+        max_records=cfg.max_records,
+    )
+    if cfg.persist
+    else None
+)
+memory = SpatialMemory(
+    epoch_size_ms=5000,
+    embedder=_embedder,
+    rooms=rooms,
+    dedup_radius_m=cfg.dedup_radius_m,
+    moved_threshold_m=cfg.moved_threshold_m,
+    persistence=persistence,
+)
 vlm_client = VLMClient()
-ingestion = SceneIngestion(memory, vlm_client=vlm_client, use_vlm_fallback=True)
-voice = VoicePipeline(memory, vlm_client=vlm_client)
+ingestion = SceneIngestion(
+    memory,
+    vlm_client=vlm_client,
+    use_vlm_fallback=True,
+    consensus_refire_ms=cfg.consensus_refire_ms,
+    consensus_radius_m=cfg.consensus_radius_m,
+)
+runtime: HandheldRuntime | None
+localizer: RoomLocalizer | None
+try:
+    runtime, localizer = build_handheld(memory, ingestion, cfg)
+except Exception as _exc:  # a bad LOCI_DETECTION_SOURCE must not take the API down
+    runtime, localizer = None, None
+    _handheld_errors["source"] = f"{type(_exc).__name__}: {_exc}"
+    logger.error("handheld source disabled: %s", _handheld_errors["source"])
+voice = VoicePipeline(
+    memory,
+    vlm_client=vlm_client,
+    pose_provider=lambda: localizer.current() if localizer is not None else None,
+)
 
 _ws_subscribers: set[WebSocket] = set()
+_restore_report: Any = None
+_voice_loop: VoiceLoopHandle | None = None
+_push_task: asyncio.Task | None = None
+_started_at_ms = int(time.time() * 1000)
 
 # In-memory store for the latest uploaded LiDAR point cloud
 _point_cloud: dict = {"points": [], "count": 0, "filename": None}
 
 
+def _anchor_dict() -> dict:
+    """``CameraPose.to_dict()`` of the current pose (camera-only without a localizer)."""
+    if localizer is not None:
+        try:
+            return localizer.current().to_dict()
+        except Exception as exc:  # never let a pose error break a status call
+            logger.debug("localizer.current failed: %s", exc)
+    if runtime is not None:
+        return runtime.current_pose().to_dict()
+    return camera_only_pose().to_dict()
+
+
+def _source_state() -> str | None:
+    if runtime is None:
+        return None
+    return str(runtime.source_status().get("state"))
+
+
+async def _broadcast(msg: dict) -> None:
+    """Fan one JSON message out to every WebSocket subscriber, dropping dead sockets."""
+    if not _ws_subscribers:
+        return
+    text = json.dumps(msg)
+    dead: set[WebSocket] = set()
+    for ws in list(_ws_subscribers):
+        try:
+            await ws.send_text(text)
+        except Exception:
+            dead.add(ws)
+    _ws_subscribers.difference_update(dead)
+
+
+async def _live_push_loop() -> None:
+    """Poll the runtime at ≤ ``LOCI_WS_PUSH_HZ`` and push ``detections`` / ``anchor`` (D17).
+
+    Runs on the asyncio loop only; the runtime thread never touches asyncio.
+    """
+    period = 1.0 / max(float(cfg.ws_push_hz), 0.2)
+    last_frames = -1
+    last_anchor = 0.0
+    while True:
+        await asyncio.sleep(period)
+        if not _ws_subscribers:
+            continue
+        try:
+            if runtime is not None and runtime.frames != last_frames:
+                frame = runtime.latest_frame
+                if frame is not None:
+                    last_frames = runtime.frames
+                    await _broadcast(
+                        {
+                            "type": "detections",
+                            "source": frame.source,
+                            "timestamp_ms": frame.timestamp_ms,
+                            "seq": frame.seq,
+                            "detections": runtime.live_detections(),
+                            "frame_count": ingestion.frame_count,
+                            "observation_count": memory.observation_count,
+                            "anchor": _anchor_dict(),
+                        }
+                    )
+            now = time.monotonic()
+            if now - last_anchor >= 1.0:
+                last_anchor = now
+                await _broadcast(
+                    {"type": "anchor", **_anchor_dict(), "source_state": _source_state()}
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("live push failed: %s", exc)
+
+
+def _start_voice() -> VoiceLoopHandle | None:
+    if not voice_enabled():
+        return None
+    try:
+        return start_voice_loop(
+            lambda text: answer_text(voice, memory, text)["answer"], voice._stt, voice._tts
+        )
+    except Exception as exc:
+        _handheld_errors["voice"] = f"{type(exc).__name__}: {exc}"
+        logger.error("headset voice loop not started: %s", _handheld_errors["voice"])
+        return None
+
+
+def _voice_status() -> dict | None:
+    if _voice_loop is not None:
+        return _voice_loop.status()
+    if "voice" in _handheld_errors:
+        return {"running": False, "error": _handheld_errors["voice"]}
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _restore_report, _voice_loop, _push_task
+    try:
+        _restore_report = memory.restore()
+    except Exception as exc:
+        _handheld_errors["restore"] = f"{type(exc).__name__}: {exc}"
+        logger.exception("memory restore failed: %s", exc)
+    memory.set_vocabulary(runtime.source.classes if runtime is not None else ingestion.classes)
+    if runtime is not None:
+        runtime.start()
+    _push_task = asyncio.create_task(_live_push_loop())
+    _voice_loop = _start_voice()
     logger.info(
-        "Spatial Memory Assistant starting — VLM: %s, TTS: %s, STT: %s",
+        "Spatial Memory Assistant starting — source: %s, rooms: %s, embedder: %s, "
+        "restored: %s, VLM: %s, TTS: %s, STT: %s, voice: %s",
+        cfg.detection_source,
+        ",".join(rooms.names()),
+        memory.embedder.name,
+        _restore_report.records if _restore_report is not None else "n/a",
         vlm_client.is_available,
         voice.tts_engine,
         voice.stt_available,
+        "on" if _voice_loop is not None else "off",
     )
     yield
+    if _voice_loop is not None:
+        _voice_loop.stop()
+    if _push_task is not None:
+        _push_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await _push_task
+    if runtime is not None:
+        runtime.stop()
     await ingestion.stop_capture()
+    try:
+        memory.close()
+    except Exception as exc:
+        logger.exception("memory close failed: %s", exc)
     logger.info("Spatial Memory Assistant stopped")
 
 
@@ -122,9 +317,20 @@ async def scanner():
     return {"error": "scanner.html not found"}
 
 
+@app.get("/phone")
+async def phone():
+    """Mobile-first, offline page for the handheld demo (typed questions, aria-live answers)."""
+    phone_path = os.path.join(_static_dir, "phone.html")
+    if os.path.exists(phone_path):
+        return FileResponse(phone_path, headers={"Cache-Control": "no-cache"})
+    raise HTTPException(status_code=404, detail="phone.html not found")
+
+
 @app.get("/api/scanner-qr")
 async def scanner_qr(url: str = Query(..., description="Scanner URL to encode")):
     """Generate a scannable QR code PNG for the mobile scanner URL."""
+    import segno  # optional dependency (demo_spatial/requirements.txt), not in the dev extras
+
     qr = segno.make(url, error="l")
     buf = io.BytesIO()
     qr.save(buf, kind="png", scale=5, border=2)
@@ -158,6 +364,16 @@ class FrameRequest(BaseModel):
 
 class TextQueryRequest(BaseModel):
     text: str = Field(..., description="Natural language query text")
+
+
+class QueryRequest(BaseModel):
+    text: str = Field(..., description="Natural language question, e.g. 'where is my mug'")
+    tts: bool = Field(False, description="Also synthesize the answer (audio_b64 + audio_mime)")
+    room: str | None = Field(None, description="Room to assume when the question names none")
+
+
+class ConfirmRequest(BaseModel):
+    confirm: bool = Field(False, description="Must be true to wipe the memory")
 
 
 class CaptureStartRequest(BaseModel):
@@ -199,6 +415,11 @@ async def health():
         "frame_count": ingestion.frame_count,
         "pipeline": voice.status(),
         "vlm_available": vlm_client.is_available,
+        "handheld": {
+            "detection_source": cfg.detection_source,
+            "source_state": _source_state(),
+            "voice": _voice_loop is not None,
+        },
     }
 
 
@@ -225,15 +446,7 @@ async def ingest_frame(req: FrameRequest):
         "observation_count": memory.observation_count,
     }
     # Broadcast to WebSocket subscribers
-    if _ws_subscribers:
-        msg = json.dumps({"type": "detections", **result})
-        dead = set()
-        for ws in list(_ws_subscribers):
-            try:
-                await ws.send_text(msg)
-            except Exception:
-                dead.add(ws)
-        _ws_subscribers.difference_update(dead)
+    await _broadcast({"type": "detections", **result})
     return result
 
 
@@ -258,15 +471,7 @@ async def ingest_frame_3d(req: Frame3DRequest):
         "has_lidar": req.has_lidar,
     }
     # Broadcast to WebSocket subscribers
-    if _ws_subscribers:
-        msg = json.dumps({"type": "detections", **result})
-        dead = set()
-        for ws in list(_ws_subscribers):
-            try:
-                await ws.send_text(msg)
-            except Exception:
-                dead.add(ws)
-        _ws_subscribers.difference_update(dead)
+    await _broadcast({"type": "detections", **result})
     return result
 
 
@@ -359,13 +564,29 @@ async def set_detection_classes(req: DetectionClassesRequest):
 
 
 @app.get("/api/objects")
-async def list_objects():
-    """Return the latest known position of every tracked object."""
-    objects = memory.current_objects()
+async def list_objects(room: str | None = Query(None, description="Only this room")):
+    """Return the latest known position of every tracked object (optionally per room)."""
+    objects = memory.current_objects(room or None)
     return {
         "objects": [o.to_dict() for o in objects],
         "count": len(objects),
         "stats": memory.stats(),
+        "room": room or None,
+    }
+
+
+@app.get("/api/objects/changes")
+async def objects_changes(
+    room: str | None = Query(None, description="Room name (all rooms when omitted)"),
+    window_seconds: float = Query(600.0, gt=0.0, le=86400.0),
+):
+    """New / moved / gone / seen objects inside the window (design §7.5, D24)."""
+    changes = memory.changes(room or None, window_seconds)
+    return {
+        "room": room or None,
+        "window_seconds": window_seconds,
+        "changes": [c.to_dict() for c in changes],
+        "count": len(changes),
     }
 
 
@@ -444,17 +665,7 @@ async def voice_query(file: UploadFile, language: str = "en", audio_response: bo
         language=language,
         synthesize_response=audio_response,
     )
-    return {
-        "transcription": result.transcription,
-        "intent": {
-            "kind": result.intent.kind,
-            "object_name": result.intent.object_name,
-        },
-        "answer": result.answer_text,
-        "has_audio": len(result.answer_audio) > 0,
-        "audio_b64": _b64(result.answer_audio) if result.answer_audio else None,
-        "latency_ms": result.latency_ms,
-    }
+    return _voice_result_json(result)
 
 
 @app.post("/api/voice/text-query")
@@ -464,31 +675,147 @@ async def text_query(req: TextQueryRequest):
     Useful for testing without a microphone, or for frontend debugging.
     """
     result = await voice.handle_text_query(req.text)
-    return {
-        "transcription": result.transcription,
-        "intent": {
-            "kind": result.intent.kind,
-            "object_name": result.intent.object_name,
-        },
-        "answer": result.answer_text,
-        "has_audio": len(result.answer_audio) > 0,
-        "audio_b64": _b64(result.answer_audio) if result.answer_audio else None,
-        "latency_ms": result.latency_ms,
-    }
+    return _voice_result_json(result)
 
 
 @app.post("/api/voice/tts")
 async def text_to_speech(req: TextQueryRequest):
-    """Convert text directly to audio bytes (MP3).
+    """Convert text directly to audio bytes.
 
-    Returns binary audio/mpeg response for direct browser playback.
+    The media type is sniffed from the bytes (``audio/wav`` for Piper, ``audio/mpeg``
+    for OpenAI/edge) so the browser can play it directly.
     """
     audio = await voice._tts.synthesize(req.text)
     if not audio:
         raise HTTPException(
             status_code=503, detail="TTS synthesis failed — check TTS_ENGINE config"
         )
-    return Response(content=audio, media_type="audio/mpeg")
+    return Response(content=audio, media_type=VoicePipeline.audio_mime(audio))
+
+
+def _voice_result_json(result: VoicePipeline.QueryResult) -> dict:
+    """Legacy voice response keys plus additive ``intent.room``, ``resolution``, ``audio_mime``."""
+    audio = result.answer_audio
+    return {
+        "transcription": result.transcription,
+        "intent": result.intent.to_dict(),
+        "answer": result.answer_text,
+        "has_audio": len(audio) > 0,
+        "audio_b64": _b64(audio) if audio else None,
+        "audio_mime": VoicePipeline.audio_mime(audio) if audio else None,
+        "resolution": result.resolution.to_dict() if result.resolution is not None else None,
+        "latency_ms": result.latency_ms,
+    }
+
+
+@app.post("/api/query")
+async def query(req: QueryRequest):
+    """Text-first question answering (design D22): TTS only when ``tts`` is true.
+
+    Returns ``answer``, ``intent`` ({kind, object_name, room}), ``resolution``
+    (label/how/score/suggestions or null), ``results`` (sightings used), ``changes``,
+    ``latency_ms`` and ``audio_b64``/``audio_mime`` (null unless ``tts``).
+    """
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Empty question")
+    result = answer_text(voice, memory, text, room=req.room)
+    audio = b""
+    if req.tts:
+        try:
+            audio = await voice._tts.synthesize(result["answer"])
+        except Exception as exc:
+            logger.warning("TTS failed for /api/query: %s", exc)
+            audio = b""
+    result["audio_b64"] = _b64(audio) if audio else None
+    result["audio_mime"] = VoicePipeline.audio_mime(audio) if audio else None
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Handheld endpoints (rooms, anchor, status, persistence)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/anchor")
+async def anchor():
+    """Current camera pose in the room frame (``CameraPose.to_dict()``)."""
+    return _anchor_dict()
+
+
+@app.get("/api/rooms")
+async def list_rooms():
+    """Configured rooms with the tags registered so far and the current pose."""
+    loc_status = localizer.status() if localizer is not None else {}
+    registered = loc_status.get("tags_registered", {}) or {}
+    last_anchored = loc_status.get("last_anchored_ms", {}) or {}
+    out = []
+    for spec in rooms.rooms.values():
+        d = spec.to_dict()
+        d["tags_registered"] = list(registered.get(spec.name, [int(spec.anchor_tag)]))
+        d["last_anchored_ms"] = last_anchored.get(spec.name)
+        out.append(d)
+    return {
+        "rooms": out,
+        "current": _anchor_dict() if (localizer is not None or runtime is not None) else None,
+        "tag_size_m": float(rooms.tag_size_m),
+        "tag_family": rooms.tag_family,
+        "rooms_seen": memory.rooms_seen,
+    }
+
+
+@app.get("/api/handheld/status")
+async def handheld_status():
+    """Everything an operator needs: config, runtime/source, memory, restore, voice."""
+    return {
+        "config": cfg.to_dict(),
+        "runtime": runtime.status() if runtime is not None else None,
+        "memory": memory.stats(),
+        "restore": _restore_report.to_dict() if _restore_report is not None else None,
+        "started_at_ms": _started_at_ms,
+        "voice": _voice_status(),
+        "errors": _errors_dict(),
+        "anchor": _anchor_dict(),
+        "ws_subscribers": len(_ws_subscribers),
+    }
+
+
+def _errors_dict() -> dict[str, str]:
+    """Startup errors plus live conditions an operator must see (D14: silent
+    non-persistence is the one failure the status page must never hide)."""
+    errors = dict(_handheld_errors)
+    p = getattr(memory, "persistence", None)
+    if p is not None and _restore_report is not None and getattr(p, "enabled", False):
+        st = p.status()
+        if not st.get("running"):
+            errors.setdefault("persistence", f"writer not running ({st.get('errors', 0)} errors)")
+        elif st.get("errors"):
+            errors.setdefault(
+                "persistence", f"{st['errors']} write error(s), see memory.persistence"
+            )
+    return errors
+
+
+@app.post("/api/handheld/snapshot")
+async def handheld_snapshot():
+    """Write a memory snapshot now (``memory.flush()``)."""
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, memory.flush)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"snapshot failed: {exc}") from exc
+    return {
+        "status": "ok",
+        "persistence": memory.persistence.status() if memory.persistence is not None else None,
+    }
+
+
+@app.post("/api/memory/clear")
+async def memory_clear(req: ConfirmRequest):
+    """Forget everything (points, indices, persisted files). Requires ``{"confirm": true}``."""
+    if not req.confirm:
+        raise HTTPException(status_code=400, detail='Send {"confirm": true} to clear the memory')
+    await asyncio.get_running_loop().run_in_executor(None, memory.clear)
+    return {"status": "cleared", "observation_count": memory.observation_count}
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +834,9 @@ async def ws_tracking(ws: WebSocket):
     Message format:
       { "type": "detections", "detections": [...], "frame_count": N }
       { "type": "snapshot", "objects": [...], "observation_count": N }
+    Handheld additions (design §4.11): snapshots carry "rooms_seen" and "anchor";
+    the live push loop sends "detections" (with "source", "seq", "anchor") when the
+    runtime processed a frame and {"type": "anchor", ...CameraPose, "source_state"} 1 Hz.
     """
     await ws.accept()
     _ws_subscribers.add(ws)
@@ -516,6 +846,8 @@ async def ws_tracking(ws: WebSocket):
             "type": "snapshot",
             "objects": [o.to_dict() for o in memory.current_objects()],
             "observation_count": memory.observation_count,
+            "rooms_seen": memory.rooms_seen,
+            "anchor": _anchor_dict(),
         }
         await ws.send_text(json.dumps(snapshot))
 
@@ -527,6 +859,8 @@ async def ws_tracking(ws: WebSocket):
                 "objects": [o.to_dict() for o in memory.current_objects()],
                 "observation_count": memory.observation_count,
                 "stats": memory.stats(),
+                "rooms_seen": memory.rooms_seen,
+                "anchor": _anchor_dict(),
             }
             await ws.send_text(json.dumps(snapshot))
     except WebSocketDisconnect:
@@ -549,6 +883,7 @@ async def stats():
         "ingestion": ingestion.status(),
         "voice": voice.status(),
         "ws_subscribers": len(_ws_subscribers),
+        "handheld": runtime.status() if runtime is not None else None,
     }
 
 

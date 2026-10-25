@@ -1,0 +1,45 @@
+# LOCI handheld runtime pins for the Raspberry Pi 5 (Raspberry Pi OS trixie, Python 3.13, aarch64).
+#
+#   /home/ziggy/loci-handheld/.venv/bin/pip install -r requirements-pi.txt
+#   /home/ziggy/loci-handheld/.venv/bin/pip install -e /home/ziggy/loci-handheld/src --no-deps
+#
+# install_pi.sh runs both lines. Every pin below has a cp313/aarch64 wheel (and a macOS arm64
+# wheel, so requirements-dev.txt can include this file for the Mac scratch venv).
+
+# --- camera / vision (DepthAI v3 pipeline verified on this OAK-D Lite, see docs/HANDHELD_HARDWARE_FACTS.md)
+depthai==3.11.0
+opencv-python-headless==5.0.0.93
+numpy>=2.2,<3
+pyapriltags==3.4.3.1
+
+# --- label embeddings (potion-base-8M in model2vec format; tokenizers + safetensors only, no torch)
+tokenizers==0.23.3
+safetensors==0.8.0
+
+# --- loci core dependencies (the editable install above uses --no-deps)
+qdrant-client>=1.7
+hilbertcurve>=2.0.5
+
+# --- server
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.7,<3
+python-multipart
+segno
+httpx
+pytest
+
+# --- voice: headset push-to-talk loop (demo_spatial/app/headset_voice.py)
+# sounddevice needs the PortAudio shared library:  sudo apt install libportaudio2
+# (or set LOCI_AUDIO_BACKEND=cli to use pw-record/pw-play instead).
+sounddevice
+faster-whisper
+# faster-whisper <= 1.2 calls av.open(..., metadata_errors=...), removed in PyAV 15; the
+# app decodes PCM WAV itself and shims av.open, this pin is belt and braces (no PyAV 14
+# wheel exists for Python 3.14, hence the marker).
+av<15; python_version < "3.14"
+piper-tts
+# --- end voice
+
+# --- optional
+# model2vec==0.10.0        # only for the embedder parity test (tests/test_label_embedding.py)

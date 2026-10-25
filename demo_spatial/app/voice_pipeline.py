@@ -7,19 +7,40 @@ Supports three TTS engines (configured via TTS_ENGINE env var):
 
 STT uses OpenAI Whisper API by default. Falls back to faster-whisper
 for fully offline operation if WHISPER_LOCAL=1 is set.
+
+Handheld additions (design section 4.10): ``parse_intent`` captures a room
+("what changed in the kitchen"), answers go through ``SpatialMemory.resolve_label``
+(alias "mug" -> "cup", honest refusal for unknown nouns) and ``phrasing`` (walk-in /
+egocentric wording), ``handle_text_query(synthesize_response=False)`` skips TTS,
+``VoicePipeline.audio_mime`` sniffs the audio container and Piper >= 1.3's
+``synthesize_wav`` API is supported.  Memories without the handheld API (the
+pre-room ``SpatialMemory``) keep today's behaviour.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
 import io
 import logging
 import os
 import re
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+import time
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from . import phrasing
+from .phrasing import (
+    format_age,
+    format_clock,
+    image_position_phrase,
+)
 
 if TYPE_CHECKING:
+    from .detection_source import CameraPose
+    from .label_resolver import Resolution
     from .spatial_memory import SpatialMemory
     from .vlm_client import VLMClient
 
@@ -30,13 +51,18 @@ logger = logging.getLogger(__name__)
 # Intent model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class QueryIntent:
     """Parsed intent from a voice query."""
 
-    kind: str           # "where_is" | "history" | "list_objects" | "changes" | "unknown"
-    object_name: str    # the target object, empty string if not applicable
-    raw_text: str       # original transcribed text
+    kind: str  # "where_is" | "history" | "list_objects" | "changes" | "where_am_i" | "unknown"
+    object_name: str  # the target object, empty string if not applicable
+    raw_text: str  # original transcribed text
+    room: str = ""  # room named in the query ("in the kitchen"), "" when none
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "object_name": self.object_name, "room": self.room}
 
 
 _WHERE_PATTERNS = [
@@ -61,91 +87,147 @@ _LIST_PATTERNS = [
     r"(?:list|show|tell me)\s+(?:all\s+)?(?:the\s+)?objects",
     r"what\s+(?:objects|things|items)\s+(?:can you|do you)\s+(?:see|know about)",
     r"what\s+do\s+(?:i|you)\s+(?:have|see|know)",
+    # handheld: "what's in the kitchen" / "what is in my living room"
+    r"what(?:'s| is)\s+in\s+(?:the\s+|my\s+)?(?P<room>[\w ]+?)(?:\?|$)",
 ]
 
 _CHANGES_PATTERNS = [
     r"what(?:'s| has| have)\s+(?:changed|moved|been moved)",
     r"(?:any|what)\s+(?:new|recent)\s+(?:changes|updates|movements)",
+    # handheld: "what changed in the kitchen", "what's new around my living room".
+    # The auxiliary is optional: the spec's "what(?:'s| has| have| is)" alone misses
+    # the plain past tense "what changed", which is the demo's own phrase.
+    r"what(?:'s|s| has| have| is)?\s+(?:changed|moved|been moved|new|different)"
+    r"(?:\s+(?:in|around)\s+(?:the\s+|my\s+)?(?P<room>[\w ]+?))?(?:\?|$)",
 ]
 
+_WHERE_AM_I_PATTERNS = [
+    r"^where am i(?:\s+(?:right\s+)?now)?$",
+    r"^(?:which|what) room (?:am i in|is this)$",
+]
 
-def parse_intent(text: str) -> QueryIntent:
-    """Extract structured intent from transcribed voice query."""
+# Trailing "in the kitchen" / "in my living room" on an object name.
+_ROOM_TAIL = re.compile(
+    r"^(?P<obj>.+)\s+(?:in|inside|around)\s+(?:the\s+|my\s+|our\s+)?(?P<room>[\w ]+?)\s*$"
+)
+
+# Captured "rooms" that mean "here", not a room name.
+_NOT_A_ROOM = frozenset(
+    {"room", "the room", "here", "view", "frame", "scene", "picture", "front", "front of me"}
+)
+
+
+def _clean_room(text: str) -> str:
+    return " ".join(str(text).strip().lower().replace("_", " ").split()).rstrip("?!.,")
+
+
+def match_room(captured: str | None, known_rooms: Iterable[str] = ()) -> str:
+    """Canonicalise a room captured from speech.
+
+    Known room names win case-insensitively with ``"_"``/``" "`` equivalence
+    ("living room" -> "living_room"); a known room that prefixes the capture
+    ("kitchen since lunch") is accepted too.  Unknown text is returned cleaned
+    (lower case, spaces) so ``where_is(room=...)`` can still slug it.  Words that
+    mean "here" ("what's in the room") map to "".
+    """
+    cap = _clean_room(captured or "")
+    if not cap or cap in _NOT_A_ROOM:
+        return ""
+    canon: dict[str, str] = {}
+    for name in known_rooms or ():
+        if isinstance(name, str) and name.strip():
+            canon[_clean_room(name)] = name
+    if cap in canon:
+        return canon[cap]
+    for norm in sorted(canon, key=len, reverse=True):
+        if cap.startswith(norm + " "):
+            return canon[norm]
+    return cap
+
+
+def _split_room(obj: str, known_rooms: Iterable[str]) -> tuple[str, str]:
+    """ "mug in the living room" -> ("mug", "living_room")."""
+    m = _ROOM_TAIL.match(obj)
+    if not m:
+        return obj, ""
+    room = match_room(m.group("room"), known_rooms)
+    if not room:
+        return obj, ""
+    return m.group("obj").strip(), room
+
+
+def _search(patterns: Sequence[str], cleaned: str) -> tuple[re.Match[str] | None, str | None]:
+    """First match over ``patterns``; a match carrying a ``room`` group is preferred."""
+    first: re.Match[str] | None = None
+    for pat in patterns:
+        m = re.search(pat, cleaned)
+        if not m:
+            continue
+        if first is None:
+            first = m
+        if "room" in m.groupdict() and m.group("room"):
+            return m, m.group("room")
+    return first, None
+
+
+def parse_intent(text: str, known_rooms: Iterable[str] = ()) -> QueryIntent:
+    """Extract structured intent (kind, object, room) from a transcribed query."""
     cleaned = text.strip().lower().rstrip("?!.")
+    cleaned = " ".join(cleaned.split())
+    rooms = [r for r in (known_rooms or ()) if isinstance(r, str)]
+
+    for pat in _WHERE_AM_I_PATTERNS:
+        if re.search(pat, cleaned):
+            return QueryIntent(kind="where_am_i", object_name="", raw_text=text)
 
     # Check change/movement queries
-    for pat in _CHANGES_PATTERNS:
-        if re.search(pat, cleaned):
-            return QueryIntent(kind="changes", object_name="", raw_text=text)
+    m, room = _search(_CHANGES_PATTERNS, cleaned)
+    if m:
+        return QueryIntent(
+            kind="changes", object_name="", raw_text=text, room=match_room(room, rooms)
+        )
 
     # Check list-all queries
-    for pat in _LIST_PATTERNS:
-        if re.search(pat, cleaned):
-            return QueryIntent(kind="list_objects", object_name="", raw_text=text)
+    m, room = _search(_LIST_PATTERNS, cleaned)
+    if m:
+        return QueryIntent(
+            kind="list_objects", object_name="", raw_text=text, room=match_room(room, rooms)
+        )
 
     # Check history queries
     for pat in _HISTORY_PATTERNS:
         m = re.search(pat, cleaned)
         if m:
             obj = m.group(1).strip().rstrip("?")
-            return QueryIntent(kind="history", object_name=obj, raw_text=text)
+            obj, room_name = _split_room(obj, rooms)
+            return QueryIntent(kind="history", object_name=obj, raw_text=text, room=room_name)
 
     # Check where-is queries
     for pat in _WHERE_PATTERNS:
         m = re.search(pat, cleaned)
         if m:
             obj = m.group(1).strip().rstrip("?")
-            return QueryIntent(kind="where_is", object_name=obj, raw_text=text)
+            obj, room_name = _split_room(obj, rooms)
+            return QueryIntent(kind="where_is", object_name=obj, raw_text=text, room=room_name)
 
     # Generic fallback: treat as where_is with the full cleaned text as object
     # (handles short queries like "my keys?" or "glasses?")
     simple_match = re.match(r"^(?:my\s+|the\s+)?(.+)$", cleaned)
     if simple_match and len(cleaned) < 40:
-        return QueryIntent(kind="where_is", object_name=simple_match.group(1), raw_text=text)
+        obj, room_name = _split_room(simple_match.group(1), rooms)
+        return QueryIntent(kind="where_is", object_name=obj, raw_text=text, room=room_name)
 
     return QueryIntent(kind="unknown", object_name="", raw_text=text)
 
 
-def _format_age(age: float) -> str:
-    """Format age in seconds to a human-readable relative time string."""
-    if age < 10:
-        return "just now"
-    elif age < 60:
-        return f"{int(age)} seconds ago"
-    elif age < 3600:
-        mins = int(age / 60)
-        return f"{mins} minute{'s' if mins != 1 else ''} ago"
-    else:
-        hrs = int(age / 3600)
-        return f"{hrs} hour{'s' if hrs != 1 else ''} ago"
-
-
-def _format_clock_time(timestamp_ms: int) -> str:
-    """Format a Unix ms timestamp as a human-readable clock time (e.g., '2:15 PM')."""
-    from datetime import datetime
-    dt = datetime.fromtimestamp(timestamp_ms / 1000)
-    return dt.strftime("%I:%M %p").lstrip("0")
-
-
-def _describe_position(cx: float, cy: float) -> str:
-    """Describe a normalized (cx, cy) position in natural spatial terms."""
-    if cx < 0.33:
-        h_pos = "on the left"
-    elif cx > 0.67:
-        h_pos = "on the right"
-    else:
-        h_pos = "in the center"
-    if cy < 0.35:
-        v_pos = "toward the back"
-    elif cy > 0.70:
-        v_pos = "near the front"
-    else:
-        v_pos = "in the middle area"
-    return f"{h_pos}, {v_pos}"
+# Backwards-compatible private aliases (older callers/tests imported these).
+_format_age = format_age
+_format_clock_time = format_clock
+_describe_position = image_position_phrase
 
 
 def _describe_position_relative(target, all_objects: list) -> str:
-    """Describe target position relative to other nearby tracked objects."""
+    """Describe target position relative to other nearby tracked objects (image frame)."""
     if not all_objects or len(all_objects) < 2:
         return ""
     others = [o for o in all_objects if o.label != target.label]
@@ -155,7 +237,7 @@ def _describe_position_relative(target, all_objects: list) -> str:
     closest = min(others, key=lambda o: ((o.cx - target.cx) ** 2 + (o.cy - target.cy) ** 2) ** 0.5)
     dx = target.cx - closest.cx
     dy = target.cy - closest.cy
-    dist = (dx ** 2 + dy ** 2) ** 0.5
+    dist = (dx**2 + dy**2) ** 0.5
     if dist > 0.5:
         return ""  # too far apart to be useful
     if abs(dx) > abs(dy):
@@ -165,75 +247,373 @@ def _describe_position_relative(target, all_objects: list) -> str:
     return f"It's {direction} the {closest.label}."
 
 
-def build_response_text(intent: QueryIntent, memory: SpatialMemory, vlm_answer: str = "") -> str:
-    """Build a natural language response from intent + LOCI-DB query results."""
-    if vlm_answer:
-        return vlm_answer
+# ---------------------------------------------------------------------------
+# Answer generation
+# ---------------------------------------------------------------------------
 
-    if intent.kind == "list_objects":
-        objects = memory.current_objects()
-        if not objects:
-            return "I haven't seen any objects yet. Try pointing the camera around the room."
-        parts = []
-        for o in objects[:6]:
-            pos = _describe_position(o.cx, o.cy)
-            age_str = _format_age(o.age_seconds)
-            parts.append(f"{o.label} ({pos}, seen {age_str})")
-        result = "I'm tracking: " + "; ".join(parts) + "."
-        if len(objects) > 6:
-            result += f" Plus {len(objects) - 6} more objects."
-        return result
+#: Labels offered in the unknown-noun refusal when the vocabulary is unknown.
+EXAMPLE_LABELS: tuple[str, ...] = (
+    "cup",
+    "bottle",
+    "cell phone",
+    "remote",
+    "book",
+    "laptop",
+    "backpack",
+    "chair",
+)
+CHANGES_WINDOW_S = 600.0
+_LIST_MAX = 6
 
-    if intent.kind == "changes":
-        recent = memory.recent_changes(window_seconds=60)
-        if not recent:
-            return "No objects have moved in the last minute."
-        parts = []
-        for o in recent[:5]:
-            pos = _describe_position(o.cx, o.cy)
-            time_str = _format_clock_time(o.timestamp_ms)
-            parts.append(f"{o.label} at {time_str}, {pos}")
-        return "Recently spotted: " + "; ".join(parts) + "."
 
-    if intent.kind in ("where_is", "history") and intent.object_name:
-        results = memory.where_is(intent.object_name, limit=5)
-        if not results:
-            return f"I haven't seen your {intent.object_name} yet. Try scanning the area."
+@dataclass
+class AnswerBundle:
+    """What ``answer_query`` found: the spoken text plus the structured evidence."""
 
-        obj = results[0]
-        pos = _describe_position(obj.cx, obj.cy)
-        age_str = _format_age(obj.age_seconds)
-        clock_time = _format_clock_time(obj.timestamp_ms)
+    text: str
+    resolution: Resolution | None = None
+    results: list[Any] = field(default_factory=list)
+    changes: list[Any] = field(default_factory=list)
 
-        # Build the main answer with both when and where
-        answer = (
-            f"Your {intent.object_name} was last seen {pos}. "
-            f"That was {age_str}, at {clock_time}."
+
+def _has_method(obj: Any, name: str) -> bool:
+    return callable(getattr(obj, name, None))
+
+
+def _accepts_kw(fn: Any, name: str) -> bool:
+    """True when ``fn`` takes keyword ``name`` (or ``**kwargs``); True when unknowable."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return True
+    if name in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _str_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [str(v) for v in value if isinstance(v, str)]
+    return []
+
+
+def _obs_list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _room_spec(memory: Any, room: str | None) -> Any:
+    """``memory.rooms.get(room)`` when the memory has a RoomMap, else None."""
+    if not room:
+        return None
+    rooms = getattr(memory, "rooms", None)
+    if rooms is None or not _has_method(rooms, "get"):
+        return None
+    try:
+        spec = rooms.get(room)
+    except Exception:  # pragma: no cover - defensive against odd RoomMap fakes
+        return None
+    # A spec must at least carry a string anchor_name or a landmarks mapping.
+    if isinstance(getattr(spec, "anchor_name", None), str) or isinstance(
+        getattr(spec, "landmarks", None), dict
+    ):
+        return spec
+    return None
+
+
+def _room_specs_for(memory: Any, observations: Sequence[Any]) -> dict[str, Any]:
+    specs: dict[str, Any] = {}
+    for obs in observations:
+        room = getattr(obs, "room", None)
+        if room and room not in specs:
+            spec = _room_spec(memory, room)
+            if spec is not None:
+                specs[room] = spec
+    return specs
+
+
+def example_labels(memory: Any, limit: int = 5) -> list[str]:
+    """Labels to offer in the refusal: seen labels first, then common COCO names."""
+    tracked = _str_list(getattr(memory, "tracked_labels", None))
+    vocab = None
+    for attr in ("vocabulary", "_vocabulary", "_vocab"):  # T4 keeps it as _vocab
+        v = _str_list(getattr(memory, attr, None))
+        if v:
+            vocab = {x.lower() for x in v}
+            break
+    out: list[str] = []
+    for label in [*tracked[:2], *EXAMPLE_LABELS]:
+        if vocab is not None and label.lower() not in vocab:
+            continue
+        if label not in out:
+            out.append(label)
+        if len(out) >= limit:
+            break
+    if not out and vocab:
+        out = sorted(vocab)[:limit]
+    return out or list(EXAMPLE_LABELS[:limit])
+
+
+def _started_at(memory: Any) -> int | None:
+    v = getattr(memory, "started_at_ms", None)
+    return int(v) if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _where_is(memory: Any, label: str, limit: int, room: str) -> list[Any]:
+    if room and _accepts_kw(memory.where_is, "room"):
+        results = memory.where_is(label, limit=limit, room=room)
+    else:
+        results = memory.where_is(label, limit=limit)
+        if room:
+            want = phrasing.room_display(room)
+            results = [
+                r for r in results if phrasing.room_display(getattr(r, "room", None)) == want
+            ]
+    return _obs_list(results)
+
+
+def _resolve(memory: Any, name: str) -> Resolution | None:
+    if not _has_method(memory, "resolve_label"):
+        return None
+    try:
+        res = memory.resolve_label(name)
+    except Exception as e:  # pragma: no cover - resolver bugs must not 500 the API
+        logger.warning("resolve_label(%r) failed: %s", name, e)
+        return None
+    if isinstance(getattr(res, "how", None), str):
+        return res
+    return None
+
+
+def _answer_object(
+    intent: QueryIntent, memory: Any, current_pose: CameraPose | None
+) -> AnswerBundle:
+    spoken = intent.object_name
+    res = _resolve(memory, spoken)
+    if res is not None and getattr(res, "label", None) is None:
+        return AnswerBundle(phrasing.unknown_label_answer(spoken, res, example_labels(memory)), res)
+
+    label = str(res.label) if res is not None else spoken
+    hedge = res is not None and res.how == "embedding" and float(res.score) < 0.6
+    limit = 20 if intent.kind == "history" else 5
+    results = _where_is(memory, label, limit, intent.room)
+    if not results:
+        return AnswerBundle(
+            phrasing.not_seen_answer(spoken, intent.room or None, resolved_label=label), res, []
         )
 
-        # Add relative position to other objects if available
-        all_objects = memory.current_objects()
-        rel = _describe_position_relative(obj, all_objects)
-        if rel:
-            answer += f" {rel}"
+    specs = _room_specs_for(memory, results)
+    kwargs: dict[str, Any] = {
+        "current_pose": current_pose,
+        "resolved_label": label,
+        "started_at_ms": _started_at(memory),
+        "hedge": hedge,
+    }
+    if intent.kind == "history" and len(results) > 1:
+        text = phrasing.history_answer(spoken, results, room_spec_for=specs, **kwargs)
+    else:
+        obs = results[0]
+        text = phrasing.where_is_answer(
+            spoken, obs, room_spec=specs.get(getattr(obs, "room", None) or ""), **kwargs
+        )
+        if (getattr(obs, "frame", "image") or "image") == "image" and _has_method(
+            memory, "current_objects"
+        ):
+            # Legacy browser mode: relate the object to its nearest tracked neighbour.
+            rel = _describe_position_relative(obs, _obs_list(memory.current_objects()))
+            if rel:
+                text += f" {rel}"
+    return AnswerBundle(text, res, results)
 
-        # For history intent, add previous sightings
-        if intent.kind == "history" and len(results) > 1:
-            answer += " Previous sightings:"
-            for prev in results[1:4]:
-                prev_pos = _describe_position(prev.cx, prev.cy)
-                prev_time = _format_clock_time(prev.timestamp_ms)
-                prev_age = _format_age(prev.age_seconds)
-                answer += f" At {prev_time} ({prev_age}), {prev_pos}."
 
-        return answer
+def _answer_changes(intent: QueryIntent, memory: Any) -> AnswerBundle:
+    room = intent.room or None
+    if _has_method(memory, "changes"):
+        changes = _obs_list(memory.changes(room, CHANGES_WINDOW_S))
+        text = phrasing.changes_answer(changes, room, CHANGES_WINDOW_S)
+        return AnswerBundle(text, changes=changes)
+    # Legacy memory: "recently spotted" wording from the per-label cache.
+    recent = _obs_list(memory.recent_changes(window_seconds=60))
+    if not recent:
+        return AnswerBundle("No objects have moved in the last minute.")
+    parts = []
+    for o in recent[:5]:
+        pos = image_position_phrase(o.cx, o.cy)
+        parts.append(f"{o.label} at {format_clock(o.timestamp_ms)}, {pos}")
+    return AnswerBundle("Recently spotted: " + "; ".join(parts) + ".", changes=recent)
 
-    return "I'm not sure what you're asking. Try saying 'where is my [object]?'"
+
+def _answer_list(intent: QueryIntent, memory: Any) -> AnswerBundle:
+    room = intent.room or None
+    if room and _accepts_kw(memory.current_objects, "room"):
+        objects = _obs_list(memory.current_objects(room=room))
+    else:
+        objects = _obs_list(memory.current_objects())
+        if room:
+            objects = [
+                o
+                for o in objects
+                if phrasing.room_display(getattr(o, "room", None)) == phrasing.room_display(room)
+            ]
+    if not objects:
+        if room:
+            return AnswerBundle(
+                f"I haven't seen any objects in the {phrasing.room_display(room)} yet."
+            )
+        return AnswerBundle(
+            "I haven't seen any objects yet. Try pointing the camera around the room."
+        )
+    specs = _room_specs_for(memory, objects)
+    now_ms = int(time.time() * 1000)
+    parts = []
+    for o in objects[:_LIST_MAX]:
+        where = phrasing.location_phrase(
+            o,
+            room_spec=specs.get(getattr(o, "room", None) or ""),
+            egocentric=False,
+            name_room=not room,
+        )
+        age = format_age((now_ms - int(getattr(o, "timestamp_ms", now_ms))) / 1000.0)
+        parts.append(f"{o.label} ({where}, seen {age})")
+    head = f"In the {phrasing.room_display(room)}, I'm tracking: " if room else "I'm tracking: "
+    result = head + "; ".join(parts) + "."
+    if len(objects) > _LIST_MAX:
+        result += f" Plus {len(objects) - _LIST_MAX} more objects."
+    return AnswerBundle(result, results=objects)
+
+
+def answer_query(
+    intent: QueryIntent,
+    memory: Any,
+    vlm_answer: str = "",
+    *,
+    current_pose: CameraPose | None = None,
+) -> AnswerBundle:
+    """Answer an intent against ``memory``; returns the text and the evidence used."""
+    if vlm_answer:
+        return AnswerBundle(vlm_answer)
+
+    if intent.kind == "where_am_i":
+        spec = _room_spec(memory, getattr(current_pose, "room", None))
+        anchor = getattr(spec, "anchor_name", None)
+        return AnswerBundle(
+            phrasing.where_am_i_answer(
+                current_pose,
+                anchor_name=anchor if isinstance(anchor, str) else phrasing.DEFAULT_ANCHOR_NAME,
+            )
+        )
+
+    if intent.kind == "list_objects":
+        return _answer_list(intent, memory)
+
+    if intent.kind == "changes":
+        return _answer_changes(intent, memory)
+
+    if intent.kind in ("where_is", "history") and intent.object_name:
+        return _answer_object(intent, memory, current_pose)
+
+    return AnswerBundle("I'm not sure what you're asking. Try saying 'where is my [object]?'")
+
+
+def build_response_text(
+    intent: QueryIntent,
+    memory: SpatialMemory,
+    vlm_answer: str = "",
+    *,
+    current_pose: CameraPose | None = None,
+) -> str:
+    """Build a natural language response from intent + LOCI-DB query results."""
+    return answer_query(intent, memory, vlm_answer, current_pose=current_pose).text
 
 
 # ---------------------------------------------------------------------------
 # STT
 # ---------------------------------------------------------------------------
+
+WHISPER_SAMPLE_RATE = 16_000
+
+
+def wav_bytes_to_float32(audio_bytes: bytes, target_rate: int = WHISPER_SAMPLE_RATE) -> Any:
+    """Decode RIFF/WAVE PCM bytes to a mono float32 numpy array at ``target_rate``.
+
+    Returns ``None`` for anything that is not a PCM WAV this function can read
+    (browser webm/opus, compressed WAV subtypes); the caller then falls back to the
+    container decoder.  Used so faster-whisper never needs PyAV for the headset's
+    16 kHz 16-bit WAV: faster-whisper's ``decode_audio`` calls
+    ``av.open(..., metadata_errors=...)``, which PyAV >= 15 rejects with TypeError.
+    """
+    if len(audio_bytes) < 44 or audio_bytes[:4] != b"RIFF" or audio_bytes[8:12] != b"WAVE":
+        return None
+    import wave
+
+    import numpy as np
+
+    try:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+            channels = wf.getnchannels()
+            width = wf.getsampwidth()
+            rate = wf.getframerate()
+            frames = wf.readframes(wf.getnframes())
+    except (wave.Error, EOFError, ValueError):
+        return None
+    if channels < 1 or rate <= 0:
+        return None
+    if width == 2:
+        pcm = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    elif width == 1:
+        pcm = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif width == 4:
+        pcm = np.frombuffer(frames, dtype="<i4").astype(np.float32) / 2147483648.0
+    else:
+        return None
+    if channels > 1:
+        usable = (pcm.size // channels) * channels
+        pcm = pcm[:usable].reshape(-1, channels).mean(axis=1)
+    if rate != target_rate and pcm.size > 1:
+        n_out = max(1, int(round(pcm.size * target_rate / rate)))
+        x_old = np.linspace(0.0, 1.0, num=pcm.size, endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num=n_out, endpoint=False)
+        pcm = np.interp(x_new, x_old, pcm).astype(np.float32)
+    return np.ascontiguousarray(pcm, dtype=np.float32)
+
+
+_PYAV_PATCHED = False
+
+
+def ensure_pyav_compat() -> bool:
+    """Make faster-whisper's ``av.open(..., metadata_errors="ignore")`` call survive PyAV >= 15.
+
+    PyAV 15 removed the ``metadata_errors`` / ``metadata_encoding`` keyword arguments;
+    faster-whisper (<= 1.2) still passes them, so every non-WAV transcription would
+    fail with TypeError.  Installed once; returns True when ``av`` is importable.
+    """
+    global _PYAV_PATCHED
+    if _PYAV_PATCHED:
+        return True
+    try:
+        import av
+    except Exception:
+        return False
+    original = av.open
+    if getattr(original, "_loci_compat", False):
+        _PYAV_PATCHED = True
+        return True
+
+    def _open(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return original(*args, **kwargs)
+        except TypeError as exc:
+            dropped = {
+                k: kwargs.pop(k) for k in ("metadata_errors", "metadata_encoding") if k in kwargs
+            }
+            if not dropped or "metadata" not in str(exc):
+                raise
+            return original(*args, **kwargs)
+
+    _open._loci_compat = True  # type: ignore[attr-defined]
+    av.open = _open
+    _PYAV_PATCHED = True
+    return True
+
 
 class WhisperSTT:
     """Speech-to-text via OpenAI Whisper API or local faster-whisper."""
@@ -248,6 +628,7 @@ class WhisperSTT:
     def _get_openai_client(self):
         if self._openai_client is None:
             import openai
+
             self._openai_client = openai.AsyncOpenAI(api_key=self._openai_key)
         return self._openai_client
 
@@ -256,6 +637,7 @@ class WhisperSTT:
             return
         try:
             from faster_whisper import WhisperModel
+
             model_size = os.environ.get("WHISPER_LOCAL_MODEL", "base")
             self._local_model = WhisperModel(model_size, device="cpu", compute_type="int8")
             logger.info("Loaded local Whisper model: %s", model_size)
@@ -273,8 +655,8 @@ class WhisperSTT:
         return ""
 
     async def _transcribe_openai(self, audio_bytes: bytes, language: str) -> str:
-        client = self._get_openai_client()
         try:
+            client = self._get_openai_client()  # ImportError without the openai package
             audio_file = io.BytesIO(audio_bytes)
             audio_file.name = "audio.webm"
             response = await client.audio.transcriptions.create(
@@ -293,14 +675,24 @@ class WhisperSTT:
         if self._local_model is None:
             return await self._transcribe_openai(audio_bytes, language)
         try:
+            # PCM WAV (headset loop, phone page recordings converted server-side) is
+            # decoded with the stdlib and handed over as float32 samples, bypassing
+            # PyAV entirely; other containers (browser webm/opus) still go through
+            # faster-whisper's decoder with the PyAV >= 15 keyword shim in place.
+            audio: Any = wav_bytes_to_float32(audio_bytes)
+            if audio is None:
+                ensure_pyav_compat()
+                audio = io.BytesIO(audio_bytes)
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: list(self._local_model.transcribe(
-                    io.BytesIO(audio_bytes),
-                    language=language,
-                    beam_size=1,
-                )[0])
+                lambda: list(
+                    self._local_model.transcribe(
+                        audio,
+                        language=language,
+                        beam_size=1,
+                    )[0]
+                ),
             )
             return " ".join(seg.text.strip() for seg in result)
         except Exception as e:
@@ -315,6 +707,7 @@ class WhisperSTT:
 # ---------------------------------------------------------------------------
 # TTS
 # ---------------------------------------------------------------------------
+
 
 class TTS:
     """Text-to-speech with pluggable backends.
@@ -339,6 +732,7 @@ class TTS:
     def _get_openai_client(self):
         if self._openai_client is None:
             import openai
+
             self._openai_client = openai.AsyncOpenAI(api_key=self._openai_key)
         return self._openai_client
 
@@ -368,8 +762,8 @@ class TTS:
         return b""
 
     async def _synthesize_openai(self, text: str) -> bytes:
-        client = self._get_openai_client()
         try:
+            client = self._get_openai_client()  # ImportError without the openai package
             response = await client.audio.speech.create(
                 model=self._openai_model,
                 voice=self._openai_voice,
@@ -388,13 +782,12 @@ class TTS:
             return b""
         try:
             import piper
+
             if self._piper_voice is None:
                 self._piper_voice = piper.PiperVoice.load(self._piper_model)
 
             loop = asyncio.get_event_loop()
-            audio_bytes = await loop.run_in_executor(
-                None, self._run_piper_sync, text
-            )
+            audio_bytes = await loop.run_in_executor(None, self._run_piper_sync, text)
             return audio_bytes
         except ImportError:
             logger.debug("piper-tts not installed")
@@ -404,17 +797,28 @@ class TTS:
             return b""
 
     def _run_piper_sync(self, text: str) -> bytes:
-        """Run Piper synthesis synchronously (called from executor)."""
-        buf = io.BytesIO()
+        """Run Piper synthesis synchronously (called from executor).
+
+        piper-tts >= 1.3 renamed the file API to ``synthesize_wav(text, wav_file)``;
+        older releases expose ``synthesize(text, wav_file)``.  Both write the WAV
+        header themselves.
+        """
         import wave
+
+        voice = self._piper_voice
+        buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
-            self._piper_voice.synthesize(text, wf)
+            if hasattr(voice, "synthesize_wav"):
+                voice.synthesize_wav(text, wf)
+            else:
+                voice.synthesize(text, wf)
         return buf.getvalue()
 
     async def _synthesize_edge(self, text: str) -> bytes:
         """Synthesize using Microsoft Edge TTS (edge-tts library)."""
         try:
             import edge_tts
+
             communicate = edge_tts.Communicate(text, self._edge_voice)
             buf = io.BytesIO()
             async for chunk in communicate.stream():
@@ -437,12 +841,13 @@ class TTS:
 # High-level VoicePipeline
 # ---------------------------------------------------------------------------
 
+
 class VoicePipeline:
     """End-to-end voice query pipeline: audio → text → answer → audio.
 
     Usage::
 
-        pipeline = VoicePipeline(memory, vlm_client)
+        pipeline = VoicePipeline(memory, vlm_client, pose_provider=localizer.current)
         result = await pipeline.handle_audio_query(audio_bytes)
         # result.answer_text  — text of the answer
         # result.answer_audio — audio bytes for playback
@@ -452,9 +857,12 @@ class VoicePipeline:
         self,
         memory: SpatialMemory,
         vlm_client: VLMClient | None = None,
+        *,
+        pose_provider: Callable[[], CameraPose | None] | None = None,
     ) -> None:
         self._memory = memory
         self._vlm = vlm_client
+        self._pose_provider = pose_provider
         self._stt = WhisperSTT()
         self._tts = TTS()
 
@@ -465,6 +873,63 @@ class VoicePipeline:
         answer_text: str
         answer_audio: bytes
         latency_ms: float
+        resolution: Resolution | None = None
+        results: list[Any] = field(default_factory=list)
+        changes: list[Any] = field(default_factory=list)
+
+        @property
+        def audio_mime(self) -> str | None:
+            return VoicePipeline.audio_mime(self.answer_audio) if self.answer_audio else None
+
+    @staticmethod
+    def audio_mime(audio: bytes) -> str:
+        """Sniff the container of TTS output: WAV (Piper), MP3 (OpenAI/edge) or unknown."""
+        head = bytes(audio[:4]) if audio else b""
+        if head[:4] == b"RIFF":
+            return "audio/wav"
+        if head[:3] == b"ID3" or (len(head) >= 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0):
+            return "audio/mpeg"
+        if head[:4] == b"OggS":
+            return "audio/ogg"
+        return "application/octet-stream"
+
+    # -- helpers -----------------------------------------------------------
+
+    def current_pose(self) -> CameraPose | None:
+        """The localizer's current pose (None without a provider or on error)."""
+        if self._pose_provider is None:
+            return None
+        try:
+            return self._pose_provider()
+        except Exception as e:
+            logger.debug("pose_provider failed: %s", e)
+            return None
+
+    def known_rooms(self) -> list[str]:
+        """Configured room names plus rooms seen, for ``parse_intent``."""
+        names: list[str] = []
+        rooms = getattr(self._memory, "rooms", None)
+        if rooms is not None and _has_method(rooms, "names"):
+            with contextlib.suppress(Exception):  # a RoomMap fake without names()
+                names.extend(_str_list(rooms.names()))
+        names.extend(_str_list(getattr(self._memory, "rooms_seen", None)))
+        out: list[str] = []
+        for n in names:
+            if n not in out:
+                out.append(n)
+        return out
+
+    def parse(self, text: str) -> QueryIntent:
+        return parse_intent(text, self.known_rooms())
+
+    def _answer(self, intent: QueryIntent) -> AnswerBundle:
+        return answer_query(intent, self._memory, current_pose=self.current_pose())
+
+    async def _generate_answer(self, intent: QueryIntent) -> str:
+        """Query LOCI-DB and build a rule-based answer. Fast path: no LLM call."""
+        return self._answer(intent).text
+
+    # -- entry points ------------------------------------------------------
 
     async def handle_audio_query(
         self,
@@ -482,7 +947,6 @@ class VoicePipeline:
         Returns:
             QueryResult with transcription, intent, answer text, and audio.
         """
-        import time
         t0 = time.perf_counter()
 
         # Step 1: Transcribe
@@ -499,41 +963,48 @@ class VoicePipeline:
             )
 
         # Step 2: Parse intent
-        intent = parse_intent(transcript)
+        intent = self.parse(transcript)
 
         # Step 3: Query spatial memory + generate answer
-        answer = await self._generate_answer(intent)
+        bundle = self._answer(intent)
 
         # Step 4: Synthesize speech
-        audio = await self._tts.synthesize(answer) if synthesize_response else b""
+        audio = await self._tts.synthesize(bundle.text) if synthesize_response else b""
 
         latency_ms = (time.perf_counter() - t0) * 1000
         return self.QueryResult(
             transcription=transcript,
             intent=intent,
-            answer_text=answer,
+            answer_text=bundle.text,
             answer_audio=audio,
             latency_ms=round(latency_ms, 1),
+            resolution=bundle.resolution,
+            results=bundle.results,
+            changes=bundle.changes,
         )
 
-    async def handle_text_query(self, text: str) -> VoicePipeline.QueryResult:
-        """Text-only pipeline (skip STT, still generates TTS)."""
-        import time
+    async def handle_text_query(
+        self, text: str, *, synthesize_response: bool = True
+    ) -> VoicePipeline.QueryResult:
+        """Text-only pipeline (skip STT; TTS unless ``synthesize_response=False``)."""
         t0 = time.perf_counter()
-        intent = parse_intent(text)
-        answer = await self._generate_answer(intent)
-        audio = await self._tts.synthesize(answer)
+        intent = self.parse(text)
+        bundle = self._answer(intent)
+        audio = await self._tts.synthesize(bundle.text) if synthesize_response else b""
         return self.QueryResult(
             transcription=text,
             intent=intent,
-            answer_text=answer,
+            answer_text=bundle.text,
             answer_audio=audio,
             latency_ms=round((time.perf_counter() - t0) * 1000, 1),
+            resolution=bundle.resolution,
+            results=bundle.results,
+            changes=bundle.changes,
         )
 
-    async def _generate_answer(self, intent: QueryIntent) -> str:
-        """Query LOCI-DB and build a rule-based answer. Fast path: no LLM call."""
-        return build_response_text(intent, self._memory)
+    def answer_text(self, text: str) -> str:
+        """Synchronous text answer (no TTS); handy for the headset loop's ``answer_fn``."""
+        return self._answer(self.parse(text)).text
 
     @property
     def stt_available(self) -> bool:
@@ -548,4 +1019,5 @@ class VoicePipeline:
             "stt_available": self.stt_available,
             "tts_engine": self.tts_engine,
             "vlm_available": self._vlm.is_available if self._vlm else False,
+            "pose_provider": self._pose_provider is not None,
         }

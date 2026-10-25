@@ -37,10 +37,18 @@ from app.voice_pipeline import (  # noqa: E402
     parse_intent,
 )
 
-# Wall-clock based: answers compute ages from time.time(), so sightings are placed
-# relative to the real "now" (3 minutes ago stays "3 minutes ago" for a 10 s run).
+# Answers compute ages from time.time(). Sightings are placed relative to NOW_MS, and the
+# clock is pinned to NOW_MS for every test below, so "3 minutes ago" stays "3 minutes ago"
+# however long the rest of the suite takes to reach this file (CI needs over a minute).
 NOW_MS = int(time.time() * 1000)
 TS = NOW_MS - 180_000
+
+
+@pytest.fixture(autouse=True)
+def _frozen_clock(monkeypatch):
+    monkeypatch.setattr(time, "time", lambda: NOW_MS / 1000)
+
+
 ROOMS = ["kitchen", "living_room"]
 T_KITCHEN = camera_pose_T((0.0, 1.4, 2.5), 0.0)
 KITCHEN = RoomSpec(name="kitchen", anchor_tag=0, landmarks={"table": (1.0, 0.75, 1.2)})

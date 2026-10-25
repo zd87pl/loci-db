@@ -20,7 +20,7 @@ static const char *TAG = "host";
 static char s_base[128];
 static char s_device[32];
 static uint32_t s_clips;
-static char s_resp[4096];  // host replies are small, flat JSON
+static char s_resp[8192];  // host replies are small, flat JSON (8 kB covers a long detections list)
 static int64_t s_clock_offset_ms;  // host Unix ms - esp_timer ms, from the last frame reply
 static bool s_clock_synced;
 static int s_failures;  // consecutive failed frame posts
@@ -106,6 +106,33 @@ static esp_http_client_handle_t client_new(const char *url, esp_http_client_meth
   return esp_http_client_init(&cfg);
 }
 
+// One persistent, keep-alive connection for the frame stream: a fresh TCP connection per frame
+// pays the handshake and TCP slow start on every 140 kB upload. The handle is kept open between
+// requests and only closed (not freed) after an error so the next frame reconnects.
+static esp_http_client_handle_t s_frame_client;
+
+static esp_http_client_handle_t frame_client(const char *url) {
+  if (!s_frame_client) {
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .method = HTTP_METHOD_POST,
+        .timeout_ms = s_frame_timeout_ms,
+        .buffer_size = 8192,
+        .buffer_size_tx = 8192,
+        .keep_alive_enable = true,
+        .keep_alive_idle = 10,
+        .keep_alive_interval = 5,
+        .keep_alive_count = 3,
+    };
+    s_frame_client = esp_http_client_init(&cfg);
+    return s_frame_client;
+  }
+  esp_http_client_set_url(s_frame_client, url);
+  esp_http_client_set_method(s_frame_client, HTTP_METHOD_POST);
+  esp_http_client_set_timeout_ms(s_frame_client, s_frame_timeout_ms);
+  return s_frame_client;
+}
+
 // Send `len` bytes of body, then read the (small) response into s_resp. Returns the HTTP status.
 static int exchange(esp_http_client_handle_t c, const uint8_t *body, size_t len) {
   esp_err_t err = esp_http_client_open(c, (int)len);
@@ -127,6 +154,7 @@ static int exchange(esp_http_client_handle_t c, const uint8_t *body, size_t len)
   int got = esp_http_client_read_response(c, s_resp, sizeof(s_resp) - 1);
   if (got < 0) got = 0;
   s_resp[got] = 0;
+  if (got >= (int)sizeof(s_resp) - 1) esp_http_client_flush_response(c, NULL);  // keep the stream in sync
   return status;
 }
 
@@ -143,7 +171,7 @@ esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int6
                              host_frame_result_t *out) {
   char url[224], hdr[32];
   snprintf(url, sizeof(url), "%s/api/esp32/frame?device=%s&seq=%lu", s_base, s_device, (unsigned long)seq);
-  esp_http_client_handle_t c = client_new(url, HTTP_METHOD_POST, s_frame_timeout_ms);
+  esp_http_client_handle_t c = frame_client(url);
   if (!c) return ESP_ERR_NO_MEM;
   esp_http_client_set_header(c, "Content-Type", "image/jpeg");
   esp_http_client_set_header(c, "X-Device-Id", s_device);
@@ -151,18 +179,23 @@ esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int6
   esp_http_client_set_header(c, "X-Device-Ms", hdr);
   snprintf(hdr, sizeof(hdr), "%d", wifi_link_rssi());
   esp_http_client_set_header(c, "X-Rssi", hdr);
+  // headers persist on the shared handle: set or remove the backlog ones every time
   if (backlog) {
     esp_http_client_set_header(c, "X-Backlog", "1");
     if (captured_ms > 0) {
       snprintf(hdr, sizeof(hdr), "%lld", (long long)captured_ms);
       esp_http_client_set_header(c, "X-Captured-Ms", hdr);
+    } else {
+      esp_http_client_delete_header(c, "X-Captured-Ms");
     }
+  } else {
+    esp_http_client_delete_header(c, "X-Backlog");
+    esp_http_client_delete_header(c, "X-Captured-Ms");
   }
 
   int status = exchange(c, jpeg, len);
-  esp_http_client_close(c);
-  esp_http_client_cleanup(c);
   if (status != 200) {
+    esp_http_client_close(c);  // drop the connection; the next frame reconnects
     s_failures++;
     ESP_LOGW(TAG, "frame #%lu -> HTTP %d %s", (unsigned long)seq, status, status > 0 ? s_resp : "");
     return ESP_FAIL;

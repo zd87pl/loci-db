@@ -161,9 +161,15 @@ path never calls OpenAI. `yolov8n.pt` is the plain COCO model (no CLIP download,
 it knows cup, bottle, laptop, cell phone, banana, book, keyboard, mouse, chair… but **not keys**.
 
 ```bash
-# 2. firmware (see firmware/esp32-cam-client/README.md); once, with the board on USB
+# 2a. the board on the desk: Waveshare ESP32-P4-NANO (ESP-IDF; see firmware/esp32-p4-client/README.md)
+cd firmware/esp32-p4-client
+cp main/secrets.h.example main/secrets.h          # fill in Wi-Fi + LOCI_HOST=http://<mac-ip>:8002
+. ~/esp/esp-idf/export.sh && idf.py set-target esp32p4 && idf.py build
+idf.py -p /dev/cu.usbmodem5ABA0768111 flash monitor
+
+# 2b. an S3 / classic ESP32 camera board instead (PlatformIO; see firmware/esp32-cam-client/README.md)
 cd firmware/esp32-cam-client
-cp include/secrets.h.example include/secrets.h   # fill in Wi-Fi + LOCI_HOST=http://<mac-ip>:8002
+cp include/secrets.h.example include/secrets.h
 pio run -e xiao_esp32s3_sense -t upload -t monitor
 ```
 

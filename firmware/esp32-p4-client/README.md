@@ -58,8 +58,14 @@ idf.py -p /dev/cu.usbmodem5ABA0768111 flash monitor   # ctrl-] leaves the monito
 
 `main/secrets.h` is git-ignored. Never commit it.
 
-`esp_hosted` is pinned to 2.12.x on purpose: the 3.x line expects Wi-Fi headers newer than the
-IDF snapshot on this Mac, and the C6 on the board shipped with a 2.x slave.
+`esp_hosted` is pinned to 2.12.x and `esp_video` to 2.1.0 on purpose: the newer lines expect
+Wi-Fi and camera-controller headers newer than the IDF 6.1 snapshot on this Mac, and the C6 on the
+board shipped with a 2.x hosted slave.
+
+`sdkconfig.defaults` selects **ESP32-P4 revisions below 3.0** (`CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`,
+minimum v1.0). IDF 6 builds for v3.x silicon by default and its bootloader then refuses to flash a
+v1.3 board ("requires chip revision in range [v3.1 - v3.99]"). Boards with v3.x silicon need the
+opposite setting; the two are mutually exclusive.
 
 ## What you should see
 

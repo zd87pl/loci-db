@@ -49,3 +49,9 @@ CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=8
 # sensor data is demosaiced with fixed gains and the picture is dark with a colour cast.
 CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
 CONFIG_ISP_PIPELINE_CONTROLLER_TASK_STACK_USE_PSRAM=y
+
+
+# esp_video registers each /dev/video* node with the VFS; the default table of 8 is full before the
+# card gets its entry (esp_vfs_fat_register then fails with ESP_ERR_NO_MEM). The camera examples use 15.
+CONFIG_VFS_MAX_COUNT=15
+CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096

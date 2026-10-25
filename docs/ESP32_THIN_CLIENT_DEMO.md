@@ -137,11 +137,35 @@ response shape as `/voice`, the answer is queued for the device.
 
 Speak arbitrary text on the board. `503` when the TTS engine is unavailable.
 
+### Local storage on the board (microSD)
+
+Every frame reply also carries `now_ms` (the host's Unix clock, from which the board derives
+timestamps for frames it keeps while offline) and `memory_rev`, a short digest of the remembered
+objects that changes only when something appears or moves.
+
+* **Store-and-forward.** While the host or the Wi-Fi is unreachable the board keeps capturing to
+  `/sdcard/loci/backlog/<captured_ms>.jpg` and, once back, uploads oldest-first with
+  `X-Backlog: 1` and `X-Captured-Ms: <unix ms>`. The host stores those observations at their capture
+  time (`SceneIngestion.process_detections(..., timestamp_ms=captured)`), skips the rate limiter and
+  the live WebSocket broadcast for them, and counts them under `backlog_frames` in the status. A
+  capture time that is implausible (zero, in the future, older than 30 days) falls back to arrival.
+* **Cached memory and offline answers.** `GET /api/esp32/memory` returns `{rev, count, objects:
+  [{label, where, room, last_seen_ms, age_s}], summary}`; `GET /api/esp32/memory.pcm` is the summary
+  sentence as board PCM; `GET /api/esp32/phrase.pcm?text=…` any short phrase (both cached on the
+  host). The board refreshes `/sdcard/loci/memory.json` and `memory.pcm` when `memory_rev` changes
+  (at most every 10 s) and, when the button is pressed with no host in reach, plays that summary:
+  *"I can't reach the host right now. The last things I remember: cup in the center…"*.
+* **Dataset.** Every Nth live frame (`LOCI_SD_KEEP_EVERY`, default 10) is saved to
+  `/sdcard/loci/frames/<ms>.jpg` with the host's full reply as `<ms>.json` (labels and boxes), the raw
+  material for training a detector on the user's own objects later; push-to-talk clips go to
+  `/sdcard/loci/voice/<ms>.wav`. Writing stops below `LOCI_SD_MIN_FREE_MB` free.
+
 ### Debugging
 
-`GET /api/esp32/status` (devices, fps, dropped frames, inference time, detector state, voice engines,
-tracked labels), `GET /api/esp32/frame.jpg`, `GET /api/esp32/stream.mjpg?fps=5`, and the page
-`GET /esp32`. Processed frames are also broadcast on the existing `/ws` feed as
+`GET /api/esp32/status` (devices, fps, dropped and backlog frames, inference time, detector state,
+voice engines, tracked labels, memory revision), `GET /api/esp32/frame.jpg` (`?corrected=1` shows
+the frame as the detector sees it, rotated and white-balanced), `GET /api/esp32/stream.mjpg?fps=5`,
+and the page `GET /esp32`. Processed live frames are also broadcast on the existing `/ws` feed as
 `{"type": "detections", "source": "esp32", ...}`, so the main page draws them.
 
 ## 3. Running the Mac end to end
@@ -210,6 +234,8 @@ venv/bin/python demo_spatial/tools/esp32_fake_board.py --host http://localhost:8
 | `LOCI_ESP32_DEVICE` | `esp32` | Device id used when the board sends none |
 | `LOCI_ESP32_WARMUP` | 0 | `1` loads YOLO in a thread at startup |
 | `LOCI_ESP32_DEPTH` | `none` | `mono` enables a plugged-in monocular depth estimator (low confidence) |
+| `LOCI_ESP32_WB` | `none` (`gray` in the run script) | Gray-world white balance before detection; fixes the P4 camera's blue cast |
+| `LOCI_ESP32_IMGSZ` | 640 | YOLO inference size; 960 for 1280×960 frames |
 
 Voice uses the existing `WHISPER_LOCAL`, `WHISPER_LOCAL_MODEL`, `TTS_ENGINE`, `PIPER_MODEL_PATH`,
 `EDGE_TTS_VOICE`.

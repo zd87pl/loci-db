@@ -91,6 +91,30 @@ short high beep after releasing BOOT means the clip was captured; a low beep mea
 too short. `snap` on the console captures and encodes one frame without a host (800×800 → ~20–90 kB
 in ~36 ms).
 
+## microSD card
+
+A FAT32 card in the slot (SDMMC slot 0: CLK 43, CMD 44, D0–D3 39–42, powered by LDO channel 4)
+is mounted at `/sdcard` after Wi-Fi comes up and used for:
+
+| Path | Purpose |
+|---|---|
+| `/sdcard/loci/backlog/<captured_ms>.jpg` | frames captured while the host or Wi-Fi was unreachable (1 fps); uploaded oldest-first with `X-Backlog`/`X-Captured-Ms` once the host answers again, so the memory has no gap |
+| `/sdcard/loci/memory.json`, `memory.pcm`, `memory.rev` | the host's remembered objects and a spoken summary, refreshed when the host's `memory_rev` changes; the button plays the summary when the host cannot be reached |
+| `/sdcard/loci/offline.pcm` | fixed prompt fetched once from the host |
+| `/sdcard/loci/frames/<ms>.jpg` + `.json` | every 10th live frame with the host's detections (dataset for a custom detector) |
+| `/sdcard/loci/voice/<ms>.wav` | push-to-talk recordings |
+
+Two things the P4 needs for this to work, both in `sdkconfig.defaults`: `CONFIG_VFS_MAX_COUNT=15`
+(esp_video registers every `/dev/video*` node with the VFS and the default table of 8 is full, so the
+card's `esp_vfs_fat_register` fails with `ESP_ERR_NO_MEM`), and the card is attached by hand to the
+SDMMC controller that ESP-Hosted already created for the C6 on slot 1 (`storage.c`): a second
+`sdmmc_host_init()` returns `ESP_ERR_NOT_FOUND` on IDF 6.1 and the all-in-one mount helper gives up.
+
+A 64 GB card arrives formatted as exFAT, which IDF's FatFs cannot read. The firmware reports
+"card has no FAT filesystem"; build with `-DLOCI_SD_FORMAT_IF_NEEDED=1` once (it formats the card as
+FAT32, erasing it) or format it on a computer. Console: `sd` (card info), `objects` (cached memory),
+`offline` (play the cached summary).
+
 ## Tuning (`main/board_p4_nano.h`, overridable with `-D`)
 
 | Macro | Default | Meaning |

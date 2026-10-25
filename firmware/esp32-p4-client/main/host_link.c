@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -20,6 +21,26 @@ static char s_base[128];
 static char s_device[32];
 static uint32_t s_clips;
 static char s_resp[4096];  // host replies are small, flat JSON
+static int64_t s_clock_offset_ms;  // host Unix ms - esp_timer ms, from the last frame reply
+static bool s_clock_synced;
+static int s_failures;  // consecutive failed frame posts
+static int s_frame_timeout_ms = 8000;
+
+static int64_t json_int64(const char *body, const char *key) {
+  char needle[48];
+  snprintf(needle, sizeof(needle), "\"%s\":", key);
+  const char *p = strstr(body, needle);
+  if (!p) return 0;
+  return atoll(p + strlen(needle));
+}
+
+int64_t host_now_ms(void) {
+  return s_clock_synced ? esp_timer_get_time() / 1000 + s_clock_offset_ms : 0;
+}
+const char *host_last_reply(void) { return s_resp; }
+const char *host_device_id(void) { return s_device; }
+bool host_reachable(void) { return s_failures < 2; }
+void host_set_frame_timeout_ms(int ms) { s_frame_timeout_ms = ms; }
 
 // --- tiny JSON peeking (the host keeps replies flat so this is enough) ---------------------
 static int json_int(const char *body, const char *key, int fallback) {
@@ -115,9 +136,14 @@ void host_link_init(const char *base_url, const char *device_id) {
 }
 
 esp_err_t host_post_frame(const uint8_t *jpeg, size_t len, uint32_t seq, host_frame_result_t *out) {
+  return host_post_frame_ex(jpeg, len, seq, 0, false, out);
+}
+
+esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int64_t captured_ms, bool backlog,
+                             host_frame_result_t *out) {
   char url[224], hdr[32];
   snprintf(url, sizeof(url), "%s/api/esp32/frame?device=%s&seq=%lu", s_base, s_device, (unsigned long)seq);
-  esp_http_client_handle_t c = client_new(url, HTTP_METHOD_POST, 8000);
+  esp_http_client_handle_t c = client_new(url, HTTP_METHOD_POST, s_frame_timeout_ms);
   if (!c) return ESP_ERR_NO_MEM;
   esp_http_client_set_header(c, "Content-Type", "image/jpeg");
   esp_http_client_set_header(c, "X-Device-Id", s_device);
@@ -125,19 +151,91 @@ esp_err_t host_post_frame(const uint8_t *jpeg, size_t len, uint32_t seq, host_fr
   esp_http_client_set_header(c, "X-Device-Ms", hdr);
   snprintf(hdr, sizeof(hdr), "%d", wifi_link_rssi());
   esp_http_client_set_header(c, "X-Rssi", hdr);
+  if (backlog) {
+    esp_http_client_set_header(c, "X-Backlog", "1");
+    if (captured_ms > 0) {
+      snprintf(hdr, sizeof(hdr), "%lld", (long long)captured_ms);
+      esp_http_client_set_header(c, "X-Captured-Ms", hdr);
+    }
+  }
 
   int status = exchange(c, jpeg, len);
   esp_http_client_close(c);
   esp_http_client_cleanup(c);
   if (status != 200) {
+    s_failures++;
     ESP_LOGW(TAG, "frame #%lu -> HTTP %d %s", (unsigned long)seq, status, status > 0 ? s_resp : "");
     return ESP_FAIL;
   }
+  s_failures = 0;
   memset(out, 0, sizeof(*out));
   out->dropped = json_int(s_resp, "dropped", 0) == 1;
   out->audio_pending = json_int(s_resp, "audio_pending", 0);
   out->next_ms = json_int(s_resp, "next_ms", 0);
   json_array(s_resp, "labels", out->labels, sizeof(out->labels));
+  json_string(s_resp, "memory_rev", out->memory_rev, sizeof(out->memory_rev));
+  int64_t now = json_int64(s_resp, "now_ms");
+  if (now > 1000000000000LL) {
+    s_clock_offset_ms = now - esp_timer_get_time() / 1000;
+    s_clock_synced = true;
+  }
+  return ESP_OK;
+}
+
+esp_err_t host_fetch_file(const char *path_and_query, const char *dest_path, size_t *bytes_out) {
+  char url[256], tmp[128];
+  snprintf(url, sizeof(url), "%s%s", s_base, path_and_query);
+  snprintf(tmp, sizeof(tmp), "%s.part", dest_path);
+  esp_http_client_handle_t c = client_new(url, HTTP_METHOD_GET, 30000);
+  if (!c) return ESP_ERR_NO_MEM;
+  esp_err_t err = esp_http_client_open(c, 0);
+  if (err != ESP_OK) {
+    esp_http_client_cleanup(c);
+    return err;
+  }
+  esp_http_client_fetch_headers(c);
+  int status = esp_http_client_get_status_code(c);
+  if (status != 200) {
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    return status == 204 ? ESP_ERR_NOT_FOUND : ESP_FAIL;
+  }
+  FILE *f = fopen(tmp, "wb");
+  if (!f) {
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    return ESP_FAIL;
+  }
+  static uint8_t *buf;
+  if (!buf) buf = heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t total = 0;
+  bool ok = true;
+  for (;;) {
+    int n = esp_http_client_read(c, (char *)buf, 4096);
+    if (n < 0) {
+      ok = false;
+      break;
+    }
+    if (n == 0) break;
+    if (fwrite(buf, 1, (size_t)n, f) != (size_t)n) {
+      ok = false;
+      break;
+    }
+    total += (size_t)n;
+  }
+  fclose(f);
+  esp_http_client_close(c);
+  esp_http_client_cleanup(c);
+  if (!ok || total == 0) {
+    unlink(tmp);
+    return ESP_FAIL;
+  }
+  unlink(dest_path);
+  if (rename(tmp, dest_path) != 0) {
+    unlink(tmp);
+    return ESP_FAIL;
+  }
+  if (bytes_out) *bytes_out = total;
   return ESP_OK;
 }
 

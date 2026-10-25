@@ -1,0 +1,10 @@
+## LOCI ESP32-P4 thin client: camera + codec + hosted Wi-Fi
+dependencies:
+  idf: ">=5.4"
+  # MIPI-CSI camera pipeline (V4L2-style devices, ISP, hardware JPEG M2M encoder) and sensor drivers
+  espressif/esp_video: "2.1.0"
+  # Wi-Fi on the ESP32-C6 companion, reached over SDIO
+  espressif/esp_wifi_remote: "*"
+  espressif/esp_hosted: "~2.12.8"
+  # ES8311 codec (speaker through the NS4150B amp, onboard microphone)
+  espressif/esp_codec_dev: "~1.5"

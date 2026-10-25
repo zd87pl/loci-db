@@ -44,8 +44,14 @@ Host modules (all new, nothing in the shared pipeline modified):
 | `demo_spatial/tools/esp32_fake_board.py` | A laptop pretending to be the board (image/webcam → frames, plays answers with `afplay`). |
 | `demo_spatial/run_esp32_demo.sh` | Starts the host on port 8002 with offline-friendly defaults. |
 
-Firmware: `firmware/esp32-cam-client/` (PlatformIO, Arduino-ESP32, `esp32-camera`, legacy I2S driver).
-Its README has the pin maps, build and flash steps.
+Firmware, two flavours speaking the same protocol:
+
+| Project | Boards | Stack |
+|---|---|---|
+| `firmware/esp32-p4-client/` | **Waveshare ESP32-P4-NANO** (the board on the desk): MIPI-CSI OV5647, ES8311 codec + NS4150B speaker, onboard mic, Wi-Fi via an ESP32-C6 over SDIO | ESP-IDF ≥ 5.4: `esp_video` (ISP + hardware JPEG), `esp_codec_dev`, `esp_wifi_remote`/`esp_hosted`, `esp_http_client` |
+| `firmware/esp32-cam-client/` | XIAO ESP32S3 Sense, AI-Thinker ESP32-CAM, Freenove ESP32-S3 CAM (DVP OV2640, I2S amplifier, optional PDM mic) | PlatformIO, Arduino-ESP32, `esp32-camera`, legacy I2S driver |
+
+Each README has the pin map, build and flash steps.
 
 ### Where observations live
 

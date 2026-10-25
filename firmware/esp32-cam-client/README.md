@@ -121,9 +121,11 @@ PDM microphone uses I2S0 and the speaker I2S1.
 
 ## Board on the desk
 
-At the time of writing the board on the Mac's desk did **not** enumerate over USB (no
-`/dev/cu.usb*`; `ioreg -p IOUSB` listed only the dock, a LAN adapter and a DisplayPort cable),
-so it has not been identified or flashed yet. Discovery checklist, in order:
+Resolved on 2026-10-25: the board is a **Waveshare ESP32-P4-NANO** (ESP32-P4 rev v1.3, CH343
+USB-UART, MIPI-CSI camera, ES8311 codec, ESP32-C6 for Wi-Fi), which this Arduino project cannot
+target. Its firmware lives in [`../esp32-p4-client`](../esp32-p4-client/README.md), together with
+the captured original banner and the verified pin map. The checklist below is what found that out
+and still applies to any new board:
 
 ```bash
 ls /dev/cu.usb*                                   # a data cable shows cu.usbmodem* (native USB) or cu.usbserial* (CP210x/CH34x)

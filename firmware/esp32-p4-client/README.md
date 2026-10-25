@@ -1,0 +1,96 @@
+# LOCI thin client for the Waveshare ESP32-P4-NANO
+
+The board on the desk turned out to be an **ESP32-P4**, not an ESP32-S3: the MIPI-CSI camera, the
+ES8311 codec and the Wi-Fi-over-SDIO companion chip need ESP-IDF rather than the Arduino sketch in
+`../esp32-cam-client` (which stays for XIAO / ESP32-CAM / Freenove boards). This project does the
+same job with the same host protocol (`docs/ESP32_THIN_CLIENT_DEMO.md`, section 2):
+
+* camera (OV5647, MIPI-CSI 2-lane) → ISP → **hardware JPEG** → `POST /api/esp32/frame`
+* `GET /api/esp32/audio/next` → 16 kHz mono PCM16 → **ES8311 + NS4150B** speaker
+* BOOT button held → onboard mic → `POST /api/esp32/voice` → answer plays back
+* serial console: `status | beep | audio | ask <q> | say <text> | fps <n> | vol <0-100>`
+
+## Board facts (discovered 2026-10-25)
+
+| Item | Value |
+|---|---|
+| USB | CH343 USB-UART bridge (`USB Single Serial`, VID 0x1A86 PID 0x55D3) → `/dev/cu.usbmodem5ABA0768111`; native USB Serial/JTAG is not available on this chip revision |
+| Chip | ESP32-P4 rev **v1.3**, dual core + LP core, 40 MHz crystal, MAC `80:f1:b2:d0:83:d5` |
+| Memory | 16 MB QIO flash at 80 MHz, 32 MB hex PSRAM at 200 MHz |
+| Wi-Fi / BT | ESP32-C6-MINI-1 over SDIO (slot 1: CLK 18, CMD 19, D0 14, D1 15, D2 16, D3 17), slave reset GPIO54, ESP-Hosted |
+| Audio | ES8311 at I2C 0x18; I2S0 MCLK 13 / BCLK 12 / WS 10 / DOUT 9 / DIN 11; NS4150B PA enable GPIO53 (active high); MX1.25 2-pin speaker header (8 Ω 2 W); onboard microphone |
+| I2C | SDA GPIO7, SCL GPIO8 (shared by codec, camera SCCB, touch) |
+| Camera | MIPI-CSI, 2 lanes; OV5647 default format 800×800 RAW8 @ 50 fps (menuconfig) |
+| Button | BOOT on strapping GPIO35 (used as push-to-talk) |
+| Original firmware | `esp_brookesia_demo` v1.0.1, ESP-IDF v5.4, compiled 2025-05-27, with a Waveshare 10.1" DSI panel driver (JD9365) that failed on I2C because no display is attached |
+
+Original banner excerpt (captured before flashing):
+
+```
+ESP-ROM:esp32p4-eco2-20240710
+rst:0x1 (POWERON),boot:0x30f (SPI_FAST_FLASH_BOOT)
+I (25) boot: ESP-IDF v5.4 2nd stage bootloader
+I (27) boot: chip revision: v1.3
+I (44) boot.esp32p4: SPI Flash Size : 16MB
+I esp_psram: Found 32MB PSRAM device
+I (1628) app_init: Project name:     esp_brookesia_demo
+I (1633) app_init: App version:      1.0.1
+I (1745) H_API: ESP-Hosted starting. ...
+I (1904) ES8311: Work in Slave mode
+I (1984) ESP32_P4_EV: Install Waveshare 10.1-DSI-TOUCH-A or 101M-8001280-IPS-CT-K LCD control panel
+E (2003) i2c.master: I2C transaction unexpected nack detected
+```
+
+## Build and flash
+
+Requirements: ESP-IDF **5.4 or newer** with the `esp32p4` target installed (this Mac has v6.1 at
+`~/esp/esp-idf`). Components come from the registry on the first build (`esp_video`,
+`esp_cam_sensor`, `esp_wifi_remote`, `esp_hosted` 2.12.x, `esp_codec_dev`).
+
+```bash
+cd firmware/esp32-p4-client
+cp main/secrets.h.example main/secrets.h       # WIFI_SSID, WIFI_PASS, LOCI_HOST=http://<host-ip>:8002
+. ~/esp/esp-idf/export.sh
+idf.py set-target esp32p4
+idf.py build
+idf.py -p /dev/cu.usbmodem5ABA0768111 flash monitor   # ctrl-] leaves the monitor
+```
+
+`main/secrets.h` is git-ignored. Never commit it.
+
+`esp_hosted` is pinned to 2.12.x on purpose: the 3.x line expects Wi-Fi headers newer than the
+IDF snapshot on this Mac, and the C6 on the board shipped with a 2.x slave.
+
+## What you should see
+
+```
+I (..) loci: === LOCI thin client v0.2.0-p4 on Waveshare ESP32-P4-NANO (ESP32-P4 rev v1.3, 2 cores) ===
+I (..) audio: ES8311 ready: 16000 Hz mono, volume 75%, mic gain 36 dB, PA on GPIO53
+I (..) camera: /dev/video0: driver MIPI-CSI, card OV5647 ...
+I (..) camera: capture 800x800, pixel format RGBP, JPEG quality 80
+I (..) wifi: got ip 192.168.x.y
+I (..) loci: [frame] #1 800x800 61234 B in 180 ms -> "cup","laptop"
+I (..) host: played 99200 bytes (3.1 s) in 3200 ms
+```
+
+Two rising beeps at boot mean the codec and amplifier work; a third beep means Wi-Fi is up.
+
+## Tuning (`main/board_p4_nano.h`, overridable with `-D`)
+
+| Macro | Default | Meaning |
+|---|---|---|
+| `LOCI_FPS` | 2 | Frames per second the board aims for; the host's `next_ms` can slow it |
+| `LOCI_JPEG_QUALITY` | 80 | Hardware encoder quality (1–100) |
+| `LOCI_SPK_VOLUME` | 75 | Codec output volume in percent |
+| `LOCI_MIC_GAIN_DB` | 36 | Microphone analog gain |
+| `LOCI_PTT_MAX_S` | 8 | Longest push-to-talk clip (PSRAM) |
+| camera format | 800×800 RAW8 | `idf.py menuconfig` → Camera sensor → OV5647 → default format (800×640, 800×1280, 1280×960, 1920×1080) |
+
+## Troubleshooting
+
+* **`esp_video_init failed`** — camera ribbon not seated or a sensor other than OV5647: enable it
+  under `Component config → Camera sensor configuration` (SC2336 is the other one Waveshare ships).
+* **`ES8311 not found on I2C 0x18`** — I2C pull-ups or a hung bus; power-cycle the board.
+* **No IP / `esp_wifi_init` error** — the C6 slave firmware must speak ESP-Hosted 2.x; the log prints
+  the slave's version at start. Reset GPIO54 is pulsed on every boot (`HOST_CP_RESET_STRATEGY_ALWAYS`).
+* **Image upside down** — rotate on the host with `LOCI_ESP32_ROTATE=180` (no sensor flip is wired yet).

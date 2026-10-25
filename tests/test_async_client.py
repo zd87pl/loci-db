@@ -125,7 +125,34 @@ async def test_summary_collection_has_no_hilbert_indexes(async_client, mock_asyn
     field_names = [
         c.kwargs["field_name"] for c in mock_async_qdrant.create_payload_index.call_args_list
     ]
-    assert sorted(field_names) == ["scale_level", "scene_id", "timestamp_ms"]
+    assert not any(name.startswith("hilbert_r") for name in field_names)
+    assert sorted(field_names) == [
+        "confidence",
+        "scale_level",
+        "scene_id",
+        "timestamp_ms",
+        "x",
+        "y",
+        "z",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("which", ["data", "summary"])
+async def test_creates_exact_filter_indexes(async_client, mock_async_qdrant, which):
+    """x/y/z/confidence get FLOAT indexes: they are Range-filtered before top-k."""
+    from qdrant_client.models import PayloadSchemaType
+
+    if which == "data":
+        await async_client._ensure_data_collection()
+    else:
+        await async_client._ensure_summary_collection()
+    indexed_fields = {
+        call.kwargs["field_name"]: call.kwargs["field_schema"]
+        for call in mock_async_qdrant.create_payload_index.call_args_list
+    }
+    for field in ("x", "y", "z", "confidence"):
+        assert indexed_fields[field] == PayloadSchemaType.FLOAT
 
 
 # ---------------------------------------------------------------------------
@@ -516,19 +543,83 @@ async def test_missing_summary_collection_reprobed_until_it_appears(
 
 
 @pytest.mark.asyncio
-async def test_search_failure_logged_at_warning(async_client, mock_async_qdrant, caplog):
-    import logging
-
+async def test_search_failure_propagates(async_client, mock_async_qdrant):
+    """Backend failures propagate instead of degrading into empty results."""
     await async_client.insert(_make_state(timestamp_ms=3000))
     async_client._collection_ready[async_client._summary_collection] = True
     mock_async_qdrant.query_points = AsyncMock(side_effect=RuntimeError("search down"))
 
-    with caplog.at_level(logging.WARNING, logger="loci.async_client"):
-        results = await async_client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
+    with pytest.raises(RuntimeError, match="search down"):
+        await async_client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
 
-    assert results == []
-    assert any("search down" in rec.message for rec in caplog.records)
-    assert any("All 2 collection searches failed" in rec.message for rec in caplog.records)
+
+@pytest.mark.asyncio
+async def test_partial_search_failure_propagates(async_client, mock_async_qdrant):
+    """One failing collection search fails the query; no partial results."""
+    await async_client.insert(_make_state(timestamp_ms=3000))
+    async_client._collection_ready[async_client._summary_collection] = True
+
+    good = MagicMock()
+    good.points = []
+
+    async def _query_points(**kwargs):
+        if kwargs["collection_name"] == async_client._data_collection:
+            raise RuntimeError("search down")
+        return good
+
+    mock_async_qdrant.query_points = AsyncMock(side_effect=_query_points)
+
+    with pytest.raises(RuntimeError, match="search down"):
+        await async_client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
+
+
+@pytest.mark.asyncio
+async def test_missing_collection_mid_query_yields_empty_and_resets_cache(
+    async_client, mock_async_qdrant
+):
+    """A collection deleted after being cached as ready is not an error."""
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    async_client._collection_ready[async_client._data_collection] = True
+    mock_async_qdrant.query_points = AsyncMock(
+        side_effect=UnexpectedResponse(
+            status_code=404, reason_phrase="Not Found", content=b"", headers=httpx.Headers()
+        )
+    )
+
+    assert await async_client.query(vector=[1.0, 2.0, 3.0, 4.0]) == []
+    assert async_client._data_collection not in async_client._collection_ready
+
+
+@pytest.mark.asyncio
+async def test_probe_failure_propagates(mock_async_qdrant):
+    """A backend outage on the existence probe must not read as 'no data'."""
+    async_client = AsyncLociClient(qdrant_url="http://fake:6333", vector_size=4, max_retries=0)
+    mock_async_qdrant.get_collection = AsyncMock(side_effect=ConnectionError("unavailable"))
+
+    with pytest.raises(ConnectionError, match="unavailable"):
+        await async_client.query(vector=[1.0, 2.0, 3.0, 4.0])
+    assert mock_async_qdrant.get_collection.await_count == 1  # budget exhausted, no retry
+
+
+@pytest.mark.asyncio
+async def test_probe_transient_failure_is_retried(mock_async_qdrant):
+    """The existence probe honours the retry policy like every other call."""
+    async_client = AsyncLociClient(
+        qdrant_url="http://fake:6333", vector_size=4, max_retries=2, retry_backoff=0.0
+    )
+    probes: list[str] = []
+
+    async def flaky_probe(name):
+        probes.append(name)
+        if len(probes) == 1:
+            raise ConnectionError("blip")
+        return MagicMock()
+
+    mock_async_qdrant.get_collection = AsyncMock(side_effect=flaky_probe)
+
+    assert await async_client.query(vector=[1.0, 2.0, 3.0, 4.0]) == []
+    assert probes[:2] == [async_client._data_collection, async_client._data_collection]
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,10 @@ Score formula::
 
     score = raw_similarity * exp(-lambda_ * age_ms)
 
+For the euclidean metric the raw score is a negative distance, so the
+similarity fed to the decay is ``1 / (1 + distance)`` (see
+:func:`apply_decay`).
+
 ``lambda_`` is expressed per millisecond. Because that unit is easy to
 misjudge (1e-4/ms is a ~6.9 second half-life), prefer deriving it from a
 half-life with :func:`lambda_from_half_life`. The library default is
@@ -63,6 +67,8 @@ def apply_decay(
     results: list[dict],
     now_ms: int,
     lambda_: float = DEFAULT_DECAY_LAMBDA,
+    *,
+    distance: str = "cosine",
 ) -> list[dict]:
     """Re-rank a list of scored results using temporal decay.
 
@@ -75,12 +81,21 @@ def apply_decay(
         results: Mutable list of result dicts.
         now_ms: Current unix timestamp in milliseconds.
         lambda_: Decay rate per millisecond.
+        distance: Distance metric the raw scores came from.  Euclidean raw
+            scores are *negative distances* (higher-is-better convention);
+            multiplying a negative score by the decay factor would make
+            older hits *less* negative and rank them higher, so for
+            ``"euclidean"`` the decayed score is computed from the bounded
+            similarity ``1 / (1 + distance)`` instead.  Raw ``"score"``
+            values are never modified.
 
     Returns:
         The same list, sorted by decayed score descending.
     """
     for r in results:
         age = max(0.0, now_ms - r["timestamp_ms"])
-        r["decayed_score"] = decay_score(r["score"], age, lambda_)
+        # Euclidean: score == -distance, so 1 / (1 - score) == 1 / (1 + distance).
+        similarity = 1.0 / (1.0 - r["score"]) if distance == "euclidean" else r["score"]
+        r["decayed_score"] = decay_score(similarity, age, lambda_)
     results.sort(key=lambda r: (r["decayed_score"], r["score"]), reverse=True)
     return results

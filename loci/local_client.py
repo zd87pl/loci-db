@@ -31,7 +31,7 @@ from loci.payload_filters import extra_filter_to_memory
 from loci.retrieval.predict import PredictRetrieveResult
 from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import AdaptiveResolution
-from loci.spatial.filtering import exact_payload_match
+from loci.spatial.filtering import exact_payload_match, exact_payload_ranges
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.consolidation import (
@@ -50,6 +50,9 @@ from loci.temporal.sharding import epoch_id
 logger = logging.getLogger(__name__)
 
 _EXACT_FILTER_OVERFETCH = 3
+# Payload fields that receive exact range conditions before backend top-k
+# selection (indexed on both collections, mirroring the Qdrant clients).
+_EXACT_RANGE_FIELDS = ("x", "y", "z", "confidence")
 
 
 @dataclass
@@ -185,7 +188,7 @@ class LocalLociClient:
         if self._summary_ready:
             return
         # Summaries carry no Hilbert payload; spatial queries reach them
-        # via the exact post-filter on x/y/z.
+        # via the exact x/y/z range conditions (plus the final post-check).
         self._create_collection(self._summary_collection, hilbert_indices=False)
         self._summary_ready = True
 
@@ -197,6 +200,8 @@ class LocalLociClient:
         self._store.create_payload_index(name, "timestamp_ms")
         self._store.create_payload_index(name, "scale_level")
         self._store.create_payload_index(name, "scene_id")
+        for field in _EXACT_RANGE_FIELDS:
+            self._store.create_payload_index(name, field)
 
     # ------------------------------------------------------------------
     # Write
@@ -338,11 +343,18 @@ class LocalLociClient:
         Runs ONE search over the ``loci_data`` collection with
         must-conditions [timestamp Range (when a window or epoch
         restriction is given), Hilbert MatchAny (when spatial bounds are
-        given)], PLUS one search over ``loci_summary`` (vector + timestamp
-        Range only — summaries carry no Hilbert payload), then merges both
-        result sets before the exact post-filter and decay re-rank.
-        Summaries are always searched with the timestamp filter; when no
+        given), exact x/y/z range (when spatial bounds are given),
+        confidence range (when ``min_confidence`` is given)], PLUS one
+        search over ``loci_summary`` (the same conditions minus the Hilbert
+        MatchAny — summaries carry no Hilbert payload), then merges both
+        result sets before the exact post-check and decay re-rank.
+        Summaries are always searched with the same filter; when no
         summaries exist the extra search is a cheap in-process no-op.
+
+        The exact ranges are part of the backend filter *before* top-k
+        selection so a Hilbert cover holding more out-of-box points than
+        the overfetch budget cannot starve the result of qualifying points.
+        Store failures propagate (nothing is swallowed on the query path).
 
         Hilbert bucket selection: when the time window maps to a SINGLE
         epoch, the cover uses that epoch's normalised t-bounds (full
@@ -360,6 +372,12 @@ class LocalLociClient:
         """
         t_start = time.perf_counter()
         stats = QueryStats()
+
+        # Exact x/y/z/confidence Range conditions for the backend filter.
+        # The timestamp range is handled separately below because it is also
+        # intersected with the epoch restriction's envelope.
+        exact_ranges = exact_payload_ranges(spatial_bounds, time_window_ms, min_confidence)
+        exact_ranges.pop("timestamp_ms", None)
 
         if _epoch_ids is not None and not _epoch_ids:
             # Explicit empty epoch restriction (funnel dead-end): no results.
@@ -385,9 +403,12 @@ class LocalLociClient:
         base_filter: dict = {}
         if ts_lo is not None:
             base_filter["timestamp_ms"] = {"gte": ts_lo, "lte": ts_hi}
-        if min_confidence is not None:
-            base_filter["confidence"] = {"gte": min_confidence}
-        base_filter.update(extra_filter_to_memory(_extra_payload_filter))
+        # Exact ranges and extra predicates are conjoined per key: a
+        # same-key extra predicate narrows the range, never replaces it.
+        for key, bounds in exact_ranges.items():
+            _conjoin_filter(base_filter, key, bounds)
+        for key, condition in extra_filter_to_memory(_extra_payload_filter).items():
+            _conjoin_filter(base_filter, key, condition)
 
         all_results: list[dict] = []
 
@@ -440,7 +461,7 @@ class LocalLociClient:
 
         # Decay and re-rank
         now_ms = int(time.time() * 1000)
-        apply_decay(all_results, now_ms, self._decay_lambda)
+        apply_decay(all_results, now_ms, self._decay_lambda, distance=self._distance)
         stats.decay_applied = self._decay_lambda > 0
         all_results = all_results[:limit]
 
@@ -834,6 +855,33 @@ class LocalLociClient:
 # ------------------------------------------------------------------
 # Shared payload helpers
 # ------------------------------------------------------------------
+
+
+def _conjoin_filter(payload_filter: dict, key: str, condition: Any) -> None:
+    """AND *condition* into ``payload_filter[key]`` without dropping what is there.
+
+    MemoryStore filters hold one condition per key, so a range and another
+    predicate on the same key (an exact value, an ``any`` list, or another
+    range) are merged into a single dict that ``_matches`` evaluates
+    conjunctively: ``any`` lists are intersected and overlapping bounds
+    keep the tighter limit.
+    """
+    existing = payload_filter.get(key)
+    if existing is None:
+        payload_filter[key] = condition
+        return
+    left = existing if isinstance(existing, dict) else {"any": [existing]}
+    right = condition if isinstance(condition, dict) else {"any": [condition]}
+    merged = {**left, **right}
+    if "any" in left and "any" in right:
+        merged["any"] = [v for v in left["any"] if v in right["any"]]
+    for op in ("gte", "gt"):
+        if op in left and op in right:
+            merged[op] = max(left[op], right[op])
+    for op in ("lte", "lt"):
+        if op in left and op in right:
+            merged[op] = min(left[op], right[op])
+    payload_filter[key] = merged
 
 
 def _normalize_id(point_id: object) -> str:

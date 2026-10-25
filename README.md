@@ -165,17 +165,19 @@ first-class:
 ### 1. Multi-resolution Hilbert bucketing
 
 `(x, y, z, t)` is encoded on a 4D Hilbert curve at several resolutions (p = 4,
-8, 12). A spatial bounding box becomes a single integer pre-filter on the
-curve, followed by an exact payload post-filter as the authoritative geometric
-check, so there are no false negatives at box boundaries. With
-`adaptive=True`, dense regions are promoted to finer resolutions at query time.
+8, 12). A spatial bounding box becomes an integer pre-filter on the curve,
+combined in the same backend filter with exact coordinate, time and
+confidence range conditions so top-k is selected only among eligible points;
+an exact payload post-filter is the final geometric check, so there are no
+false negatives at box boundaries. With `adaptive=True`, dense regions are
+promoted to finer resolutions at query time.
 
 ```
          Naive Qdrant               LOCI
     ┌──────────────────┐     ┌──────────────────┐
     │ x_min ≤ x ≤ x_max│     │                  │
     │ y_min ≤ y ≤ y_max│ →   │ hilbert_r4 ∈ {…} │
-    │ z_min ≤ z ≤ z_max│     │  (single filter)  │
+    │ z_min ≤ z ≤ z_max│     │ + exact ranges   │
     └──────────────────┘     └──────────────────┘
 ```
 
@@ -372,6 +374,11 @@ adapter = GenericAdapter(expected_dim=512)
 ws = adapter.from_numpy(embedding, position, ts, scene_id)
 ```
 
+These helpers convert model outputs you already have into `WorldState`
+objects; they do not load or run a model. The V-JEPA 2 helper maps tubelet
+grid indices to normalised coordinates, not calibrated 3D positions, so your
+application defines and validates that mapping.
+
 See [docs/WORLD_MODEL_INTEGRATION.md](docs/WORLD_MODEL_INTEGRATION.md) for
 integration guides.
 
@@ -479,6 +486,7 @@ find it again.
 - [docs/WORLD_MODEL_INTEGRATION.md](docs/WORLD_MODEL_INTEGRATION.md): world-model integration guides
 - [docs/NOVELTY.md](docs/NOVELTY.md): novelty claims vs prior art
 - [docs/BENCHMARK_METHODOLOGY.md](docs/BENCHMARK_METHODOLOGY.md): benchmark replication guide
+- [docs/IMPLEMENTATION_READINESS.md](docs/IMPLEMENTATION_READINESS.md): pilot scope, evidence and delivery gates
 - [docs/RFC-0001-memory-for-world-models.md](docs/RFC-0001-memory-for-world-models.md): strategic direction
 
 ## Citation

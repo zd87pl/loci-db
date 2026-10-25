@@ -258,3 +258,103 @@ def test_local_client_late_insert_into_purged_range_still_works():
         client.insert(_state(11_000))
     kept = [p["payload"]["timestamp_ms"] for p in client.store.scroll("loci_data", limit=100)]
     assert sorted(kept) == [11_000]
+
+
+# ---------------------------------------------------------------------------
+# Qdrant clients: a failed purge never fails the insert and retries later
+# ---------------------------------------------------------------------------
+
+
+def _qdrant_kept(backend, collection: str = "loci_data") -> list[int]:
+    points, _ = backend.scroll(collection, limit=100)
+    return sorted(p.payload["timestamp_ms"] for p in points)
+
+
+def test_qdrant_client_failed_purge_keeps_points_and_retries_on_next_advance(caplog):
+    """Retention is cutoff-based over the single data collection: a failed
+    delete leaves the raw points in place (insert still succeeds, warning
+    logged) and the same purge runs again when maintenance next triggers."""
+    import logging
+
+    from qdrant_client import QdrantClient
+
+    from loci.client import LociClient
+
+    backend = QdrantClient(":memory:")
+    with patch("loci.client.QdrantClient", return_value=backend):
+        client = LociClient(
+            qdrant_url="http://unused",
+            vector_size=4,
+            epoch_size_ms=EPOCH_MS,
+            decay_lambda=0.0,
+            max_retries=0,
+            retention_policy=RetentionPolicy(max_epochs=1),
+        )
+    pin = lambda ts: patch("loci.client.time.time", return_value=ts / 1000.0)  # noqa: E731
+
+    with pin(1000):
+        client.insert(_state(1000))
+
+    real_delete = backend.delete
+    with (
+        patch.object(backend, "delete", side_effect=RuntimeError("backend down")),
+        caplog.at_level(logging.WARNING, logger="loci.client"),
+        pin(6100),
+    ):
+        state_id = client.insert(_state(6000))  # crosses into epoch 1: purge attempted
+    assert isinstance(state_id, str)
+    assert any("Retention purge failed" in rec.message for rec in caplog.records)
+    assert _qdrant_kept(backend) == [1000, 6000]  # nothing lost, nothing purged
+
+    backend.delete = real_delete
+    with pin(11_100):
+        client.insert(_state(11_000))  # next advance: the pending purge runs
+    assert _qdrant_kept(backend) == [11_000]
+    backend.close()
+
+
+@pytest.mark.asyncio
+async def test_async_qdrant_client_failed_purge_keeps_points_and_retries_on_next_advance(
+    caplog,
+):
+    import logging
+
+    from qdrant_client import AsyncQdrantClient
+
+    from loci.async_client import AsyncLociClient
+
+    backend = AsyncQdrantClient(":memory:")
+    with patch("loci.async_client.AsyncQdrantClient", return_value=backend):
+        client = AsyncLociClient(
+            qdrant_url="http://unused",
+            vector_size=4,
+            epoch_size_ms=EPOCH_MS,
+            decay_lambda=0.0,
+            max_retries=0,
+            retention_policy=RetentionPolicy(max_epochs=1),
+        )
+    pin = lambda ts: patch("loci.async_client.time.time", return_value=ts / 1000.0)  # noqa: E731
+
+    async def kept() -> list[int]:
+        points, _ = await backend.scroll("loci_data", limit=100)
+        return sorted(p.payload["timestamp_ms"] for p in points)
+
+    with pin(1000):
+        await client.insert(_state(1000))
+
+    real_delete = backend.delete
+    with (
+        patch.object(backend, "delete", side_effect=RuntimeError("backend down")),
+        caplog.at_level(logging.WARNING, logger="loci.async_client"),
+        pin(6100),
+    ):
+        state_id = await client.insert(_state(6000))
+    assert isinstance(state_id, str)
+    assert any("Retention purge failed" in rec.message for rec in caplog.records)
+    assert await kept() == [1000, 6000]
+
+    backend.delete = real_delete
+    with pin(11_100):
+        await client.insert(_state(11_000))
+    assert await kept() == [11_000]
+    await backend.close()

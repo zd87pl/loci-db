@@ -37,11 +37,14 @@ first use and constant for the lifetime of the deployment:
   | `timestamp_ms` | INTEGER   | Indexed temporal Range filter  |
   | `scale_level`  | KEYWORD   | Multi-scale funnel search      |
   | `scene_id`     | KEYWORD   | Causal chains and funnel narrowing |
+  | `x`, `y`, `z`  | FLOAT     | Exact geometric Range filter before top-k |
+  | `confidence`   | FLOAT     | Confidence threshold before top-k |
 
 - **`{prefix}loci_summary`** — consolidated summary states produced by
   episodic-to-semantic aging. Same indices **except** the Hilbert fields:
-  summaries carry no Hilbert payload, and spatial queries reach them through
-  the exact geometric post-filter on `x`/`y`/`z`.
+  summaries carry no Hilbert payload, so spatial queries reach them through
+  the exact `x`/`y`/`z` Range conditions (plus the geometric post-check)
+  rather than a bucket pre-filter.
 
 **Epochs are purely logical.** An epoch (`timestamp_ms // epoch_size_ms`) is
 the unit of consolidation granularity and of Hilbert t-normalisation — it is
@@ -80,8 +83,12 @@ space map to nearby indices on the 1D curve, making the integer set filter
 a good proxy for a spatial bounding box.
 
 Quantisation in `encode()` uses `round()`. Query-time expansion uses
-`floor()`/`ceil()` at the boundaries to guarantee no misses at grid edges, and
-an exact payload post-filter is the final source of truth for geometric bounds.
+`floor()`/`ceil()` at the boundaries to guarantee no misses at grid edges.
+Exact coordinate, time and confidence ranges are included in the backend
+filter **before** top-k selection, so the Hilbert bucket set only narrows the
+candidate scan and never decides eligibility; an exact payload post-check is
+the final verification. This bounds false negatives from bucketing, not ANN
+recall: candidate overfetch and ranking still need measurement.
 
 **Temporal** — `timestamp_ms // epoch_size_ms` determines the logical epoch,
 which fixes how `t` is normalised into `[0, 1]` for Hilbert encoding. A query
@@ -111,7 +118,10 @@ Range and scene filter so finer passes do not re-scan unrelated data. Always
 returns results at the finest available granularity.
 
 **temporal decay** — Re-ranks results using exponential decay:
-`score = similarity × exp(-λ × age_ms)`.  λ defaults to
+`decayed_score = similarity × exp(-λ × age_ms)` for cosine/dot scores. For
+Euclidean the raw `score` is `-distance` (higher is better) and
+`decayed_score = 1 / (1 + distance) × exp(-λ × age_ms)`, so aging cannot
+promote a farther match. λ defaults to
 `DEFAULT_DECAY_LAMBDA`, a **one-hour half-life**; derive custom rates from a
 half-life with `loci.temporal.decay.lambda_from_half_life()` rather than
 setting the per-millisecond `decay_lambda` directly.
@@ -153,9 +163,12 @@ query(vector, bounds, time_window)
   → time window → indexed timestamp_ms Range condition
   → single-epoch window: epoch-local 4D Hilbert cover
     multi-epoch or no window: spatial-only cover (t carried by the Range)
-  → search loci_data (Range + Hilbert MatchAny)
-    + search loci_summary (Range only, no Hilbert payload)
-    (async client runs both searches concurrently)
+  → search loci_data (timestamp Range + Hilbert MatchAny
+                      + exact x/y/z/confidence Range, before top-k)
+    + search loci_summary (timestamp Range + x/y/z/confidence Range,
+                           no Hilbert payload)
+    (async client runs both searches concurrently;
+     backend errors propagate after retries instead of yielding partial results)
   → merge → exact post-filter → apply temporal decay → re-rank
   → return WorldStates with vectors
 
@@ -171,8 +184,13 @@ predict_and_retrieve(context_vector, predictor_fn, horizon)
 On `insert()`, Loci automatically finds the most recent state in the
 same `scene_id` and links `prev_state_id` / `next_state_id`.  On
 `insert_batch()`, states are sorted by `(scene_id, timestamp_ms)` and
-linked within the batch.  This enables `get_trajectory()` to walk the
-causal chain forward and backward from any anchor state.
+linked within the batch, and the first state of each scene in the batch is
+linked to the latest predecessor already stored. `get_trajectory()` retrieves
+and time-sorts the anchor's scene rather than following the stored links, so
+it returns the chronological neighbourhood even where links are missing.
+Out-of-order and concurrent writers still need stronger linking guarantees
+before applications rely on `prev_state_id` / `next_state_id` as a
+consistent chain.
 
 ## Known Limitations and Planned Refactors
 
@@ -184,3 +202,7 @@ One structural issue is known and deliberately deferred; it is tracked in
    logic, so every behavioral fix must be applied three times and parity drifts.
    Planned fix: extract a shared core (query planning, filter construction,
    result assembly) with thin sync/async/local transport shells.
+
+Pilot readiness — ingestion data contracts, failure handling, live-Qdrant
+benchmarks against tuned baselines, and acceptance gates — is tracked
+separately in [docs/IMPLEMENTATION_READINESS.md](docs/IMPLEMENTATION_READINESS.md).

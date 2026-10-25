@@ -9,7 +9,16 @@ LOCI benchmarks compare four query methods against a brute-force ground truth to
 1. **Naive Qdrant** — Single collection, 3 independent float-range payload filters (x, y, z) + timestamp range + HNSW vector search.
 2. **LOCI r4** — Historical fixed-`r4` Hilbert baseline: single `MatchAny` integer pre-filter + timestamp range filter + exact payload post-filter + HNSW.
 3. **LOCI r4 + overlap** — Same as above with `overlap_factor=1.2` (20% expanded spatial search region to catch boundary points) before exact post-filtering.
-4. **LOCI current** — Mirrors the shipped query path: indexed timestamp-range filtering, epoch-local 4D Hilbert bounds for single-epoch windows (spatial-only cover otherwise), candidate overfetch, exact payload post-filtering, overlap-based Hilbert bucket expansion, and decay-weighted re-ranking before top-k truncation.
+4. **LOCI current** — A benchmark-local reimplementation of the shipped query strategy: indexed timestamp-range filtering, epoch-local 4D Hilbert bounds for single-epoch windows (spatial-only cover otherwise), candidate overfetch, exact payload post-filtering, overlap-based Hilbert bucket expansion, and decay-weighted re-ranking before top-k truncation.
+
+The `LOCI current` label does not guarantee parity with the public client: the
+script builds its own per-epoch collections and reimplements the query logic
+from the library's primitives (`HilbertIndex`, `apply_decay`,
+`exact_payload_match`). It does not use the bounded `loci_data`/`loci_summary`
+layout, and it does not include the exact coordinate/confidence range
+conditions that the public client now adds to the backend filter before
+top-k. Publication and pilot runs should exercise the public client directly
+(see the [evidence gate](#evidence-gate)).
 
 ## Dataset Generation
 
@@ -30,7 +39,10 @@ Ground truth for recall@k is computed via brute-force exact search:
 1. For each query vector, compute cosine similarity against ALL points in the dataset.
 2. Apply exact float-range spatial and temporal filters.
 3. Return top-k results sorted by similarity.
-4. Recall@k = |retrieved ∩ ground_truth| / k.
+4. Recall@k = |retrieved ∩ ground_truth| / |ground_truth|, where ground truth
+   holds up to k eligible records. The script scores a query with empty
+   ground truth as 1.0; report the empty-query frequency separately so that
+   convention cannot inflate the average.
 
 For the `LOCI current` row, the checked-in benchmark applies the same decay-weighted re-ranking as the shipped client before truncating to top-k, so its recall is measured against a decay-aware brute-force ranking.
 
@@ -81,10 +93,10 @@ test for the concept, not only as a performance benchmark.
 For each scenario and dataset size:
 - **Query latency:** avg, p50, p95, p99 (ms)
 - **Recall@10:** fraction of ground-truth top-10 retrieved
-- **QPS:** queries per second (1 / avg_latency)
+- **QPS estimate:** reciprocal of the mean serial latency (`1000 / avg_latency_ms`); not concurrent throughput
 - **Index build time:** seconds to insert all points
 
-The current script writes latency, recall, QPS, and insert-time metrics to `benchmarks/results/latest.json`. Memory usage and confidence intervals can be added for publication runs, but are not emitted by default in the checked-in script.
+The current script writes latency, recall, estimated QPS, and insert-time metrics to `benchmarks/results/latest.json`. Memory usage and confidence intervals can be added for publication runs, but are not emitted by default in the checked-in script.
 
 ## Statistical Validity
 
@@ -115,3 +127,13 @@ Our benchmark methodology follows the [ANN-Benchmarks](https://github.com/erikbe
 - Separation of build and query phases.
 
 The key difference is that we measure spatiotemporal filtering performance, which ANN-Benchmarks does not cover — their focus is pure vector search without payload filters.
+
+## Evidence Gate
+
+Report workloads where LOCI wins, ties, or loses against the strongest tuned
+baseline, and keep geometric eligibility, ANN recall, latency, operating cost,
+and user task benefit as separate outcomes. Before citing a number for a
+pilot or publication, run the public client (not the benchmark-local
+reimplementation) on live Qdrant with pinned versions, and follow
+[IMPLEMENTATION_READINESS.md](IMPLEMENTATION_READINESS.md) for the live
+deployment, real-predictor, and customer acceptance gates.

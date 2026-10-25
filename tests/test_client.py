@@ -180,7 +180,32 @@ class TestEnsureCollection:
         field_names = [
             c.kwargs["field_name"] for c in mock_qdrant.create_payload_index.call_args_list
         ]
-        assert field_names == ["timestamp_ms", "scale_level", "scene_id"]
+        assert not any(name.startswith("hilbert_r") for name in field_names)
+        assert field_names == [
+            "timestamp_ms",
+            "scale_level",
+            "scene_id",
+            "x",
+            "y",
+            "z",
+            "confidence",
+        ]
+
+    @pytest.mark.parametrize("which", ["data", "summary"])
+    def test_creates_exact_filter_indexes(self, client, mock_qdrant, which):
+        """x/y/z/confidence get FLOAT indexes: they are Range-filtered before top-k."""
+        from qdrant_client.models import PayloadSchemaType
+
+        if which == "data":
+            client._ensure_data_collection()
+        else:
+            client._ensure_summary_collection()
+        indexed_fields = {
+            call.kwargs["field_name"]: call.kwargs["field_schema"]
+            for call in mock_qdrant.create_payload_index.call_args_list
+        }
+        for field in ("x", "y", "z", "confidence"):
+            assert indexed_fields[field] == PayloadSchemaType.FLOAT
 
 
 # ---------------------------------------------------------------------------
@@ -693,8 +718,12 @@ class TestTrajectoryIdNormalisation:
 # ---------------------------------------------------------------------------
 
 
-class TestSearchFailureLogging:
-    def test_partial_search_failure_logged_at_warning(self, client, mock_qdrant, caplog):
+class TestSearchFailurePropagation:
+    """Backend failures on the query path propagate instead of degrading
+    into empty or partial results (a partial result is indistinguishable
+    from a complete one to the caller)."""
+
+    def test_partial_search_failure_propagates(self, client, mock_qdrant):
         client.insert(_make_state(timestamp_ms=3000))
         client._collection_ready[client._summary_collection] = True  # summary exists too
 
@@ -702,30 +731,56 @@ class TestSearchFailureLogging:
         good.points = []
         mock_qdrant.query_points.side_effect = [RuntimeError("search down"), good]
 
-        import logging
+        with pytest.raises(RuntimeError, match="search down"):
+            client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
 
-        with caplog.at_level(logging.WARNING, logger="loci.client"):
-            results = client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
-
-        assert results == []
-        assert any(
-            "loci_data" in rec.message and "search down" in rec.message for rec in caplog.records
-        )
-        # Only one of the two searches failed → no "all failed" summary.
-        assert not any("collection searches failed" in rec.message for rec in caplog.records)
-
-    def test_all_searches_failed_summary_warning(self, client, mock_qdrant, caplog):
+    def test_search_failure_propagates(self, client, mock_qdrant):
         client.insert(_make_state(timestamp_ms=3000))
         client._collection_ready[client._summary_collection] = True
         mock_qdrant.query_points.side_effect = RuntimeError("search down")
 
-        import logging
+        with pytest.raises(RuntimeError, match="search down"):
+            client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
 
-        with caplog.at_level(logging.WARNING, logger="loci.client"):
-            results = client.query(vector=[1.0, 2.0, 3.0, 4.0], time_window_ms=(0, 9_999))
+    def test_missing_collection_mid_query_yields_empty_and_resets_cache(self, client, mock_qdrant):
+        """A collection deleted after being cached as ready is not an error."""
+        import httpx
+        from qdrant_client.http.exceptions import UnexpectedResponse
 
-        assert results == []
-        assert any("All 2 collection searches failed" in rec.message for rec in caplog.records)
+        client._collection_ready[client._data_collection] = True
+        mock_qdrant.query_points.side_effect = UnexpectedResponse(
+            status_code=404, reason_phrase="Not Found", content=b"", headers=httpx.Headers()
+        )
+
+        assert client.query(vector=[1.0, 2.0, 3.0, 4.0]) == []
+        assert client._data_collection not in client._collection_ready
+
+    def test_probe_failure_propagates(self, mock_qdrant):
+        """A backend outage on the existence probe must not read as 'no data'."""
+        client = LociClient(qdrant_url="http://fake:6333", vector_size=4, max_retries=0)
+        mock_qdrant.get_collection.side_effect = ConnectionError("unavailable")
+
+        with pytest.raises(ConnectionError, match="unavailable"):
+            client.query(vector=[1.0, 2.0, 3.0, 4.0])
+        assert mock_qdrant.get_collection.call_count == 1  # budget exhausted, no retry
+
+    def test_probe_transient_failure_is_retried(self, mock_qdrant):
+        """The existence probe honours the retry policy like every other call."""
+        client = LociClient(
+            qdrant_url="http://fake:6333", vector_size=4, max_retries=2, retry_backoff=0.0
+        )
+        probes: list[str] = []
+
+        def flaky_probe(name):
+            probes.append(name)
+            if len(probes) == 1:
+                raise ConnectionError("blip")
+            return MagicMock()
+
+        mock_qdrant.get_collection.side_effect = flaky_probe
+
+        assert client.query(vector=[1.0, 2.0, 3.0, 4.0]) == []
+        assert probes[:2] == [client._data_collection, client._data_collection]
 
 
 # ---------------------------------------------------------------------------

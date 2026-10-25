@@ -276,6 +276,7 @@ def test_migrate_copies_points_verbatim(monkeypatch, capsys):
     # Data collection gets the full index set; summary skips Hilbert fields.
     data_fields = {f for col, f in fake.index_calls if col == "loci_data"}
     summary_fields = {f for col, f in fake.index_calls if col == "loci_summary"}
+    exact_range_fields = {"x", "y", "z", "confidence"}  # FLOAT, both collections
     assert data_fields == {
         "hilbert_r4",
         "hilbert_r8",
@@ -283,8 +284,9 @@ def test_migrate_copies_points_verbatim(monkeypatch, capsys):
         "timestamp_ms",
         "scene_id",
         "scale_level",
+        *exact_range_fields,
     }
-    assert summary_fields == {"timestamp_ms", "scene_id", "scale_level"}
+    assert summary_fields == {"timestamp_ms", "scene_id", "scale_level", *exact_range_fields}
 
     # Without --delete-old the legacy collections survive, other tenants too.
     assert fake.deleted == []

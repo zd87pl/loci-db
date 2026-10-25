@@ -38,7 +38,8 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   legacy per-epoch Qdrant deployment to the bounded layout. Discovers legacy
   collections under a `--prefix` (other tenants untouched), copies every point
   verbatim (same ids, vectors, payloads) into `{prefix}loci_data` /
-  `{prefix}loci_summary`, supports `--dry-run` (plan only), and only drops
+  `{prefix}loci_summary` (created with the same payload indexes the clients
+  create), supports `--dry-run` (plan only), and only drops
   legacy collections with `--delete-old` after a per-collection point-count
   verification. Safe to re-run: already-copied points are skipped.
 - **Memory consolidation** (RFC-0001 R1, all three clients): a
@@ -57,13 +58,17 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Correctness fixes
 - Temporal decay now defaults to a **one-hour half-life** (`DEFAULT_DECAY_LAMBDA`, derived via `lambda_from_half_life()`); the decay exponent is clamped so very old results degrade to similarity-order instead of collapsing to a 0.0 tie. Derive custom rates from a half-life rather than setting the per-millisecond `decay_lambda` directly.
 - `predict_and_retrieve` novelty is now computed on an absolute scale: 0 = strong historical analog, 1 = no analog, independent of the rest of the result batch.
-- Euclidean distance scores are normalized to a bounded similarity before decay re-ranking, so re-ranking and novelty behave consistently across distance metrics.
+- Consistent nearest-first Euclidean ranking across the sync, async and local clients: the raw `score` is `-distance` (higher is better) and `decayed_score` is `1 / (1 + distance) × exp(-λ × age)`, so temporal decay can no longer promote a farther, older match (previously the negative raw score was multiplied by the recency weight, which inverted the order), and re-ranking and novelty behave consistently across distance metrics.
+- Exact spatial, temporal and confidence predicates (`x`/`y`/`z`, `timestamp_ms` and `confidence` Range conditions) are part of the backend filter on both `loci_data` and `loci_summary` **before** top-k selection, so filtered queries are no longer avoidably empty when ineligible decoys share a Hilbert bucket; the geometric post-filter remains the final check. New collections get FLOAT payload indexes on `x`, `y`, `z` and `confidence`.
+- Query backend failures now propagate (once the retry policy gives up) instead of being logged and folded into a partial or empty result set. The one tolerated case is a collection deleted out from under a client: the query returns an empty result and the client's readiness cache is reset so the collection is re-probed on the next call.
 - Scroll pagination advances correctly across pages in multi-page scans.
 - `min_confidence` filtering overfetches candidates so filtered queries can still fill the requested `limit`.
 - LRU eviction (`max_cache_size`, default 4096) for `AdaptiveResolution._resolution_cache`.
 
 ### Cloud API
 - State metadata now survives the insert → query round-trip.
+- `scale_level`, `confidence` and the causal links (`prev_state_id` / `next_state_id`) round-trip through `/insert` and `/query`.
+- `/query` accepts `min_confidence`, and both SDKs (`LociClient` in cloud mode and `AsyncLociClient`) forward it instead of raising.
 - Retention cache correctness fix.
 - Stricter namespace validation.
 
@@ -92,6 +97,12 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ARCHITECTURE.md`: documents all three clients (incl. `LocalLociClient`/`MemoryStore`), the actual `predict_and_retrieve` default (searches all stored history; explicit window optional), and a new "Known Limitations and Planned Refactors" section.
 - `SECURITY.md` points to GitHub private vulnerability reporting; `docs/WORLD_MODEL_INTEGRATION.md` fixes the install name (`loci-stdb`); `NEXT_STEPS.md` (now `docs/NEXT_STEPS.md`) and `ROADMAP.md` refreshed with the deferred refactors.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `CHANGELOG.md`, `SECURITY.md` added for open-source readiness.
+- `docs/IMPLEMENTATION_READINESS.md` (new, linked from `ROADMAP.md`): pilot scope, ingestion data contracts, reliability checks, live-Qdrant benchmark protocol and acceptance gates.
+
+### Upgrade notes
+- **Euclidean scores change scale.** Before 0.4.0 the Qdrant clients returned Qdrant's raw Euclidean distance as `score` (lower was better, and decay multiplied that raw value) while the local client returned `-distance`. All three clients now return `score = -distance` (higher is better) and `decayed_score = 1 / (1 + distance) × recency` in `(0, 1]`. Re-tune any thresholds on `score` or `decayed_score` for `distance="euclidean"`.
+- **FLOAT payload indexes are recommended, not required.** New `{prefix}loci_data` / `{prefix}loci_summary` collections are created with FLOAT indexes on `x`, `y`, `z` and `confidence`. `loci migrate-layout` creates them on the target collections it creates (an existing target is left as is). Collections created before this change keep returning correct results because Qdrant evaluates Range conditions on unindexed payload fields by scanning; add the indexes with `create_payload_index(collection, field, PayloadSchemaType.FLOAT)` for both collections before benchmarking (snippet in `docs/IMPLEMENTATION_READINESS.md`).
+- **Deploy the cloud API before or together with the updated SDK.** Older servers silently ignore `min_confidence`, `prev_state_id` and `next_state_id` in requests and omit them from responses.
 
 ---
 

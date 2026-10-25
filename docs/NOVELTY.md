@@ -26,7 +26,7 @@
 
 **What exists:** SpatCode (WWW 2026) uses RoPE-style soft encoding that embeds coordinates directly into the embedding space for fuzzy/semantic spatial matching. Hard-filtering approaches (including naive Hilbert bucketing) suffer from boundary recall degradation.
 
-**What LOCI adds:** Points are encoded at three Hilbert resolutions (p=4, 8, 12). Queries use an integer Hilbert pre-filter with overlap_factor (default 1.2 = 20% expansion), then apply exact coordinate post-filtering. The default query path starts at the coarsest resolution, while `adaptive=True` can promote denser regions to finer stored resolutions.
+**What LOCI adds:** Points are encoded at three Hilbert resolutions (p=4, 8, 12). Queries combine an integer Hilbert pre-filter with overlap_factor (default 1.2 = 20% expansion) and exact coordinate/time/confidence range conditions in the same backend filter, so top-k is selected only among eligible records; an exact geometric post-check is the final verification. The default query path starts at the coarsest resolution, while `adaptive=True` can promote denser regions to finer stored resolutions.
 
 **Why it matters:** Preserves recall@k parity with brute-force search while maintaining the speed advantage of integer-set filtering. SpatCode sacrifices exact geometric range queries for soft retrieval; LOCI preserves deterministic spatial boundaries while fixing boundary-recall degradation through overlap plus authoritative exact filtering.
 
@@ -69,3 +69,13 @@
 **What LOCI adds:** A shared persistent store where data from different sessions, agents, or time periods coexists, partitioned logically by `scene_id` and indexed time rather than physically. Causal chains (prev_state_id / next_state_id) link within sessions; cross-session queries retrieve across the whole store with indexed time-range filters.
 
 **Why it matters:** Enables multi-agent systems where agents share a common spatial memory. A fleet of robots can contribute to and query from the same LOCI instance.
+
+## Evidence Still Needed
+
+The claims above describe implemented behaviour and the measured results in
+`benchmarks/results/latest.json`. They do not yet establish a win over tuned
+range filters at equal recall on real pilot data, held-out improvement from a
+real predictor, or validated novelty calibration. The
+[implementation readiness plan](IMPLEMENTATION_READINESS.md) lists the
+live-Qdrant benchmark protocol, the prediction evaluation, and the customer
+acceptance gates that have to pass before those stronger claims are made.

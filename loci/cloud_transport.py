@@ -12,6 +12,12 @@ Other methods (``insert_batch``, ``query_scored``, ``get_trajectory``,
 ``get_causal_context``, ``funnel_query``, and the extended
 ``predict_and_retrieve`` path) raise :class:`CloudModeUnsupportedError` until
 the cloud API exposes matching endpoints.
+
+The wire format round-trips every :class:`~loci.schema.WorldState` field:
+``metadata``, ``scale_level``, ``confidence`` and the causal links
+(``prev_state_id``/``next_state_id``) are sent on insert and read back on
+query; ``min_confidence`` is forwarded to ``/query``.  Optional fields are
+omitted when unset and parsed tolerantly so older servers keep working.
 """
 
 from __future__ import annotations
@@ -45,10 +51,15 @@ def _insert_payload(state: WorldState) -> dict[str, Any]:
         "scale_level": state.scale_level,
         "confidence": state.confidence,
     }
-    # Only send metadata when present: newer servers store it, older servers
-    # ignore unknown fields, and omitting it keeps the wire format minimal.
+    # Only send metadata and causal links when present: newer servers store
+    # them, older servers ignore unknown fields, and omitting them keeps the
+    # wire format minimal.
     if state.metadata:
         payload["metadata"] = state.metadata
+    if state.prev_state_id is not None:
+        payload["prev_state_id"] = state.prev_state_id
+    if state.next_state_id is not None:
+        payload["next_state_id"] = state.next_state_id
     return payload
 
 
@@ -59,10 +70,13 @@ def _query_payload(
     limit: int,
     overlap_factor: float,
     include_vectors: bool = True,
+    min_confidence: float | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {"vector": vector, "limit": limit, "overlap_factor": overlap_factor}
     if not include_vectors:
         body["include_vectors"] = False
+    if min_confidence is not None:
+        body["min_confidence"] = min_confidence
     if spatial_bounds is not None:
         body.update(
             {
@@ -83,8 +97,9 @@ def _query_payload(
 def _parse_query_results(payload: dict[str, Any]) -> list[WorldState]:
     """Map cloud query result items to WorldStates.
 
-    ``scale_level``, ``confidence``, and ``metadata`` are parsed tolerantly:
-    older servers omit them, in which case the WorldState defaults apply.
+    ``scale_level``, ``confidence``, ``metadata`` and the causal links are
+    parsed tolerantly: older servers omit them, in which case the WorldState
+    defaults apply.
     """
     results = []
     for r in payload.get("results", []):
@@ -99,6 +114,8 @@ def _parse_query_results(payload: dict[str, Any]) -> list[WorldState]:
                 scale_level=r.get("scale_level", "patch"),
                 confidence=r.get("confidence", 1.0),
                 metadata=r.get("metadata") or {},
+                prev_state_id=r.get("prev_state_id"),
+                next_state_id=r.get("next_state_id"),
                 id=str(r["id"]),
             )
         )
@@ -145,9 +162,16 @@ class CloudTransport:
         limit: int = 10,
         overlap_factor: float = 1.2,
         include_vectors: bool = True,
+        min_confidence: float | None = None,
     ) -> list[WorldState]:
         body = _query_payload(
-            vector, spatial_bounds, time_window_ms, limit, overlap_factor, include_vectors
+            vector,
+            spatial_bounds,
+            time_window_ms,
+            limit,
+            overlap_factor,
+            include_vectors,
+            min_confidence,
         )
         resp = self._request("POST", "/query", body)
         return _parse_query_results(resp)
@@ -202,9 +226,16 @@ class AsyncCloudTransport:
         limit: int = 10,
         overlap_factor: float = 1.2,
         include_vectors: bool = True,
+        min_confidence: float | None = None,
     ) -> list[WorldState]:
         body = _query_payload(
-            vector, spatial_bounds, time_window_ms, limit, overlap_factor, include_vectors
+            vector,
+            spatial_bounds,
+            time_window_ms,
+            limit,
+            overlap_factor,
+            include_vectors,
+            min_confidence,
         )
         resp = await self._request("POST", "/query", body)
         return _parse_query_results(resp)

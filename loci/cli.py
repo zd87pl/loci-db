@@ -144,10 +144,13 @@ def _cmd_keys_revoke(args: argparse.Namespace) -> None:
 # Payload indexes the new clients create on the bounded collections.  The
 # data collection carries Hilbert bucket indexes; the summary collection
 # does not (summaries have no Hilbert payload — spatial queries reach them
-# via the exact post-filter).
+# through the exact x/y/z Range conditions and the post-filter).  Both
+# collections get FLOAT indexes on the exact-range fields so those Range
+# conditions are cheap (mirrors ``_EXACT_RANGE_FIELDS`` in the clients).
 _HILBERT_INDEX_FIELDS = ("hilbert_r4", "hilbert_r8", "hilbert_r12")
 _INTEGER_INDEX_FIELDS = ("timestamp_ms",)
 _KEYWORD_INDEX_FIELDS = ("scene_id", "scale_level")
+_FLOAT_INDEX_FIELDS = ("x", "y", "z", "confidence")
 
 _DATA_SUFFIX = "loci_data"
 _SUMMARY_SUFFIX = "loci_summary"
@@ -227,6 +230,10 @@ def _ensure_target_collection(
     for field in _KEYWORD_INDEX_FIELDS:
         client.create_payload_index(
             collection_name=name, field_name=field, field_schema=PayloadSchemaType.KEYWORD
+        )
+    for field in _FLOAT_INDEX_FIELDS:
+        client.create_payload_index(
+            collection_name=name, field_name=field, field_schema=PayloadSchemaType.FLOAT
         )
     return True
 

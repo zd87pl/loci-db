@@ -289,18 +289,16 @@ def _matches(payload: dict, filters: dict) -> bool:
     for key, condition in filters.items():
         value = payload.get(key)
         if isinstance(condition, dict):
-            if "any" in condition:
-                if value not in condition["any"]:
-                    return False
-            else:
-                if "gte" in condition and (value is None or value < condition["gte"]):
-                    return False
-                if "lte" in condition and (value is None or value > condition["lte"]):
-                    return False
-                if "lt" in condition and (value is None or value >= condition["lt"]):
-                    return False
-                if "gt" in condition and (value is None or value <= condition["gt"]):
-                    return False
+            if "any" in condition and value not in condition["any"]:
+                return False
+            if "gte" in condition and (value is None or value < condition["gte"]):
+                return False
+            if "lte" in condition and (value is None or value > condition["lte"]):
+                return False
+            if "lt" in condition and (value is None or value >= condition["lt"]):
+                return False
+            if "gt" in condition and (value is None or value <= condition["gt"]):
+                return False
         else:
             if value != condition:
                 return False

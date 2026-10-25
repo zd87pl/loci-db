@@ -284,6 +284,17 @@ class InsertRequest(BaseModel):
             f"verbatim by /query (max {MAX_METADATA_BYTES} bytes JSON-serialized)"
         ),
     )
+    prev_state_id: str | None = Field(
+        None,
+        max_length=256,
+        description=(
+            "Caller-supplied causal predecessor ID; replaced by the stored "
+            "predecessor when one exists in the same scene"
+        ),
+    )
+    next_state_id: str | None = Field(
+        None, max_length=256, description="Caller-supplied causal successor ID"
+    )
 
     @field_validator("vector")
     @classmethod
@@ -320,6 +331,9 @@ class QueryRequest(BaseModel):
     time_end_ms: int | None = Field(None, ge=0)
     limit: int = Field(10, ge=1, le=1000)
     overlap_factor: float = Field(1.0, ge=0.1, le=10.0)
+    min_confidence: float | None = Field(
+        None, ge=0.0, le=1.0, description="Drop results whose confidence is below this"
+    )
     include_vectors: bool = Field(
         True, description="Return the stored embedding vector with each result"
     )
@@ -373,6 +387,8 @@ class QueryResult(BaseModel):
     scale_level: str = "patch"
     confidence: float = 1.0
     metadata: dict[str, Any] = Field(default_factory=dict)
+    prev_state_id: str | None = None
+    next_state_id: str | None = None
     vector: list[float] = Field(
         default_factory=list,
         description="Embedding vector; empty unless include_vectors was set",
@@ -475,6 +491,8 @@ def insert(
             scale_level=req.scale_level,
             confidence=req.confidence,
             metadata=req.metadata,
+            prev_state_id=req.prev_state_id,
+            next_state_id=req.next_state_id,
         )
     except ValueError as exc:
         # WorldState enforces invariants Pydantic doesn't fully mirror (e.g.
@@ -513,6 +531,7 @@ def query(
         time_window_ms=time_window,
         limit=req.limit,
         overlap_factor=req.overlap_factor,
+        min_confidence=req.min_confidence,
     )
 
     return QueryResponse(
@@ -527,6 +546,8 @@ def query(
                 scale_level=r.scale_level,
                 confidence=r.confidence,
                 metadata=r.metadata,
+                prev_state_id=r.prev_state_id,
+                next_state_id=r.next_state_id,
                 vector=list(r.vector) if req.include_vectors else [],
             )
             for r in results

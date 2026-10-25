@@ -40,7 +40,7 @@ from loci.retrieval.predict import (
 )
 from loci.schema import ScoredWorldState, WorldState
 from loci.spatial.adaptive import AdaptiveResolution
-from loci.spatial.filtering import exact_payload_match
+from loci.spatial.filtering import exact_payload_match, exact_payload_ranges
 from loci.spatial.hilbert import HilbertIndex
 from loci.spatial.query_plan import bounds_for_epoch, choose_query_resolution
 from loci.temporal.consolidation import (
@@ -60,6 +60,9 @@ logger = logging.getLogger(__name__)
 
 _EXACT_FILTER_OVERFETCH = 3
 _SCROLL_PAGE_SIZE = 256
+# Payload fields that receive exact Range conditions before backend top-k
+# selection (FLOAT-indexed on both collections).
+_EXACT_RANGE_FIELDS = ("x", "y", "z", "confidence")
 
 # Map public distance names to Qdrant enum values
 _DISTANCE_MAP: dict[str, Distance] = {
@@ -221,7 +224,7 @@ class AsyncLociClient:
 
     async def _ensure_summary_collection(self) -> None:
         # Summaries carry no Hilbert payload; spatial queries reach them
-        # via the exact post-filter on x/y/z.
+        # via the exact x/y/z Range conditions (plus the final post-check).
         await self._ensure_collection(self._summary_collection, hilbert_indices=False)
 
     async def _ensure_collection(self, name: str, *, hilbert_indices: bool) -> None:
@@ -285,38 +288,47 @@ class AsyncLociClient:
                 ),
             ]
         )
+        # Exact x/y/z/confidence Range conditions ride in the search filter
+        # before top-k (see query_scored); index them so they are cheap.
+        index_tasks.extend(
+            self._qdrant.create_payload_index(
+                collection_name=name,
+                field_name=field,
+                field_schema=PayloadSchemaType.FLOAT,
+            )
+            for field in _EXACT_RANGE_FIELDS
+        )
         await asyncio.gather(*index_tasks)
 
     async def _collection_exists(self, name: str) -> bool:
-        """Probe Qdrant for a collection using the HTTP server's 404 contract."""
+        """Probe Qdrant for a collection using the HTTP server's 404 contract.
+
+        The probe goes through the retry policy like every other backend
+        call: a transient outage is retried and only propagates once the
+        budget is exhausted.  "Not found" (HTTP 404, or the embedded
+        engine's ValueError) is a definitive answer and returns False at
+        once.
+        """
         try:
-            await self._qdrant.get_collection(name)
-            return True
-        except UnexpectedResponse as exc:
-            if exc.status_code != 404:
-                raise
-            return False
-        except ValueError as exc:
-            # qdrant-client's local (":memory:"/path) engine signals a
-            # missing collection with ValueError instead of an HTTP 404.
-            if "not found" not in str(exc).lower():
-                raise
-            return False
+            await self._retry(self._qdrant.get_collection, name)
+        except Exception as exc:
+            if _is_missing_collection_error(exc):
+                return False
+            raise
+        return True
 
     async def _searchable(self, name: str) -> bool:
         """True when a query/scan should touch *name*.
 
         Cached once a collection is known to exist (created by us or found
-        by a probe — another writer may have created it); a failed probe is
-        treated as "not there yet" so reads degrade gracefully.
+        by a probe — another writer may have created it).  Only "not found"
+        is tolerated (the collection may appear later); any other probe
+        failure propagates so an unavailable backend never looks like an
+        empty database.
         """
         if self._collection_ready.get(name):
             return True
-        try:
-            exists = await self._collection_exists(name)
-        except Exception:
-            logger.debug("Existence probe failed for %s", name, exc_info=True)
-            return False
+        exists = await self._collection_exists(name)
         if exists:
             self._collection_ready[name] = True
         return exists
@@ -473,15 +485,10 @@ class AsyncLociClient:
             List of :class:`WorldState` results sorted by decay-weighted similarity.
         """
         if self._cloud is not None:
-            _advanced = (
-                _extra_payload_filter is not None
-                or _epoch_ids is not None
-                or min_confidence is not None
-            )
+            _advanced = _extra_payload_filter is not None or _epoch_ids is not None
             if _advanced:
                 raise CloudModeUnsupportedError(
-                    "advanced filtering (payload filters, epoch ids, min_confidence) "
-                    "is not supported in cloud mode"
+                    "advanced filtering (payload filters, epoch ids) is not supported in cloud mode"
                 )
             return await self._cloud.query(
                 vector=vector,
@@ -489,6 +496,7 @@ class AsyncLociClient:
                 time_window_ms=time_window_ms,
                 limit=limit,
                 overlap_factor=overlap_factor,
+                min_confidence=min_confidence,
             )
 
         return [
@@ -522,10 +530,20 @@ class AsyncLociClient:
         Runs ONE search over the ``loci_data`` collection with
         must-conditions [timestamp Range (when a window or epoch
         restriction is given), Hilbert MatchAny (when spatial bounds are
-        given)], PLUS one search over ``loci_summary`` (vector + timestamp
-        Range only — summaries carry no Hilbert payload), concurrently via
+        given), exact x/y/z Range (when spatial bounds are given),
+        confidence Range (when ``min_confidence`` is given)], PLUS one
+        search over ``loci_summary`` (the same conditions minus the Hilbert
+        MatchAny — summaries carry no Hilbert payload), concurrently via
         ``asyncio.gather``, then merges both result sets before the exact
-        post-filter and decay re-rank.
+        post-check and decay re-rank.
+
+        The exact ranges are part of the backend filter *before* top-k
+        selection: a Hilbert cover (or a plain vector search over
+        summaries) can contain more out-of-box or low-confidence points
+        than the overfetch budget, and post-filtering alone would then
+        drop every qualifying point.  Backend failures propagate after the
+        retry budget is exhausted; a collection deleted out from under
+        this client yields no hits and resets its readiness cache.
 
         Hilbert bucket selection: when the time window maps to a SINGLE
         epoch, the cover uses that epoch's normalised t-bounds (full 4D
@@ -541,6 +559,12 @@ class AsyncLociClient:
         """
         if self._cloud is not None:
             raise CloudModeUnsupportedError("query_scored is not supported in cloud mode")
+
+        # Exact x/y/z/confidence Range conditions for the backend filter.
+        # The timestamp range is handled separately below because it is also
+        # intersected with the epoch restriction's envelope.
+        exact_ranges = exact_payload_ranges(spatial_bounds, time_window_ms, min_confidence)
+        exact_ranges.pop("timestamp_ms", None)
 
         if _epoch_ids is not None and not _epoch_ids:
             # Explicit empty epoch restriction (funnel dead-end): no results.
@@ -566,13 +590,12 @@ class AsyncLociClient:
             base_conditions.append(
                 FieldCondition(key="timestamp_ms", range=Range(gte=ts_lo, lte=ts_hi))
             )
-        if min_confidence is not None:
-            base_conditions.append(
-                FieldCondition(key="confidence", range=Range(gte=min_confidence))
-            )
+        base_conditions.extend(
+            FieldCondition(key=key, range=Range(**bounds)) for key, bounds in exact_ranges.items()
+        )
         base_conditions.extend(extra_filter_to_conditions(_extra_payload_filter))
 
-        # --- Raw data search (Hilbert pre-filter + timestamp Range) ---
+        # --- Raw data search (Hilbert pre-filter + timestamp/exact Ranges) ---
         data_conditions = list(base_conditions)
         skip_data = False
         if spatial_bounds is not None:
@@ -589,18 +612,21 @@ class AsyncLociClient:
         if await self._searchable(self._summary_collection):
             search_jobs.append((self._summary_collection, base_conditions, True))
 
-        batches = await asyncio.gather(
+        # return_exceptions=True lets the sibling search run to completion
+        # (no orphaned task, no "exception was never retrieved" noise) before
+        # the first failure propagates; results are never partial.
+        outcomes = await asyncio.gather(
             *(
                 self._search_collection(name, vector, conditions, fetch_limit, summary=summary)
                 for name, conditions, summary in search_jobs
-            )
+            ),
+            return_exceptions=True,
         )
-        failed = sum(1 for batch in batches if batch is None)
-        if search_jobs and failed == len(search_jobs):
-            logger.warning("All %d collection searches failed; returning no results", failed)
         all_results: list[dict] = []
-        for batch in batches:
-            all_results.extend(batch or [])
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+            all_results.extend(outcome)
 
         if spatial_bounds is not None or time_window_ms is not None or min_confidence is not None:
             all_results = [
@@ -618,7 +644,12 @@ class AsyncLociClient:
 
         # Apply temporal decay and re-rank
         now_ms = int(time.time() * 1000)
-        apply_decay(all_results, now_ms, self._decay_lambda)
+        apply_decay(
+            all_results,
+            now_ms,
+            self._decay_lambda,
+            distance="euclidean" if self._distance == Distance.EUCLID else "cosine",
+        )
         all_results = all_results[:limit]
 
         return [
@@ -979,8 +1010,16 @@ class AsyncLociClient:
         limit: int,
         *,
         summary: bool,
-    ) -> list[dict] | None:
-        """Run one vector search; returns hit dicts, or None when it failed."""
+    ) -> list[dict]:
+        """Run one vector search and return hit dicts.
+
+        Backend failures propagate once the retry budget is exhausted so a
+        broken backend never masquerades as an empty or partial result.
+        The one tolerated failure is a missing collection (deleted by
+        another writer or by an operator after this client cached it as
+        ready): that yields no hits and drops the readiness cache entry so
+        the next query re-probes.
+        """
         query_filter = Filter(must=list(conditions)) if conditions else None
         try:
             resp = await self._retry(
@@ -992,8 +1031,11 @@ class AsyncLociClient:
                 with_vectors=True,
             )
         except Exception as exc:
-            logger.warning("Search failed on %s: %s", name, exc)
-            return None
+            if _is_missing_collection_error(exc):
+                logger.debug("Collection %s vanished during search; treating as empty", name)
+                self._collection_ready.pop(name, None)
+                return []
+            raise
         return [self._hit_to_result(hit, summary=summary) for hit in resp.points]
 
     def _hit_to_result(self, hit: Any, *, summary: bool) -> dict:
@@ -1130,7 +1172,7 @@ class AsyncLociClient:
         if summaries:
             await self._ensure_summary_collection()
             # Summaries carry no Hilbert payload; spatial queries reach them
-            # via the exact post-filter on x/y/z.
+            # via the exact x/y/z Range conditions (plus the final post-check).
             points = [
                 PointStruct(
                     id=str(uuid.uuid4()),
@@ -1262,6 +1304,23 @@ def _is_already_exists_error(exc: Exception) -> bool:
     if getattr(exc, "status_code", None) == 409:
         return True
     return "already exists" in str(exc).lower()
+
+
+def _is_missing_collection_error(exc: Exception) -> bool:
+    """Return True when *exc* means the collection does not exist.
+
+    The HTTP server answers 404; qdrant-client's embedded (":memory:"/path)
+    engine raises ``ValueError("Collection <name> not found")`` instead.  The
+    match is anchored on that message because the same engine reports a
+    missing point or named vector with a similar ``... not found`` ValueError
+    that must propagate as a real error.
+    """
+    if isinstance(exc, UnexpectedResponse):
+        return exc.status_code == 404
+    if not isinstance(exc, ValueError):
+        return False
+    message = str(exc).strip().lower()
+    return message.startswith("collection ") and message.endswith(" not found")
 
 
 def _point_timestamp(point: Any) -> int:

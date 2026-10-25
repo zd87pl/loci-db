@@ -86,6 +86,10 @@ curl -X POST https://api.loci.ai/insert \
 the vector and returned verbatim by `/query`. It is capped at **16 KB
 JSON-serialized** — larger payloads are rejected with `422`.
 
+`prev_state_id` / `next_state_id` (optional, max 256 chars each) carry causal
+links. When omitted, the server links the new state to the latest earlier
+state in the same `scene_id`; `/query` returns both links with every result.
+
 ### Python SDK — cloud mode
 
 ```python
@@ -138,12 +142,17 @@ curl -X POST https://api.loci.ai/query \
     "z_min": 0.0, "z_max": 1.0,
     "time_start_ms": 1713628000000,
     "time_end_ms":   1713629000000,
+    "min_confidence": 0.8,
     "limit": 10
   }'
 ```
 
-Each result item includes the stored `metadata`, `scale_level` and
-`confidence` alongside the coordinates:
+`min_confidence` (optional, `0.0`–`1.0`) drops results whose stored
+`confidence` is below the threshold before the top-`limit` cut, so a filtered
+query still fills `limit` when enough matches exist.
+
+Each result item includes the stored `metadata`, `scale_level`, `confidence`
+and causal links alongside the coordinates:
 
 ```json
 {
@@ -156,6 +165,8 @@ Each result item includes the stored `metadata`, `scale_level` and
       "scale_level": "patch",
       "confidence": 0.95,
       "metadata": {"label": "doorway", "source": "lidar"},
+      "prev_state_id": "2b9d0e61...",
+      "next_state_id": null,
       "vector": [0.1, 0.2, "..."]
     }
   ]
@@ -179,6 +190,7 @@ hits = client.query(
         "z_max": 1.0,
     },
     time_window_ms=(1713628000000, 1713629000000),
+    min_confidence=0.8,
     limit=10,
 )
 for s in hits:

@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from loci.local_client import LocalLociClient
+from loci.backends.memory import _matches
+from loci.local_client import LocalLociClient, _conjoin_filter
 from loci.schema import ScoredWorldState, WorldState
 
 # ---------------------------------------------------------------------------
@@ -515,6 +516,58 @@ class TestDistanceMetrics:
 # ---------------------------------------------------------------------------
 # Metadata round-trip
 # ---------------------------------------------------------------------------
+
+
+class TestConjoinFilter:
+    """``_conjoin_filter`` ANDs a second predicate into a MemoryStore filter
+    key instead of replacing the first one (``_matches`` evaluates the merged
+    dict conjunctively)."""
+
+    def test_first_condition_is_stored_verbatim(self):
+        f: dict = {}
+        _conjoin_filter(f, "ts", {"gte": 1000, "lte": 2000})
+        assert f == {"ts": {"gte": 1000, "lte": 2000}}
+
+    def test_scalar_narrows_existing_range(self):
+        f = {"ts": {"gte": 1000, "lte": 2000}}
+        _conjoin_filter(f, "ts", 1001)
+        assert f == {"ts": {"gte": 1000, "lte": 2000, "any": [1001]}}
+        assert _matches({"ts": 1001}, f)
+        assert not _matches({"ts": 1500}, f)
+
+    def test_any_list_narrows_existing_range(self):
+        f = {"ts": {"gte": 1000, "lte": 2000}}
+        _conjoin_filter(f, "ts", {"any": [999, 1001]})
+        assert f == {"ts": {"gte": 1000, "lte": 2000, "any": [999, 1001]}}
+        assert not _matches({"ts": 999}, f)  # in the list, outside the range
+        assert _matches({"ts": 1001}, f)
+
+    def test_range_narrows_existing_scalar(self):
+        f = {"ts": 999}
+        _conjoin_filter(f, "ts", {"gte": 1000, "lte": 2000})
+        assert f == {"ts": {"any": [999], "gte": 1000, "lte": 2000}}
+        assert not _matches({"ts": 999}, f)
+
+    def test_any_lists_intersect(self):
+        f = {"scene": {"any": ["a", "b"]}}
+        _conjoin_filter(f, "scene", {"any": ["b", "c"]})
+        assert f == {"scene": {"any": ["b"]}}
+
+    def test_contradictory_scalars_match_nothing(self):
+        f = {"scene": "a"}
+        _conjoin_filter(f, "scene", "b")
+        assert f == {"scene": {"any": []}}
+        assert not _matches({"scene": "a"}, f)
+        assert not _matches({"scene": "b"}, f)
+
+    def test_overlapping_bounds_keep_the_tighter_limit(self):
+        f = {"c": {"gte": 0.2, "lte": 0.9, "gt": 0.1, "lt": 0.95}}
+        _conjoin_filter(f, "c", {"gte": 0.5, "lte": 0.7, "gt": 0.3, "lt": 0.8})
+        assert f == {"c": {"gte": 0.5, "lte": 0.7, "gt": 0.3, "lt": 0.8}}
+
+        wider = {"c": {"gte": 0.5, "lte": 0.7}}
+        _conjoin_filter(wider, "c", {"gte": 0.2, "lte": 0.9})
+        assert wider == {"c": {"gte": 0.5, "lte": 0.7}}
 
 
 class TestMetadataRoundTrip:

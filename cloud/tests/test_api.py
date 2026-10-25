@@ -235,6 +235,8 @@ def _fake_result() -> SimpleNamespace:
         scale_level="frame",
         confidence=0.9,
         metadata={"label": "doorway"},
+        prev_state_id="before",
+        next_state_id="after",
         vector=VEC,
     )
 
@@ -455,7 +457,7 @@ def test_insert_metadata_over_16kb_rejected_as_422(client):
 
 
 def test_query_result_includes_metadata_scale_level_confidence(client):
-    """Query results carry metadata, scale_level and confidence round-tripped."""
+    """Query results carry metadata, scale_level, confidence and causal links."""
     import server as srv
 
     mock_client = srv._clients["test_ns_abc"]
@@ -467,8 +469,103 @@ def test_query_result_includes_metadata_scale_level_confidence(client):
         assert item["metadata"] == {"label": "doorway"}
         assert item["scale_level"] == "frame"
         assert item["confidence"] == 0.9
+        assert item["prev_state_id"] == "before"
+        assert item["next_state_id"] == "after"
     finally:
         mock_client.query.return_value = []
+
+
+# ── Causal links & confidence filter round-trip ───────────────────────────
+
+
+def test_insert_causal_links_reach_world_state(client):
+    """Caller-supplied prev/next_state_id must reach the WorldState, not be dropped."""
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.insert.reset_mock()
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 1000,
+            "vector": VEC,
+            "scene_id": "s",
+            "prev_state_id": "before",
+            "next_state_id": "after",
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    state = mock_client.insert.call_args.args[0]
+    assert state.prev_state_id == "before"
+    assert state.next_state_id == "after"
+
+
+def test_insert_causal_links_default_to_none(client):
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.insert.reset_mock()
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 1000,
+            "vector": VEC,
+            "scene_id": "s",
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200
+    state = mock_client.insert.call_args.args[0]
+    assert state.prev_state_id is None
+    assert state.next_state_id is None
+
+
+@pytest.mark.parametrize("field", ["prev_state_id", "next_state_id"])
+def test_insert_overlong_causal_link_rejected_as_422(client, field):
+    """Causal link IDs are bounded like scene_id so payloads stay small."""
+    resp = client.post(
+        "/insert",
+        json={
+            "x": 0.5,
+            "y": 0.5,
+            "z": 0.5,
+            "timestamp_ms": 1000,
+            "vector": VEC,
+            "scene_id": "s",
+            field: "i" * 257,
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 422
+    assert any(field in str(d.get("loc", ())) for d in resp.json()["detail"])
+
+
+def test_query_forwards_min_confidence(client):
+    """The confidence filter is applied by the backend, not post-hoc by the API."""
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.query.reset_mock()
+    resp = client.post("/query", json={"vector": VEC, "min_confidence": 0.5}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    assert mock_client.query.call_args.kwargs["min_confidence"] == 0.5
+
+
+def test_query_min_confidence_defaults_to_none(client):
+    import server as srv
+
+    mock_client = srv._clients["test_ns_abc"]
+    mock_client.query.reset_mock()
+    resp = client.post("/query", json={"vector": VEC}, headers=AUTH_HEADERS)
+    assert resp.status_code == 200
+    assert mock_client.query.call_args.kwargs["min_confidence"] is None
 
 
 # ── Body size cap (LOCI_MAX_BODY_BYTES) ───────────────────────────────────

@@ -285,13 +285,24 @@ class TestSyncConsolidationTrigger:
         }
         assert set(created) == {"loci_summary"}
         assert created["loci_summary"].size == VEC_SIZE
-        # No Hilbert indexes on summaries — timestamp/keyword indexes only.
+        # No Hilbert indexes on summaries.
         fields = [
             c.kwargs["field_name"]
             for c in mock_qdrant.create_payload_index.call_args_list
             if c.kwargs["collection_name"] == "loci_summary"
         ]
-        assert sorted(fields) == ["scale_level", "scene_id", "timestamp_ms"]
+        # Exact-range FLOAT indexes (x/y/z/confidence) are created on both
+        # collections; summaries still get no hilbert_r* index.
+        assert sorted(fields) == [
+            "confidence",
+            "scale_level",
+            "scene_id",
+            "timestamp_ms",
+            "x",
+            "y",
+            "z",
+        ]
+        assert not any(f.startswith("hilbert_r") for f in fields)
 
     def test_refold_merges_existing_summaries_selected_by_coarse_range(self, mock_qdrant):
         client = _make_client()
@@ -391,7 +402,10 @@ class TestSyncQueryFilters:
         summary_keys = {condition.key for condition in filters["loci_summary"].must}
         assert "timestamp_ms" in data_keys
         assert any(key.startswith("hilbert_r") for key in data_keys)
-        assert summary_keys == {"timestamp_ms"}  # no hilbert_r* condition on summaries
+        # Summaries get the timestamp window plus the exact x/y/z Range
+        # conditions, but never a hilbert_r* condition.
+        assert summary_keys == {"timestamp_ms", "x", "y", "z"}
+        assert not any(key.startswith("hilbert_r") for key in summary_keys)
 
     def test_exact_post_filter_applies_to_summary_hits(self, mock_qdrant):
         client = self._client(mock_qdrant)
@@ -608,7 +622,18 @@ class TestAsyncConsolidationTrigger:
             for c in mock_async_qdrant.create_payload_index.call_args_list
             if c.kwargs["collection_name"] == "loci_summary"
         ]
-        assert sorted(fields) == ["scale_level", "scene_id", "timestamp_ms"]
+        # Exact-range FLOAT indexes (x/y/z/confidence) are created on both
+        # collections; summaries still get no hilbert_r* index.
+        assert sorted(fields) == [
+            "confidence",
+            "scale_level",
+            "scene_id",
+            "timestamp_ms",
+            "x",
+            "y",
+            "z",
+        ]
+        assert not any(f.startswith("hilbert_r") for f in fields)
 
     @pytest.mark.asyncio
     async def test_in_window_points_left_alone(self, mock_async_qdrant):
@@ -672,7 +697,10 @@ class TestAsyncQueryFilters:
         summary_keys = {condition.key for condition in filters["loci_summary"].must}
         assert "timestamp_ms" in data_keys
         assert any(key.startswith("hilbert_r") for key in data_keys)
-        assert summary_keys == {"timestamp_ms"}  # no hilbert_r* condition on summaries
+        # Summaries get the timestamp window plus the exact x/y/z Range
+        # conditions, but never a hilbert_r* condition.
+        assert summary_keys == {"timestamp_ms", "x", "y", "z"}
+        assert not any(key.startswith("hilbert_r") for key in summary_keys)
 
     @pytest.mark.asyncio
     async def test_epoch_restriction_widens_range_to_coarse_group(self, mock_async_qdrant):

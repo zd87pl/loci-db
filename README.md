@@ -444,6 +444,7 @@ application defines and validates that mapping.
 
 See [docs/WORLD_MODEL_INTEGRATION.md](docs/WORLD_MODEL_INTEGRATION.md) for
 integration guides.
+</details>
 
 ## Performance
 

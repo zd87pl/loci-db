@@ -8,7 +8,8 @@
   2. Copy this file to ~/Library/LaunchAgents/com.loci.esp32-tunnel.plist, replace /Users/you and,
      if cloudflared lives elsewhere (`which cloudflared`), the first ProgramArguments entry.
   3. launchctl load -w ~/Library/LaunchAgents/com.loci.esp32-tunnel.plist
-     (launchctl unload -w ... to stop it; the log is in /tmp/loci-esp32-tunnel.log)
+     (launchctl unload -w ... to stop it; the log is ~/Library/Logs/loci-esp32-tunnel.log;
+     `launchctl list | grep com.loci` shows the PID)
 
   The tunnel only forwards /api/esp32/* and /esp32 to port 8002; the host itself
   (demo_spatial/run_esp32_demo.sh) still has to be running for requests to succeed.
@@ -32,8 +33,8 @@
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/tmp/loci-esp32-tunnel.log</string>
+  <string>/Users/you/Library/Logs/loci-esp32-tunnel.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/loci-esp32-tunnel.log</string>
+  <string>/Users/you/Library/Logs/loci-esp32-tunnel.log</string>
 </dict>
 </plist>

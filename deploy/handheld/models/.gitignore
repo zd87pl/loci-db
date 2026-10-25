@@ -1,0 +1,5 @@
+# Model weights are fetched by scripts/fetch_models.py and never committed.
+# Layout (dev machine):  zoo/  potion-base-8M/  piper/   -- see README.md in this directory.
+*
+!.gitignore
+!README.md

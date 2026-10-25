@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0f766e">
+<title>LOCI handheld</title>
+<style>
+  :root {
+    --bg: #f6f7f8; --card: #ffffff; --ink: #111827; --muted: #4b5563; --line: #d1d5db;
+    --accent: #0f766e; --accent-ink: #ffffff; --ok: #16a34a; --warn: #d97706; --off: #9ca3af;
+    --focus: #2563eb; --danger: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0f14; --card: #151b23; --ink: #f3f4f6; --muted: #9ca3af; --line: #2b3440;
+      --accent: #2dd4bf; --accent-ink: #04201c; --ok: #4ade80; --warn: #fbbf24; --off: #6b7280;
+      --focus: #60a5fa; --danger: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { padding: 0 16px calc(24px + env(safe-area-inset-bottom)); max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 1.1rem; margin: 16px 0 8px; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
+  h2 { font-size: 1rem; margin: 20px 0 8px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  button, input, select { font: inherit; }
+  button { min-height: 48px; min-width: 48px; padding: 0 16px; border-radius: 12px; border: 1px solid var(--line);
+    background: var(--card); color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button[aria-pressed="true"] { outline: 3px solid var(--focus); }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  button:disabled { opacity: .5; cursor: default; }
+  /* status strip */
+  .strip { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; }
+  .strip > .head { flex-basis: 100%; display: flex; align-items: center; gap: 4px; }
+  .strip > .meta { white-space: nowrap; }
+  .room { font-size: 2rem; font-weight: 700; line-height: 1.1; min-height: 2.2rem; }
+  .dot { width: 18px; height: 18px; border-radius: 50%; background: var(--off); display: inline-block; vertical-align: middle; margin-right: 8px;
+    box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 10%, transparent); }
+  .dot.ok { background: var(--ok); } .dot.held { background: var(--warn); } .dot.off { background: var(--off); }
+  .meta { color: var(--muted); font-size: .95rem; }
+  .meta strong { color: var(--ink); }
+  #banner { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 14%, transparent);
+    display: none; }
+  #banner.show { display: block; }
+  /* ask */
+  form { display: flex; gap: 8px; }
+  input[type=text] { flex: 1; min-height: 48px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .chips button { border-radius: 999px; }
+  #answer { margin-top: 12px; font-size: 1.25rem; line-height: 1.4; min-height: 3.5rem; padding: 12px 14px; border-radius: 12px;
+    background: var(--bg); border: 1px dashed var(--line); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
+  .row label { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 6px; }
+  .row input[type=checkbox] { width: 24px; height: 24px; }
+  select { min-height: 48px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); color: var(--ink); padding: 0 10px; }
+  #btn-mic { display: none; }
+  #btn-mic.show { display: inline-block; }
+  .hint { color: var(--muted); font-size: .9rem; margin-top: 8px; }
+  /* lists */
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 10px 0; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; }
+  li:first-child { border-top: 0; }
+  li .k { font-weight: 600; text-transform: capitalize; }
+  li .v { color: var(--muted); text-align: right; }
+  .empty { color: var(--muted); padding: 8px 0; }
+  /* map */
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .tabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  svg { width: 100%; height: auto; display: block; border-radius: 10px; background: var(--bg); }
+  .legend { color: var(--muted); font-size: .85rem; margin-top: 8px; }
+  footer { color: var(--muted); font-size: .85rem; margin-top: 24px; text-align: center; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>LOCI handheld</h1>
+
+  <section class="card" aria-labelledby="status-h">
+    <h2 id="status-h" class="sr-only">Status</h2>
+    <div class="strip">
+      <div class="head">
+        <span id="dot" class="dot off" aria-hidden="true"></span><span class="room" id="room">No room yet</span>
+        <span id="dot-label" class="sr-only">camera only</span>
+      </div>
+      <div class="meta" id="anchor-meta">not anchored</div>
+      <div class="meta">Camera: <strong id="source">starting</strong> <span id="fps"></span></div>
+      <div class="meta"><strong id="count">0</strong> sightings</div>
+    </div>
+    <div id="banner" role="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card" style="margin-top:12px" aria-labelledby="ask-h">
+    <h2 id="ask-h" class="sr-only">Ask</h2>
+    <form id="ask-form" autocomplete="off">
+      <input type="text" id="q" name="q" placeholder="Where is my mug?" aria-label="Ask a question" enterkeyhint="send">
+      <button type="submit" class="primary" id="btn-send">Ask</button>
+    </form>
+    <div class="chips" role="group" aria-label="Quick questions">
+      <button type="button" data-q="Where is my mug?">Where is my mug?</button>
+      <button type="button" data-q="What changed in the kitchen?">What changed in the kitchen?</button>
+      <button type="button" data-q="What do you see?">What do you see?</button>
+      <button type="button" data-q="Where am I?">Where am I?</button>
+    </div>
+    <div id="answer" role="status" aria-live="assertive" aria-atomic="true">Ask a question, or tap a suggestion.</div>
+    <div class="row">
+      <button type="button" id="btn-speak" aria-label="Speak the answer">Speak</button>
+      <button type="button" id="btn-mic" aria-label="Hold to talk" aria-pressed="false">Hold to talk</button>
+      <label><input type="checkbox" id="auto-speak"> Speak answers</label>
+      <label for="room-select" class="sr-only">Room to assume</label>
+      <select id="room-select" aria-label="Room to assume when the question names none">
+        <option value="">Room: automatic</option>
+      </select>
+    </div>
+    <div class="hint" id="hint"></div>
+  </section>
+
+  <section class="card" style="margin-top:12px" aria-labelledby="seeing-h">
+    <h2 id="seeing-h">Seeing now</h2>
+    <ul id="seeing"><li class="empty">Nothing in view.</li></ul>
+  </section>
+
+  <section class="card" style="margin-top:12px" aria-labelledby="map-h">
+    <h2 id="map-h">Room map</h2>
+    <div class="tabs" id="map-tabs" role="tablist" aria-label="Rooms"></div>
+    <svg id="map" viewBox="0 0 320 320" role="img" aria-labelledby="map-desc">
+      <title id="map-desc">Top-down map of the selected room: door tag at the bottom, objects as dots, camera as an arrow.</title>
+    </svg>
+    <div class="legend">Door tag at the bottom; up is into the room; left and right as you walk in. Solid dot = anchored sighting, hollow = held pose.</div>
+  </section>
+
+  <section class="card" style="margin-top:12px" aria-labelledby="changes-h">
+    <h2 id="changes-h">Recent changes (10 min)</h2>
+    <ul id="changes"><li class="empty">No changes yet.</li></ul>
+  </section>
+
+  <footer>LOCI spatial memory · <a href="/">desktop view</a> · <a href="/docs">API</a></footer>
+
+<script>
+(function () {
+  'use strict';
+  var API = '';
+  var WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+  var $ = function (id) { return document.getElementById(id); };
+
+  var state = {
+    rooms: [],            // from /api/rooms
+    anchor: null,         // CameraPose.to_dict()
+    objects: {},          // room -> [objects]
+    selectedRoom: null,   // map tab
+    lastAudio: null,      // {b64, mime}
+    lastAnswer: '',
+    sttAvailable: false,
+    wsBackoff: 1000
+  };
+
+  // ------------------------------------------------------------ helpers
+  function fmtAge(ms) {
+    if (ms == null) return '';
+    var s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 5) return 'just now';
+    if (s < 60) return s + ' s ago';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    return Math.round(s / 3600) + ' h ago';
+  }
+  function fmtM(v) { return v == null ? '' : (Math.round(v * 10) / 10).toFixed(1) + ' m'; }
+  function roomLabel(r) { return r ? r.replace(/_/g, ' ') : ''; }
+  function getJSON(url) {
+    return fetch(API + url, { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); });
+  }
+  function setText(id, text) { var el = $(id); if (el && el.textContent !== text) el.textContent = text; }
+
+  // ------------------------------------------------------------ status strip
+  function renderAnchor(a) {
+    if (!a) return;
+    state.anchor = a;
+    var dot = $('dot'), label;
+    if (a.frame === 'room' && a.anchored) { dot.className = 'dot ok'; label = 'anchored'; }
+    else if (a.frame === 'room') { dot.className = 'dot held'; label = 'held pose'; }
+    else { dot.className = 'dot off'; label = 'camera only'; }
+    setText('dot-label', label);
+    setText('room', a.room ? roomLabel(a.room) : 'No room yet');
+    var meta = label;
+    if (a.frame === 'room') meta += ' · confidence ' + Math.round((a.anchor_confidence || 0) * 100) + '%';
+    if (a.tag_ids && a.tag_ids.length) meta += ' · tag ' + a.tag_ids.join(',');
+    setText('anchor-meta', meta);
+    if (!state.selectedRoom && a.room) selectRoom(a.room);
+    drawMap();
+  }
+
+  function renderStatus(st) {
+    var src = st.runtime && st.runtime.source;
+    setText('source', src ? (src.state || 'unknown') : (st.config && st.config.detection_source === 'none' ? 'off' : 'n/a'));
+    setText('fps', src && src.fps ? '· ' + src.fps.toFixed(1) + ' fps' : '');
+    if (st.memory) setText('count', String(st.memory.observation_count || 0));
+    if (st.anchor) renderAnchor(st.anchor);
+    var b = $('banner'), r = st.restore;
+    if (r && r.records > 0 && !b.dataset.shown) {
+      b.textContent = 'Restored ' + r.records + ' sighting' + (r.records === 1 ? '' : 's') +
+        (r.rooms && r.rooms.length ? ' in ' + r.rooms.length + ' room' + (r.rooms.length === 1 ? '' : 's') : '') +
+        (r.newest_ms ? ', newest ' + fmtAge(r.newest_ms) : '') + '.';
+      b.classList.add('show');
+      b.dataset.shown = '1';
+    }
+    if (src && src.state === 'waiting_for_camera') {
+      b.textContent = 'Waiting for the camera (' + (src.error || 'reconnecting') + ')';
+      b.classList.add('show');
+    }
+    if (st.errors && Object.keys(st.errors).length) {
+      $('hint').textContent = 'Notes: ' + Object.keys(st.errors).map(function (k) { return k + ': ' + st.errors[k]; }).join(' · ');
+    }
+  }
+
+  function pollStatus() {
+    getJSON('/api/handheld/status').then(renderStatus).catch(function () { setText('source', 'offline'); });
+  }
+
+  // ------------------------------------------------------------ rooms + map
+  function loadRooms() {
+    return getJSON('/api/rooms').then(function (data) {
+      state.rooms = data.rooms || [];
+      var tabs = $('map-tabs'); tabs.innerHTML = '';
+      var sel = $('room-select');
+      while (sel.options.length > 1) sel.remove(1);
+      state.rooms.forEach(function (r) {
+        var b = document.createElement('button');
+        b.type = 'button'; b.setAttribute('role', 'tab'); b.textContent = roomLabel(r.name);
+        b.setAttribute('aria-selected', r.name === state.selectedRoom ? 'true' : 'false');
+        b.addEventListener('click', function () { selectRoom(r.name); });
+        tabs.appendChild(b);
+        var o = document.createElement('option'); o.value = r.name; o.textContent = 'Room: ' + roomLabel(r.name);
+        sel.appendChild(o);
+      });
+      if (data.current) renderAnchor(data.current);
+      if (!state.selectedRoom && state.rooms.length) selectRoom(state.rooms[0].name);
+    }).catch(function () {});
+  }
+
+  function selectRoom(name) {
+    state.selectedRoom = name;
+    Array.prototype.forEach.call($('map-tabs').children, function (b) {
+      b.setAttribute('aria-selected', b.textContent === roomLabel(name) ? 'true' : 'false');
+    });
+    loadObjects(name);
+    loadChanges();
+  }
+
+  function loadObjects(room) {
+    if (!room) return;
+    getJSON('/api/objects?room=' + encodeURIComponent(room)).then(function (d) {
+      state.objects[room] = d.objects || [];
+      drawMap();
+    }).catch(function () {});
+  }
+
+  function svgEl(tag, attrs, text) {
+    var el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    Object.keys(attrs).forEach(function (k) { el.setAttribute(k, attrs[k]); });
+    if (text != null) el.textContent = text;
+    return el;
+  }
+
+  function drawMap() {
+    var svg = $('map');
+    var room = state.rooms.filter(function (r) { return r.name === state.selectedRoom; })[0];
+    Array.prototype.slice.call(svg.childNodes).forEach(function (n) { if (n.nodeName !== 'title') svg.removeChild(n); });
+    var W = 320, H = 320, pad = 24;
+    var ex = room && room.extents_m ? room.extents_m : { x: [-3, 3], z: [0, 6] };
+    var xlo = ex.x[0], xhi = ex.x[1], zlo = ex.z[0], zhi = ex.z[1];
+    var sx = (W - 2 * pad) / (xhi - xlo), sz = (H - 2 * pad) / (zhi - zlo), s = Math.min(sx, sz);
+    // Top-down view, +z up the page. Room +x is the walker's LEFT when entering with the
+    // back to the tag (D23), so +x increases to the LEFT of the plan.
+    var cx = W / 2 - (-(xlo + xhi) / 2) * s, cz = H - pad;
+    var px = function (x) { return cx - x * s; }, pz = function (z) { return cz - (z - zlo) * s; };
+    var ink = getComputedStyle(document.body).color;
+    var muted = getComputedStyle(document.documentElement).getPropertyValue('--muted') || '#888';
+    var accent = getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#0f766e';
+    svg.appendChild(svgEl('rect', { x: px(xhi), y: pz(zhi), width: (xhi - xlo) * s, height: (zhi - zlo) * s,
+      fill: 'none', stroke: muted, 'stroke-width': 1.5, rx: 6 }));
+    // door tag mark at the origin (bottom centre of the anchor wall)
+    svg.appendChild(svgEl('rect', { x: px(0) - 9, y: pz(0) - 5, width: 18, height: 10, fill: ink }));
+    svg.appendChild(svgEl('text', { x: px(0), y: pz(0) + 18, 'text-anchor': 'middle', 'font-size': 11, fill: muted },
+      room && room.anchor_name ? room.anchor_name : 'door tag'));
+    svg.appendChild(svgEl('text', { x: pad, y: 14, 'font-size': 11, fill: muted }, 'left'));
+    svg.appendChild(svgEl('text', { x: W - pad, y: 14, 'text-anchor': 'end', 'font-size': 11, fill: muted }, 'right'));
+    // landmarks
+    if (room && room.landmarks) {
+      Object.keys(room.landmarks).forEach(function (name) {
+        var p = room.landmarks[name];
+        svg.appendChild(svgEl('rect', { x: px(p[0]) - 5, y: pz(p[2]) - 5, width: 10, height: 10, fill: 'none', stroke: muted, 'stroke-width': 1.5 }));
+        svg.appendChild(svgEl('text', { x: px(p[0]) + 8, y: pz(p[2]) + 4, 'font-size': 10, fill: muted }, name));
+      });
+    }
+    // objects
+    var objs = (room && state.objects[room.name]) || [];
+    objs.forEach(function (o) {
+      if (o.x_m == null || o.z_m == null) return;
+      var x = px(o.x_m), y = pz(o.z_m);
+      svg.appendChild(svgEl('circle', { cx: x, cy: y, r: 7, fill: o.anchored ? accent : 'none', stroke: accent, 'stroke-width': 2 }));
+      svg.appendChild(svgEl('text', { x: x + 10, y: y + 4, 'font-size': 11, fill: ink }, o.label));
+    });
+    // camera
+    var a = state.anchor;
+    if (a && a.frame === 'room' && a.camera_xyz_m && room && a.room === room.name) {
+      var hx = Math.sin(a.heading_deg * Math.PI / 180), hz = -Math.cos(a.heading_deg * Math.PI / 180);
+      var x0 = px(a.camera_xyz_m[0]), y0 = pz(a.camera_xyz_m[2]);
+      var x1 = px(a.camera_xyz_m[0] + 0.6 * hx), y1 = pz(a.camera_xyz_m[2] + 0.6 * hz);
+      svg.appendChild(svgEl('line', { x1: x0, y1: y0, x2: x1, y2: y1, stroke: a.anchored ? accent : muted, 'stroke-width': 3, 'stroke-linecap': 'round' }));
+      svg.appendChild(svgEl('circle', { cx: x0, cy: y0, r: 5, fill: a.anchored ? accent : muted }));
+      svg.appendChild(svgEl('text', { x: x0 + 8, y: y0 - 8, 'font-size': 10, fill: muted }, 'you'));
+    }
+  }
+
+  // ------------------------------------------------------------ changes
+  function loadChanges() {
+    var q = state.selectedRoom ? '?room=' + encodeURIComponent(state.selectedRoom) + '&window_seconds=600' : '?window_seconds=600';
+    getJSON('/api/objects/changes' + q).then(function (d) {
+      var ul = $('changes'); ul.innerHTML = '';
+      var items = (d.changes || []).filter(function (c) { return c.kind !== 'seen'; });
+      if (!items.length) { ul.innerHTML = '<li class="empty">No changes in the last 10 minutes.</li>'; return; }
+      items.forEach(function (c) {
+        var li = document.createElement('li');
+        var k = document.createElement('span'); k.className = 'k'; k.textContent = c.label;
+        var v = document.createElement('span'); v.className = 'v';
+        var what = c.kind === 'moved' ? 'moved ' + fmtM(c.delta_m) : c.kind === 'gone' ? 'no longer seen' : c.kind;
+        v.textContent = what + (c.room ? ' · ' + roomLabel(c.room) : '') + ' · ' + fmtAge(c.last_seen_ms);
+        li.appendChild(k); li.appendChild(v); ul.appendChild(li);
+      });
+    }).catch(function () {});
+  }
+
+  // ------------------------------------------------------------ seeing now
+  function renderSeeing(dets) {
+    var ul = $('seeing'); ul.innerHTML = '';
+    if (!dets || !dets.length) { ul.innerHTML = '<li class="empty">Nothing in view.</li>'; return; }
+    dets.slice(0, 8).forEach(function (d) {
+      var li = document.createElement('li');
+      var k = document.createElement('span'); k.className = 'k'; k.textContent = d.label;
+      var v = document.createElement('span'); v.className = 'v';
+      v.textContent = (d.distance_m != null ? fmtM(d.distance_m) : 'no depth') +
+        (d.room ? ' · ' + roomLabel(d.room) : '') + ' · ' + Math.round((d.confidence || 0) * 100) + '%';
+      li.appendChild(k); li.appendChild(v); ul.appendChild(li);
+    });
+  }
+
+  // ------------------------------------------------------------ websocket
+  var ws = null;
+  function connectWS() {
+    try { ws = new WebSocket(WS_URL); } catch (e) { scheduleWS(); return; }
+    ws.onopen = function () { state.wsBackoff = 1000; };
+    ws.onclose = function () { scheduleWS(); };
+    ws.onerror = function () { try { ws.close(); } catch (e) {} };
+    ws.onmessage = function (e) {
+      var msg; try { msg = JSON.parse(e.data); } catch (err) { return; }
+      if (msg.type === 'detections') {
+        if (msg.source && msg.source !== 'yolo') renderSeeing(msg.detections);
+        if (msg.anchor) renderAnchor(msg.anchor);
+        if (msg.observation_count != null) setText('count', String(msg.observation_count));
+      } else if (msg.type === 'anchor') {
+        renderAnchor(msg);
+        if (msg.source_state) setText('source', msg.source_state);
+      } else if (msg.type === 'snapshot') {
+        if (msg.anchor) renderAnchor(msg.anchor);
+        if (msg.observation_count != null) setText('count', String(msg.observation_count));
+        if (state.selectedRoom) loadObjects(state.selectedRoom);
+      }
+    };
+  }
+  function scheduleWS() {
+    setTimeout(connectWS, state.wsBackoff);
+    state.wsBackoff = Math.min(state.wsBackoff * 2, 10000);
+  }
+
+  // ------------------------------------------------------------ ask
+  function showAnswer(text) {
+    state.lastAnswer = text;
+    var el = $('answer');
+    el.textContent = '';
+    // Re-insert so screen readers announce even an identical sentence.
+    setTimeout(function () { el.textContent = text; }, 30);
+    if ($('auto-speak').checked) setTimeout(speak, 60);
+  }
+
+  function ask(text) {
+    text = (text || '').trim();
+    if (!text) return;
+    $('btn-send').disabled = true;
+    var body = { text: text, tts: false, room: $('room-select').value || null };
+    state.lastAudio = null;
+    fetch(API + '/api/query', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.audio_b64) state.lastAudio = { b64: d.audio_b64, mime: d.audio_mime || 'audio/wav' };
+        showAnswer(d.answer || d.detail || 'No answer.');
+        if (d.results && d.results[0] && d.results[0].room) selectRoom(d.results[0].room);
+        else loadChanges();
+      })
+      .catch(function () { showAnswer('The assistant is not reachable right now.'); })
+      .then(function () { $('btn-send').disabled = false; });
+  }
+
+  function speak() {
+    if (state.lastAudio) {
+      try {
+        var audio = new Audio('data:' + state.lastAudio.mime + ';base64,' + state.lastAudio.b64);
+        audio.play();
+        return;
+      } catch (e) { /* fall through to speechSynthesis */ }
+    }
+    if ('speechSynthesis' in window && state.lastAnswer) {
+      window.speechSynthesis.cancel();
+      var u = new SpeechSynthesisUtterance(state.lastAnswer);
+      u.lang = 'en-GB';
+      window.speechSynthesis.speak(u);
+    }
+  }
+
+  // ------------------------------------------------------------ microphone (secure context only)
+  var recorder = null, chunks = [];
+  function setupMic() {
+    if (!(window.isSecureContext && window.MediaRecorder && navigator.mediaDevices && state.sttAvailable)) return;
+    var btn = $('btn-mic');
+    btn.classList.add('show');
+    var start = function (ev) {
+      ev.preventDefault();
+      if (recorder) return;
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+        chunks = [];
+        recorder = new MediaRecorder(stream);
+        recorder.ondataavailable = function (e) { if (e.data.size) chunks.push(e.data); };
+        recorder.onstop = function () {
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          var blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+          recorder = null;
+          btn.setAttribute('aria-pressed', 'false');
+          var fd = new FormData(); fd.append('file', blob, 'question.webm');
+          showAnswer('Listening…');
+          fetch(API + '/api/voice/query?audio_response=true', { method: 'POST', body: fd })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (d.audio_b64) state.lastAudio = { b64: d.audio_b64, mime: d.audio_mime || 'audio/wav' };
+              showAnswer((d.transcription ? '“' + d.transcription + '” — ' : '') + (d.answer || 'No answer.'));
+              if (state.lastAudio) speak();
+              loadChanges();
+            })
+            .catch(function () { showAnswer('Voice query failed.'); });
+        };
+        recorder.start();
+        btn.setAttribute('aria-pressed', 'true');
+      }).catch(function () { showAnswer('Microphone permission denied.'); });
+    };
+    var stop = function (ev) { ev.preventDefault(); if (recorder && recorder.state === 'recording') recorder.stop(); };
+    btn.addEventListener('pointerdown', start);
+    btn.addEventListener('pointerup', stop);
+    btn.addEventListener('pointercancel', stop);
+    btn.addEventListener('pointerleave', stop);
+    btn.addEventListener('keydown', function (e) { if (e.key === ' ' || e.key === 'Enter') start(e); });
+    btn.addEventListener('keyup', function (e) { if (e.key === ' ' || e.key === 'Enter') stop(e); });
+  }
+
+  // ------------------------------------------------------------ wiring
+  $('ask-form').addEventListener('submit', function (e) { e.preventDefault(); ask($('q').value); });
+  Array.prototype.forEach.call(document.querySelectorAll('.chips button'), function (b) {
+    b.addEventListener('click', function () { $('q').value = b.dataset.q; ask(b.dataset.q); });
+  });
+  $('btn-speak').addEventListener('click', speak);
+  try {
+    $('auto-speak').checked = localStorage.getItem('loci.autoSpeak') === '1';
+    $('auto-speak').addEventListener('change', function () { localStorage.setItem('loci.autoSpeak', this.checked ? '1' : '0'); });
+  } catch (e) { /* storage unavailable */ }
+  $('room-select').addEventListener('change', function () { if (this.value) selectRoom(this.value); });
+
+  getJSON('/health').then(function (h) {
+    state.sttAvailable = !!(h.pipeline && h.pipeline.stt_available);
+    setupMic();
+    if (!window.isSecureContext) $('hint').textContent = 'Typed questions work over plain HTTP; the microphone needs HTTPS (LOCI_TLS=1).';
+  }).catch(function () {});
+  loadRooms().then(pollStatus);
+  connectWS();
+  setInterval(pollStatus, 5000);
+  setInterval(loadChanges, 10000);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) { pollStatus(); loadChanges(); } });
+})();
+</script>
+</body>
+</html>

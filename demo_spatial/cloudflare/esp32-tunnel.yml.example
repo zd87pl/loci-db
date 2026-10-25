@@ -1,0 +1,24 @@
+# cloudflared config for a NAMED tunnel in front of the LOCI ESP32 host.
+# demo_spatial/run_esp32_tunnel.sh writes the same thing for you when TUNNEL_NAME is set;
+# this copy is here to show what reaches the host: only the board's surface, nothing else.
+#
+#   cloudflared tunnel login                       # once, in your browser
+#   cloudflared tunnel create loci-esp32           # prints the tunnel UUID
+#   cloudflared tunnel route dns loci-esp32 loci.example.com
+#   cloudflared tunnel --config esp32-tunnel.yml run loci-esp32
+#
+# The board then needs `host https://loci.example.com` and its device token (see the P4 README,
+# "Online mode"). For the browser page add a Cloudflare Access policy on the hostname; the board's
+# API is protected by the device token, which the host checks on every request from outside.
+
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /Users/you/.cloudflared/00000000-0000-0000-0000-000000000000.json
+
+ingress:
+  - hostname: loci.example.com
+    path: ^/(api/esp32/|esp32$)
+    service: http://127.0.0.1:8002
+    originRequest:
+      connectTimeout: 10s
+      noHappyEyeballs: true
+  - service: http_status:404

@@ -1,0 +1,34 @@
+# LOCI handheld -- SYSTEM unit (sudo). Typed queries and the phone page work from here.
+# For the Bluetooth headset voice loop prefer loci-handheld.user.service: PipeWire runs in the
+# user session, which a system service cannot reach without an XDG_RUNTIME_DIR hack.
+#
+#   sudo cp /home/ziggy/loci-handheld/src/deploy/handheld/loci-handheld.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now loci-handheld
+#   journalctl -u loci-handheld -f
+#
+# systemd does not expand "~": every path below is absolute.
+[Unit]
+Description=LOCI handheld spatial memory (Pi 5 + OAK-D Lite)
+Documentation=file:/home/ziggy/loci-handheld/src/deploy/handheld/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ziggy
+Group=ziggy
+SupplementaryGroups=plugdev video audio input
+WorkingDirectory=/home/ziggy/loci-handheld/src
+EnvironmentFile=/home/ziggy/loci-handheld/env
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/home/ziggy
+ExecStart=/home/ziggy/loci-handheld/src/deploy/handheld/run_pi.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -55,3 +55,8 @@ CONFIG_ISP_PIPELINE_CONTROLLER_TASK_STACK_USE_PSRAM=y
 # card gets its entry (esp_vfs_fat_register then fails with ESP_ERR_NO_MEM). The camera examples use 15.
 CONFIG_VFS_MAX_COUNT=15
 CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
+
+# OV5647 format: 1280x960 with 2x2 binning (RAW10) — twice the light per pixel of the 800x800 mode and
+# more detail for objects across a room. A format must be enabled before it can be the default.
+CONFIG_CAMERA_OV5647_MIPI_RAW10_1280X960_BINNING_45FPS=y
+CONFIG_CAMERA_OV5647_MIPI_DEFAULT_FMT_RAW10_1280X960_BINNING_45FPS=y

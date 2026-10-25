@@ -274,9 +274,17 @@ Pillow-made JPEGs for the camera, a callable for YOLO, a coroutine for STT, a WA
   "where is my cup" answered from the board's own observations and the 12 s reply played on the
   board's speaker; push-to-talk through the onboard mic transcribed "Where is my cup?" twice
   (3.8 s and 3.3 s clips), the second answer starting 1.3 s after the button was released.
-- ⬜ Picture quality on the P4: exposure is right with the ISP pipeline controller, but frames keep
-  a blue-grey cast (white balance) and the fixed-focus OV5647 must be aimed and focused on the
-  desk; detections were only reliable with objects close to the lens.
+- ✅ microSD on the P4 (64 GB, formatted FAT32 from the board): memory cache and spoken summary
+  downloaded within 2 s of mounting (453 B of JSON, 9.6 s of speech) and played from the card by the
+  `offline` command; 6 frames captured while the host was stopped were uploaded on reconnect and
+  counted by the host as `backlog_frames`; the dataset reached 24 frames in the first minutes.
+- ✅ Picture: with the ISP pipeline controller exposure is right and focus is sharp; the remaining
+  blue cast is removed on the host by gray-world white balance (mean RGB 102/152/167 → 139/140/140).
+  The camera on the desk was pointing at the ceiling; it has to be propped to look horizontally.
+- ✅ Camera mode moved to 1280×960 with 2×2 binning (more light, more detail) and the host inference
+  size to 960: frames of 135–145 kB, still 2.0 fps with 300–500 ms per POST, YOLOv8n 74 ms per frame
+  on the Mac; the same desk view went from mostly empty labels to chair, microwave, refrigerator,
+  dining table and person per frame.
 - ✅ Rebased on `feat/handheld-oak-voice-demo`; the hub feeds `SceneIngestion.process_detections`.
   ⬜ Drop the legacy `_update_consensus` fallback once that branch is on `main`.
 - ⬜ Push-to-talk over WebSocket (streaming STT) instead of one POST per utterance.

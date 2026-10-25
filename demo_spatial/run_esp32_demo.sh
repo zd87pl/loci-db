@@ -16,7 +16,7 @@
 #   LOCI_ESP32_MIN_CONF=0.4   YOLO confidence floor for the small camera
 #   LOCI_ESP32_WARMUP=1       load YOLO at startup instead of on the first frame
 #   LOCI_ESP32_WB=gray        gray-world white balance before detection (none to disable)
-#   LOCI_ESP32_IMGSZ=640      YOLO inference size (960 for 1280x960 frames)
+#   LOCI_ESP32_IMGSZ=960      YOLO inference size, matched to the P4 camera's 1280x960 frames (640 is faster)
 #   LOCI_DATA_DIR             memory snapshot dir (default ~/.local/share/loci-esp32, separate from the handheld)
 
 set -euo pipefail
@@ -36,7 +36,7 @@ export LOCI_ESP32_MIN_CONF="${LOCI_ESP32_MIN_CONF:-0.4}"
 export LOCI_ESP32_WARMUP="${LOCI_ESP32_WARMUP:-1}"
 # Gray-world white balance before YOLO: the OV5647 on the P4 arrives with a strong blue cast
 export LOCI_ESP32_WB="${LOCI_ESP32_WB:-gray}"
-export LOCI_ESP32_IMGSZ="${LOCI_ESP32_IMGSZ:-640}"
+export LOCI_ESP32_IMGSZ="${LOCI_ESP32_IMGSZ:-960}"
 # Keep the ESP32 demo's memory apart from the handheld demo's (both default to ~/.local/share/loci-handheld)
 export LOCI_DATA_DIR="${LOCI_DATA_DIR:-$HOME/.local/share/loci-esp32}"
 # The OpenAI key in many shells is a placeholder; the ESP32 path never needs it.

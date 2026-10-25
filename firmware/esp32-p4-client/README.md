@@ -124,7 +124,7 @@ FAT32, erasing it) or format it on a computer. Console: `sd` (card info), `objec
 | `LOCI_SPK_VOLUME` | 75 | Codec output volume in percent |
 | `LOCI_MIC_GAIN_DB` | 36 | Microphone analog gain |
 | `LOCI_PTT_MAX_S` | 8 | Longest push-to-talk clip (PSRAM) |
-| camera format | 800×800 RAW8 | `idf.py menuconfig` → Camera sensor → OV5647 → default format (800×640, 800×1280, 1280×960, 1920×1080) |
+| camera format | 1280×960 RAW10, 2×2 binning | two lines in `sdkconfig.defaults`: enable the format (`CONFIG_CAMERA_OV5647_MIPI_<fmt>=y`) *and* pick it as default (`..._MIPI_DEFAULT_FMT_<fmt>=y`); the default-format choice only lists enabled formats. Others: 800×640, 800×800, 800×1280 RAW8, 1920×1080 RAW10 |
 
 ## Troubleshooting
 

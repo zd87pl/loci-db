@@ -18,6 +18,8 @@
 #include "storage.h"
 
 static const char *TAG = "local";
+static bool play_file(const char *path);
+#define PLAY_CHUNK 2048  // samples per read while playing a cached clip
 
 static char s_dir_backlog[64];
 static char s_dir_frames[64];
@@ -215,6 +217,135 @@ void local_memory_refresh(const char *rev) {
   save_rev(rev);
   ESP_LOGI(TAG, "memory cache refreshed (rev %s): %u B json, %.1f s of speech", rev, (unsigned)n1,
            n2 / (2.0f * LOCI_AUDIO_RATE));
+  local_memory_cache_object_phrases();
+}
+
+// -- per-object spoken answers (for the offline "where is my X") ---------------------------------
+
+static void url_encode(const char *in, char *out, size_t cap) {
+  static const char *hex = "0123456789ABCDEF";
+  size_t j = 0;
+  for (size_t i = 0; in[i] && j + 4 < cap; i++) {
+    unsigned char c = (unsigned char)in[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_') {
+      out[j++] = (char)c;
+    } else {
+      out[j++] = '%';
+      out[j++] = hex[c >> 4];
+      out[j++] = hex[c & 15];
+    }
+  }
+  out[j] = 0;
+}
+
+static void safe_name(const char *label, char *out, size_t cap) {
+  size_t j = 0;
+  for (size_t i = 0; label[i] && j + 1 < cap; i++) {
+    char c = label[i];
+    out[j++] = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ? c : (c >= 'A' && c <= 'Z') ? (char)(c + 32) : '_';
+  }
+  out[j] = 0;
+}
+
+// Labels the memory may hold that are not things one asks "where is my ..." about.
+static const char *k_not_objects[] = {"person"};
+
+static bool is_object_label(const char *label, size_t len) {
+  for (size_t i = 0; i < sizeof(k_not_objects) / sizeof(k_not_objects[0]); i++) {
+    if (strlen(k_not_objects[i]) == len && !strncmp(label, k_not_objects[i], len)) return false;
+  }
+  return true;
+}
+
+int local_memory_labels(char labels[][32], int max) {
+  size_t n = 0;
+  uint8_t *json = local_read_file(MEMORY_JSON, &n);
+  if (!json) return 0;
+  int count = 0;
+  const char *p = (const char *)json;
+  const char *end = p + n;
+  while (count < max && (p = strstr(p, "\"label\":\"")) != NULL && p < end) {
+    p += 9;
+    const char *e = strchr(p, '"');
+    if (!e) break;
+    size_t len = (size_t)(e - p);
+    if (len > 0 && len < 32 && is_object_label(p, len)) {
+      memcpy(labels[count], p, len);
+      labels[count][len] = 0;
+      count++;
+    }
+    p = e + 1;
+  }
+  free(json);
+  return count;
+}
+
+static bool object_where(const char *label, char *where, size_t cap) {
+  size_t n = 0;
+  uint8_t *json = local_read_file(MEMORY_JSON, &n);
+  if (!json) return false;
+  char key[48];
+  snprintf(key, sizeof(key), "\"label\":\"%.31s\"", label);
+  const char *p = strstr((const char *)json, key);
+  bool ok = false;
+  if (p) {
+    const char *w = strstr(p, "\"where\":\"");
+    if (w) {
+      w += 9;
+      const char *e = strchr(w, '"');
+      size_t len = e ? (size_t)(e - w) : 0;
+      if (len >= cap) len = cap - 1;
+      memcpy(where, w, len);
+      where[len] = 0;
+      ok = true;
+    }
+  }
+  free(json);
+  return ok;
+}
+
+void local_memory_cache_object_phrases(void) {
+  if (!storage_ready()) return;
+  char labels[12][32];
+  int n = local_memory_labels(labels, 12);
+  for (int i = 0; i < n; i++) {
+    char name[40], path[96], where[96] = "", text[200], enc[400], q[460];
+    safe_name(labels[i], name, sizeof(name));
+    snprintf(path, sizeof(path), "%s/obj_%.39s.pcm", STORAGE_DIR, name);
+    object_where(labels[i], where, sizeof(where));
+    if (where[0]) {
+      snprintf(text, sizeof(text), "Your %.31s was last seen %.95s.", labels[i], where);
+    } else {
+      snprintf(text, sizeof(text), "I remember a %.31s, but not where.", labels[i]);
+    }
+    // the phrase changes with the position: a stamp file per object keeps us from refetching
+    char stamp_path[100], stamp_old[200] = "";
+    snprintf(stamp_path, sizeof(stamp_path), "%.95s.txt", path);
+    FILE *f = fopen(stamp_path, "r");
+    if (f) {
+      if (!fgets(stamp_old, sizeof(stamp_old), f)) stamp_old[0] = 0;
+      fclose(f);
+    }
+    struct stat st;
+    if (!strcmp(stamp_old, text) && stat(path, &st) == 0 && st.st_size > 1000) continue;
+    url_encode(text, enc, sizeof(enc));
+    snprintf(q, sizeof(q), "/api/esp32/phrase.pcm?text=%.399s", enc);
+    size_t bytes = 0;
+    if (host_fetch_file(q, path, &bytes) == ESP_OK) {
+      storage_write_file(stamp_path, text, strlen(text));
+      ESP_LOGI(TAG, "cached answer for \"%s\" (%.1f s)", labels[i], bytes / (2.0f * LOCI_AUDIO_RATE));
+    }
+  }
+}
+
+bool local_memory_play_object(const char *label) {
+  if (!storage_ready() || !label || !label[0]) return false;
+  char name[40], path[96];
+  safe_name(label, name, sizeof(name));
+  snprintf(path, sizeof(path), "%s/obj_%.39s.pcm", STORAGE_DIR, name);
+  struct stat st;
+  if (stat(path, &st) != 0 || st.st_size < 1000) return false;
+  return play_file(path);
 }
 
 void local_memory_ensure_prompt(void) {
@@ -232,12 +363,14 @@ void local_memory_ensure_prompt(void) {
 }
 
 static bool play_file(const char *path) {
+  static int16_t *buf;  // 4 kB in PSRAM (allocated once); internal RAM is kept for the system
+  if (!buf) buf = heap_caps_malloc(PLAY_CHUNK * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buf) return false;
   FILE *f = fopen(path, "rb");
   if (!f) return false;
-  static int16_t buf[2048];
   size_t total = 0, n;
   if (strstr(path, ".wav")) fseek(f, 44, SEEK_SET);
-  while ((n = fread(buf, 2, sizeof(buf) / sizeof(buf[0]), f)) > 0) {
+  while ((n = fread(buf, 2, PLAY_CHUNK, f)) > 0) {
     audio_play_pcm16(buf, n);
     total += n;
   }

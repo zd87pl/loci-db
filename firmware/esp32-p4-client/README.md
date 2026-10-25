@@ -115,6 +115,25 @@ A 64 GB card arrives formatted as exFAT, which IDF's FatFs cannot read. The firm
 FAT32, erasing it) or format it on a computer. Console: `sd` (card info), `objects` (cached memory),
 `offline` (play the cached summary).
 
+## Offline questions (ESP-SR on the board)
+
+When the host cannot be reached, a button press no longer just plays the generic summary: the
+recorded clip is run through ESP-SR's audio front end (WebRTC noise suppression) and **MultiNet7
+English** (`voice_local.c`), with no wake word because the button is the trigger. The command list
+is rebuilt whenever the cached memory changes: "what do you see" plus "where is my / where are my
+<label>" for every remembered label and for a fixed set of household objects. A recognised object
+plays `/sdcard/loci/obj_<label>.pcm` ("Your cup was last seen in the center, in the middle area."),
+which the board fetches from the host's `phrase.pcm` endpoint once per boot and whenever an object's
+position changes (a `.txt` stamp next to each clip holds the sentence it was made from, so unchanged
+objects are not refetched); anything else falls back to the cached summary.
+
+Models live in the 6 MB `model` partition (`CONFIG_MODEL_IN_FLASH=y`, `CONFIG_SR_MN_EN_MULTINET7_QUANT=y`,
+`CONFIG_SR_WN_NONE=y`); `idf.py flash` writes them with the app. The esp-sr component ships a build
+for exactly this silicon (`include/esp32p4_less_v3_idf6`). Console: `recog` records 4 s from the
+microphone, prints the recognised command and plays the cached answer, which makes the feature
+testable without taking the host down; `cache` fetches any per-object answers the card lacks right
+away.
+
 ## Tuning (`main/board_p4_nano.h`, overridable with `-D`)
 
 | Macro | Default | Meaning |
@@ -136,6 +155,19 @@ FAT32, erasing it) or format it on a computer. Console: `sd` (card info), `objec
   within a few hundred bytes of full on this board, so any `.bss` growth tipped it into a boot loop.
   `sdkconfig.defaults` sets `CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE`/`RX_Q_SIZE` to 8 to leave headroom;
   if it comes back after adding code, lower them further or move more static data to PSRAM.
+* **Boot loop with `assert failed: sleep_retention_entries_do_destroy sleep_retention.c:498`
+  right after `sleep_gpio: Enable automatic switching ...`** — the same shortage, seen when ESP-SR
+  was added (its libraries bring ~37 kB of `.data`/`.bss` into that region): the sleep-clock init
+  runs out of RETENTION memory and this IDF build asserts on the way out instead of logging. The
+  boot banner prints the free retention RAM at the start of `app_main`
+  (`internal N B (retention M B)`, 11 kB on this board with the current build); that figure is the
+  margin the system init had left, so keep it clearly positive. The steady-state value in `status`
+  sits near zero by design, because the allocator hands ordinary internal allocations out of that
+  region first. Levers, all in place now: speech-library `.bss` in PSRAM (`main/linker.lf`
+  with `CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y`), ESP-Hosted task stacks in PSRAM
+  (`CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y`), heap code in flash
+  (`CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y`), the 8+8 SDIO queue entries, and the firmware's own
+  big buffers (HTTP reply, clip playback, push-to-talk) allocated from PSRAM.
 * **`esp_video_init failed`** — camera ribbon not seated or a sensor other than OV5647: enable it
   under `Component config → Camera sensor configuration` (SC2336 is the other one Waveshare ships).
 * **`ES8311 not found on I2C 0x18`** — I2C pull-ups or a hung bus; power-cycle the board.

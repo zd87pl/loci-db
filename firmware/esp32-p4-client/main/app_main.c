@@ -32,6 +32,7 @@
 #include "host_link.h"
 #include "local_memory.h"
 #include "storage.h"
+#include "voice_local.h"
 #include "wifi_link.h"
 
 #if __has_include("secrets.h")
@@ -63,10 +64,12 @@ static void print_status(void) {
   ESP_LOGI(TAG, "fw %s | %s | cam %d %lux%lu | audio %d | wifi %d ip %s rssi %d | host %s", FW_VERSION,
            BOARD_NAME, s_cam_ok, (unsigned long)camera_width(), (unsigned long)camera_height(), audio_ready(),
            wifi_link_connected(), wifi_link_ip(), wifi_link_rssi(), host_reachable() ? "reachable" : "OFFLINE");
-  ESP_LOGI(TAG, "frames sent %lu failed %lu backlog sent %lu interval %lu ms | clips %lu | heap %u psram %u",
+  ESP_LOGI(TAG,
+           "frames sent %lu failed %lu backlog sent %lu interval %lu ms | clips %lu | heap %u (retention %u) psram %u",
            (unsigned long)s_sent, (unsigned long)s_failed, (unsigned long)s_backlog_sent,
            (unsigned long)s_interval_ms, (unsigned long)host_audio_clips_played(),
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_RETENTION),
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   if (si.mounted) {
     ESP_LOGI(TAG, "card: %.1f GB free, backlog %d frames, dataset %d frames | labels: %s", si.free_bytes / 1e9,
@@ -79,6 +82,24 @@ static void print_status(void) {
 
 static void answer_offline(void) {
   if (!local_memory_play_offline()) audio_beep(220.0f, 250);  // nothing cached: a low tone
+}
+
+// Offline question: recognise the command on the board and answer from the card.
+static void answer_offline_clip(const int16_t *pcm, size_t samples) {
+  char label[32] = "";
+  int cmd = voice_local_ready() ? voice_local_recognize(pcm, samples, label, sizeof(label)) : VOICE_CMD_NONE;
+  if (cmd >= VOICE_CMD_FIRST_OBJECT && label[0]) {
+    if (local_memory_play_object(label)) return;  // "Your cup was last seen ..."
+  }
+  answer_offline();  // the cached summary (or the fixed prompt)
+}
+
+// Keep the recogniser's object list in step with the cached memory.
+static void refresh_offline_commands(void) {
+  if (!voice_local_ready() || !storage_ready()) return;
+  static char labels[12][32];
+  int n = local_memory_labels(labels, 12);
+  voice_local_set_labels(labels, n);
 }
 
 // ---- push-to-talk --------------------------------------------------------------------------
@@ -105,8 +126,8 @@ static void record_and_ask(void) {
   audio_beep(880.0f, 60);  // "got it"
   local_voice_save(s_ptt_buf, samples, host_now_ms());
   if (!wifi_link_connected() || !host_reachable()) {
-    ESP_LOGW(TAG, "[ptt] host unreachable: answering from the card");
-    answer_offline();
+    ESP_LOGW(TAG, "[ptt] host unreachable: recognising on the board, answering from the card");
+    answer_offline_clip(s_ptt_buf, samples);
     return;
   }
   host_post_voice((const uint8_t *)s_ptt_buf, samples * sizeof(int16_t));
@@ -172,8 +193,18 @@ static void live_frame(void) {
            (unsigned long)h, (unsigned)len, (esp_timer_get_time() - t0) / 1000,
            r.dropped ? "(dropped by host) " : "", r.labels[0] ? r.labels : "-",
            r.audio_pending ? "  [audio waiting]" : "");
+  static char last_rev[24];
+  static bool phrases_checked;
   local_memory_refresh(r.memory_rev);
   local_memory_ensure_prompt();
+  if (r.memory_rev[0] && strcmp(last_rev, r.memory_rev) != 0 && storage_ready()) {
+    snprintf(last_rev, sizeof(last_rev), "%s", r.memory_rev);
+    refresh_offline_commands();
+  }
+  if (!phrases_checked && storage_ready()) {  // once per boot: fill in per-object answers the card lacks
+    phrases_checked = true;
+    local_memory_cache_object_phrases();
+  }
   if (r.audio_pending) host_fetch_and_play_audio(0);
 }
 
@@ -205,8 +236,38 @@ static void console_task(void *arg) {
       }
     } else if (!strcmp(line, "objects")) {
       local_memory_print();
+    } else if (!strcmp(line, "cache")) {  // fetch the per-object spoken answers the card lacks
+      local_memory_cache_object_phrases();
+      refresh_offline_commands();
+      ESP_LOGI(TAG, "[cache] done");
     } else if (!strcmp(line, "offline")) {
       answer_offline();
+    } else if (!strcmp(line, "recog")) {  // self-test: record 4 s from the mic, recognise on the board
+      if (!audio_ready() || !s_ptt_buf) {
+        ESP_LOGW(TAG, "[recog] no audio");
+      } else {
+        ESP_LOGI(TAG, "[recog] speak now (4 s)...");
+        audio_beep(880.0f, 60);
+        audio_flush_mic();
+        size_t samples = (size_t)LOCI_AUDIO_RATE * 4;
+        if (samples > s_ptt_cap_samples) samples = s_ptt_cap_samples;
+        audio_record_pcm16(s_ptt_buf, samples);
+        int peak = 0;
+        int64_t sum = 0;
+        for (size_t i = 0; i < samples; i++) {
+          int v = s_ptt_buf[i] < 0 ? -s_ptt_buf[i] : s_ptt_buf[i];
+          sum += v;
+          if (v > peak) peak = v;
+        }
+        ESP_LOGI(TAG, "[recog] %.1f s recorded: peak %d, mean level %d (of 32767)", samples / (float)LOCI_AUDIO_RATE,
+                 peak, (int)(sum / (int64_t)samples));
+        char label[32] = "";
+        int cmd = voice_local_recognize(s_ptt_buf, samples, label, sizeof(label));
+        ESP_LOGI(TAG, "[recog] result %d %s", cmd, label);
+        if (cmd >= VOICE_CMD_FIRST_OBJECT && label[0] && local_memory_play_object(label)) {
+          ESP_LOGI(TAG, "[recog] played the cached answer for %s", label);
+        }
+      }
     } else if (!strcmp(line, "beep")) {
       audio_beep(660.0f, 150);
     } else if (!strcmp(line, "snap")) {  // capture + encode one frame without the host (self-test)
@@ -235,8 +296,8 @@ static void console_task(void *arg) {
     } else if (!strncmp(line, "vol ", 4)) {
       audio_set_volume(atoi(line + 4));
     } else {
-      ESP_LOGI(TAG, "commands: status | sd | objects | offline | snap | beep | audio | ask <question> | say <text> "
-                    "| fps <n> | vol <0-100>");
+      ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | offline | recog | snap | beep | audio "
+                    "| ask <question> | say <text> | fps <n> | vol <0-100>");
     }
   }
   vTaskDelete(NULL);
@@ -255,8 +316,10 @@ void app_main(void) {
   esp_chip_info(&chip);
   ESP_LOGI(TAG, "=== LOCI thin client v%s on %s (ESP32-P4 rev v%d.%d, %d cores) ===", FW_VERSION, BOARD_NAME,
            chip.revision / 100, chip.revision % 100, chip.cores);
-  ESP_LOGI(TAG, "device id \"%s\", host %s, %d fps target, PSRAM %u B free", LOCI_DEVICE_ID, LOCI_HOST, LOCI_FPS,
-           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  ESP_LOGI(TAG, "device id \"%s\", host %s, %d fps target, PSRAM %u B free, internal %u B (retention %u B)",
+           LOCI_DEVICE_ID, LOCI_HOST, LOCI_FPS, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_RETENTION));
 
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -307,6 +370,7 @@ void app_main(void) {
   // After the Wi-Fi link: ESP-Hosted has set up the SDMMC controller the card shares (see storage.c)
   storage_init(LOCI_SD_FORMAT_IF_NEEDED != 0);
   local_memory_init();
+  if (voice_local_init()) refresh_offline_commands();
   print_status();
 
   int64_t last_frame_ms = 0, last_backlog_ms = 0, last_probe_ms = 0;

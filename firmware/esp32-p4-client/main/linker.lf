@@ -1,0 +1,57 @@
+# Linker fragments for the LOCI thin client.
+#
+# The ESP32-P4 heap serves ordinary internal allocations from its RETENT_RAM region first, and
+# ESP-Hosted fills that region from a C constructor before the system's sleep-retention init runs
+# (README → Troubleshooting). Every kilobyte of .bss placed there is a kilobyte less for that init,
+# so the zero-initialised tables of the speech libraries live in PSRAM instead
+# (CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y). They are read through the cache, and the
+# recogniser works on a 4 s clip after the button is released, so the speed difference is moot.
+#
+# IDF 6 has no ready-made scheme for this (`extram_bss` in app.lf is the section list for
+# EXT_RAM_BSS_ATTR), so the scheme is defined here: .bss and COMMON of the named archives go to the
+# `extern_ram` target, everything else keeps the default placement.
+
+[scheme:loci_bss_in_psram]
+entries:
+    bss -> extern_ram
+    common -> extern_ram
+
+[mapping:loci_sr_nsnet3]
+archive: libnsnet3.a
+entries:
+    * (loci_bss_in_psram)
+
+[mapping:loci_sr_nsnet]
+archive: libnsnet.a
+entries:
+    * (loci_bss_in_psram)
+
+[mapping:loci_sr_afe]
+archive: libesp_audio_front_end.a
+entries:
+    * (loci_bss_in_psram)
+
+[mapping:loci_sr_processor]
+archive: libesp_audio_processor.a
+entries:
+    * (loci_bss_in_psram)
+
+[mapping:loci_sr_multinet]
+archive: libmultinet.a
+entries:
+    * (loci_bss_in_psram)
+
+[mapping:loci_sr_dl_lib]
+archive: libdl_lib.a
+entries:
+    * (loci_bss_in_psram)
+
+[mapping:loci_sr_features]
+archive: libc_speech_features.a
+entries:
+    * (loci_bss_in_psram)
+
+[mapping:loci_esp_dl]
+archive: libespressif__esp-dl.a
+entries:
+    * (loci_bss_in_psram)

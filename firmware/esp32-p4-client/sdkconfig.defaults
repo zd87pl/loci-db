@@ -67,3 +67,16 @@ CONFIG_LWIP_TCP_WND_DEFAULT=65534
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=16
+
+# ESP-SR: MultiNet7 English + WebRTC noise suppression from the "model" flash partition; no wake word
+# (the button is the trigger). esp-sr adds the model image to `idf.py flash`.
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_WN_NONE=y
+CONFIG_SR_MN_EN_MULTINET7_QUANT=y
+
+# Keep the internal RETENT_RAM region free for the system's sleep-retention init, which runs after
+# ESP-Hosted's constructor has taken its share (README → Troubleshooting): speech-library .bss goes
+# to PSRAM (main/linker.lf), Hosted task stacks go to PSRAM, heap code goes to flash.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y
+CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y

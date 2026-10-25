@@ -155,10 +155,36 @@ objects that changes only when something appears or moves.
   host). The board refreshes `/sdcard/loci/memory.json` and `memory.pcm` when `memory_rev` changes
   (at most every 10 s) and, when the button is pressed with no host in reach, plays that summary:
   *"I can't reach the host right now. The last things I remember: cup in the center…"*.
+* **Offline questions.** With the host unreachable the board recognises the question itself:
+  ESP-SR's MultiNet7 English runs on the push-to-talk clip (no wake word) with commands "what do you
+  see" and "where is my <label>" for every remembered label, and the answer for that object is played
+  from `/sdcard/loci/obj_<label>.pcm`, fetched from `GET /api/esp32/phrase.pcm` once per boot and
+  whenever the object's position changes (a person is tracked but not offered as a "my" object).
+  Unrecognised questions get the cached summary.
 * **Dataset.** Every Nth live frame (`LOCI_SD_KEEP_EVERY`, default 10) is saved to
   `/sdcard/loci/frames/<ms>.jpg` with the host's full reply as `<ms>.json` (labels and boxes), the raw
   material for training a detector on the user's own objects later; push-to-talk clips go to
   `/sdcard/loci/voice/<ms>.wav`. Writing stops below `LOCI_SD_MIN_FREE_MB` free.
+
+### Training a detector on the user's own objects
+
+The host records the same dataset as the card on its own disk (`LOCI_ESP32_DATASET_DIR`, every
+`LOCI_ESP32_DATASET_EVERY`th frame, `<device>/<ts>-<n>.jpg` + `.json` with the detections it made).
+`demo_spatial/tools/esp32_dataset.py` turns it into a YOLO dataset and fine-tunes a model:
+
+```bash
+venv/bin/python demo_spatial/tools/esp32_dataset.py stats  ~/.local/share/loci-esp32/dataset
+venv/bin/python demo_spatial/tools/esp32_dataset.py export ~/.local/share/loci-esp32/dataset \
+    --out /tmp/loci-yolo --classes cup,bottle,laptop,keys --labels ~/labels --min-conf 0.5
+venv/bin/python demo_spatial/tools/esp32_dataset.py train  /tmp/loci-yolo/data.yaml --epochs 40
+# then: LOCI_ESP32_YOLO_MODEL=runs/loci-esp32/weights/best.pt demo_spatial/run_esp32_demo.sh
+```
+
+Pseudo-labels (the host's own COCO detections above a confidence floor) adapt a model to this
+camera's lens, colour and viewpoint. Classes COCO does not know (keys, wallet, glasses) need
+hand-drawn boxes: label frames in any YOLO-format tool and pass the folder with `--labels`; a
+`<stem>.txt` there replaces that frame's pseudo-labels, and `classes.txt` names its classes. A few
+hundred frames per class is a realistic starting point.
 
 ### Debugging
 

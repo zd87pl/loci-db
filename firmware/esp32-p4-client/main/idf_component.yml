@@ -8,3 +8,5 @@ dependencies:
   espressif/esp_hosted: "~2.12.8"
   # ES8311 codec (speaker through the NS4150B amp, onboard microphone)
   espressif/esp_codec_dev: "~1.5"
+  # offline command words on the button (MultiNet7 English on the P4, models in the "model" partition)
+  espressif/esp-sr: "^2.6"

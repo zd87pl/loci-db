@@ -20,7 +20,8 @@ static const char *TAG = "host";
 static char s_base[128];
 static char s_device[32];
 static uint32_t s_clips;
-static char s_resp[8192];  // host replies are small, flat JSON (8 kB covers a long detections list)
+#define RESP_CAP 8192  // host replies are small, flat JSON (8 kB covers a long detections list)
+static char *s_resp;  // RESP_CAP bytes, allocated in PSRAM (internal RAM is scarce, see README)
 static int64_t s_clock_offset_ms;  // host Unix ms - esp_timer ms, from the last frame reply
 static bool s_clock_synced;
 static int s_failures;  // consecutive failed frame posts
@@ -37,7 +38,7 @@ static int64_t json_int64(const char *body, const char *key) {
 int64_t host_now_ms(void) {
   return s_clock_synced ? esp_timer_get_time() / 1000 + s_clock_offset_ms : 0;
 }
-const char *host_last_reply(void) { return s_resp; }
+const char *host_last_reply(void) { return s_resp ? s_resp : ""; }
 const char *host_device_id(void) { return s_device; }
 bool host_reachable(void) { return s_failures < 2; }
 void host_set_frame_timeout_ms(int ms) { s_frame_timeout_ms = ms; }
@@ -110,8 +111,14 @@ static esp_http_client_handle_t client_new(const char *url, esp_http_client_meth
 // pays the handshake and TCP slow start on every 140 kB upload. The handle is kept open between
 // requests and only closed (not freed) after an error so the next frame reconnects.
 static esp_http_client_handle_t s_frame_client;
+static int64_t s_frame_last_ms;  // when the last frame exchange finished
 
 static esp_http_client_handle_t frame_client(const char *url) {
+  if (s_frame_client && s_frame_last_ms && esp_timer_get_time() / 1000 - s_frame_last_ms > 4000) {
+    // the host (uvicorn) drops idle keep-alive connections after 5 s; writing into that half-closed
+    // socket fails and costs a frame, so after a long pause reconnect on purpose
+    esp_http_client_close(s_frame_client);
+  }
   if (!s_frame_client) {
     esp_http_client_config_t cfg = {
         .url = url,
@@ -135,6 +142,7 @@ static esp_http_client_handle_t frame_client(const char *url) {
 
 // Send `len` bytes of body, then read the (small) response into s_resp. Returns the HTTP status.
 static int exchange(esp_http_client_handle_t c, const uint8_t *body, size_t len) {
+  if (!s_resp) return -1;
   esp_err_t err = esp_http_client_open(c, (int)len);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "open failed: %s", esp_err_to_name(err));
@@ -151,16 +159,19 @@ static int exchange(esp_http_client_handle_t c, const uint8_t *body, size_t len)
   }
   if (esp_http_client_fetch_headers(c) < 0) return -1;
   int status = esp_http_client_get_status_code(c);
-  int got = esp_http_client_read_response(c, s_resp, sizeof(s_resp) - 1);
+  int got = esp_http_client_read_response(c, s_resp, RESP_CAP - 1);
   if (got < 0) got = 0;
   s_resp[got] = 0;
-  if (got >= (int)sizeof(s_resp) - 1) esp_http_client_flush_response(c, NULL);  // keep the stream in sync
+  if (got >= RESP_CAP - 1) esp_http_client_flush_response(c, NULL);  // keep the stream in sync
   return status;
 }
 
 void host_link_init(const char *base_url, const char *device_id) {
   snprintf(s_base, sizeof(s_base), "%s", base_url);
   snprintf(s_device, sizeof(s_device), "%s", device_id);
+  if (!s_resp) s_resp = heap_caps_calloc(1, RESP_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!s_resp) s_resp = calloc(1, RESP_CAP);
+  if (!s_resp) ESP_LOGE(TAG, "no memory for the reply buffer; host requests will fail");
 }
 
 esp_err_t host_post_frame(const uint8_t *jpeg, size_t len, uint32_t seq, host_frame_result_t *out) {
@@ -194,6 +205,7 @@ esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int6
   }
 
   int status = exchange(c, jpeg, len);
+  s_frame_last_ms = esp_timer_get_time() / 1000;
   if (status != 200) {
     esp_http_client_close(c);  // drop the connection; the next frame reconnects
     s_failures++;

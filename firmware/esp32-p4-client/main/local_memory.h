@@ -37,6 +37,13 @@ void local_memory_refresh(const char *rev);
 void local_memory_ensure_prompt(void);
 // Speak what the card holds: memory.pcm if present, else offline.pcm. True if something played.
 bool local_memory_play_offline(void);
+// Per-object spoken answers ("Your cup was last seen in the center..."), fetched from the host as
+// /sdcard/loci/obj_<label>.pcm whenever the cached memory changes; played offline on a recognised
+// "where is my <label>".
+void local_memory_cache_object_phrases(void);
+bool local_memory_play_object(const char *label);
+// Labels in the cached memory.json (lower case, up to `max`); returns the count.
+int local_memory_labels(char labels[][32], int max);
 // Console helpers
 void local_memory_print(void);
 int local_dataset_count(void);

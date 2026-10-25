@@ -87,7 +87,7 @@ def install_esp32_routes(
     """
     cfg = cfg or Esp32Config.from_env()
     if hub is None:
-        hub = Esp32Hub(ingestion, cfg)
+        hub = Esp32Hub(ingestion, cfg, memory=memory)
     if bridge is None:
         bridge = Esp32VoiceBridge(voice, rate=cfg.audio_rate, gain=cfg.audio_gain)
     router = APIRouter(tags=["esp32"])
@@ -136,10 +136,12 @@ def install_esp32_routes(
                 seq=seq if seq is not None else _header_int(request, "x-seq"),
                 device_ms=_header_int(request, "x-device-ms"),
                 rssi=_header_int(request, "x-rssi"),
+                captured_ms=_header_int(request, "x-captured-ms"),
+                backlog=(request.headers.get("x-backlog") or "0").strip() not in ("", "0", "false"),
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        if not result.dropped:
+        if not result.dropped and not result.backlog:
             await _broadcast(
                 {
                     "type": "detections",
@@ -155,9 +157,9 @@ def install_esp32_routes(
         return result.to_dict()
 
     @router.get("/api/esp32/frame.jpg")
-    async def esp32_frame_jpg(device: str | None = None):
-        """Latest JPEG received from the board (for checking framing and orientation)."""
-        jpeg = hub.latest_jpeg(device)
+    async def esp32_frame_jpg(device: str | None = None, corrected: bool = False):
+        """Latest JPEG from the board; ``corrected=1`` shows it as the detector sees it."""
+        jpeg = hub.corrected_latest_jpeg(device) if corrected else hub.latest_jpeg(device)
         if jpeg is None:
             raise HTTPException(status_code=404, detail="no frame received yet")
         return Response(
@@ -214,6 +216,60 @@ def install_esp32_routes(
                 "X-Audio-Seconds": f"{pcm16_duration_s(pcm, rate):.2f}",
                 "X-Audio-Queued": str(hub.pending_audio(device_id)),
                 "Cache-Control": "no-store",
+            },
+        )
+
+    # -- local memory cache for the board (what the host remembers, as JSON and as speech) ----
+
+    phrase_cache: dict[str, bytes] = {}
+
+    async def _phrase_pcm(text: str) -> bytes:
+        """TTS with a small cache: the board fetches fixed phrases and summaries repeatedly."""
+        key = text.strip()
+        pcm = phrase_cache.get(key)
+        if pcm is None:
+            pcm = await bridge.say(key)
+            if pcm:
+                if len(phrase_cache) >= 32:
+                    phrase_cache.pop(next(iter(phrase_cache)))
+                phrase_cache[key] = pcm
+        return pcm or b""
+
+    @router.get("/api/esp32/memory")
+    async def esp32_memory():
+        """Compact snapshot of the remembered objects; ``rev`` changes when they do."""
+        return hub.memory_snapshot()
+
+    @router.get("/api/esp32/memory.pcm")
+    async def esp32_memory_pcm():
+        """The summary sentence as board PCM (spoken when the host is unreachable)."""
+        snap = hub.memory_snapshot()
+        pcm = await _phrase_pcm(snap["summary"])
+        if not pcm:
+            return Response(status_code=204)
+        return Response(
+            content=pcm,
+            media_type=f"audio/L16; rate={rate}; channels=1",
+            headers={
+                "X-Audio-Rate": str(rate),
+                "X-Audio-Seconds": f"{pcm16_duration_s(pcm, rate):.2f}",
+                "X-Memory-Rev": snap["rev"],
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @router.get("/api/esp32/phrase.pcm")
+    async def esp32_phrase_pcm(text: str = Query(..., min_length=1, max_length=160)):
+        """Any short phrase as board PCM, cached; the board stores fixed prompts on its card."""
+        pcm = await _phrase_pcm(text)
+        if not pcm:
+            raise HTTPException(status_code=503, detail=f"TTS unavailable: {bridge.last_error}")
+        return Response(
+            content=pcm,
+            media_type=f"audio/L16; rate={rate}; channels=1",
+            headers={
+                "X-Audio-Rate": str(rate),
+                "X-Audio-Seconds": f"{pcm16_duration_s(pcm, rate):.2f}",
             },
         )
 

@@ -82,6 +82,8 @@ class Esp32Config:
     default_device: str = DEFAULT_DEVICE  # LOCI_ESP32_DEVICE: id used when the board sends none
     warmup: bool = False  # LOCI_ESP32_WARMUP=1: load YOLO in a thread at install time
     depth: str = "none"  # LOCI_ESP32_DEPTH: "none" | "mono" (needs a plugged-in estimator)
+    white_balance: str = "none"  # LOCI_ESP32_WB: "none" | "gray" (gray-world before YOLO)
+    imgsz: int = 640  # LOCI_ESP32_IMGSZ: YOLO inference size; 960 pays off for 1280x960 frames
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Esp32Config:
@@ -102,6 +104,8 @@ class Esp32Config:
             default_device=env.get("LOCI_ESP32_DEVICE") or DEFAULT_DEVICE,
             warmup=env.get("LOCI_ESP32_WARMUP", "0") == "1",
             depth=(env.get("LOCI_ESP32_DEPTH") or "none").lower(),
+            white_balance=(env.get("LOCI_ESP32_WB") or "none").lower(),
+            imgsz=max(320, min(1920, _env_int(env, "LOCI_ESP32_IMGSZ", 640))),
         )
 
     def to_dict(self) -> dict:
@@ -116,6 +120,8 @@ class Esp32Config:
             "stale_after_s": self.stale_after_s,
             "default_device": self.default_device,
             "depth": self.depth,
+            "white_balance": self.white_balance,
+            "imgsz": self.imgsz,
         }
 
     @property
@@ -140,6 +146,42 @@ def jpeg_size(jpeg: bytes) -> tuple[int, int] | None:
         return None
 
 
+def gray_world(img: Any) -> Any:
+    """Gray-world white balance: scale each channel so the three means coincide.
+
+    Cheap colour-cast removal for sensors whose auto white balance is off or has not
+    converged (the OV5647 on the P4 arrives with a strong blue cast). Returns a new
+    Pillow image; a grey or nearly grey frame is returned unchanged.
+    """
+    import numpy as np
+
+    arr = np.asarray(img.convert("RGB"), dtype=np.float32)
+    means = arr.reshape(-1, 3).mean(axis=0)
+    if means.min() < 1.0:
+        return img
+    target = float(means.mean())
+    gains = np.clip(target / means, 0.5, 3.0)
+    if np.allclose(gains, 1.0, atol=0.02):
+        return img
+    from PIL import Image
+
+    out = np.clip(arr * gains, 0, 255).astype(np.uint8)
+    return Image.fromarray(out, "RGB")
+
+
+def corrected_jpeg(jpeg: bytes, *, rotate_deg: int = 0, quality: int = 85) -> bytes:
+    """The frame as the detector sees it (rotated, gray-world balanced), re-encoded as JPEG."""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    if rotate_deg % 360:
+        img = img.rotate(-(rotate_deg % 360), expand=True)
+    img = gray_world(img)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
 class HostYoloDetector:
     """Lazy ultralytics YOLO wrapper producing ``Detection`` objects with ``source="esp32"``.
 
@@ -157,7 +199,9 @@ class HostYoloDetector:
         rotate_deg: int = 0,
         conf: float = 0.4,
         imgsz: int = 640,
+        white_balance: str = "none",
     ) -> None:
+        self._wb = white_balance
         self.model_path = model_path
         self._classes = list(classes or [])
         self._rotate = rotate_deg % 360
@@ -205,6 +249,8 @@ class HostYoloDetector:
         if self._rotate:
             # PIL rotates counter-clockwise; the config is expressed clockwise.
             img = img.rotate(-self._rotate, expand=True)
+        if self._wb == "gray":
+            img = gray_world(img)
         w, h = img.size
         results = self._model.predict(
             source=np.array(img),
@@ -259,6 +305,9 @@ class FrameResult:
     audio_pending: int = 0
     next_interval_ms: int = 0
     infer_ms: float = 0.0
+    now_ms: int = 0  # host Unix time; the board derives Unix timestamps for offline frames from it
+    memory_rev: str = ""  # changes when remembered objects change; the board refreshes its cache
+    backlog: bool = False  # frame captured earlier and uploaded late (store-and-forward)
 
     @property
     def labels(self) -> list[str]:
@@ -278,6 +327,9 @@ class FrameResult:
             "audio_pending": self.audio_pending,
             "next_ms": self.next_interval_ms,
             "infer_ms": round(self.infer_ms, 1),
+            "now_ms": self.now_ms,
+            "memory_rev": self.memory_rev,
+            "backlog": self.backlog,
             "width": self.width,
             "height": self.height,
         }
@@ -297,6 +349,7 @@ class Esp32Device:
     last_size: tuple[int, int] | None = None
     last_detections: list[Detection] = field(default_factory=list)
     last_infer_ms: float = 0.0
+    backlog_frames: int = 0  # frames uploaded late from the board's card
     fps: float = 0.0
     rssi: int | None = None
     device_ms: int | None = None  # the board's millis() of the last frame, for the status page
@@ -318,6 +371,7 @@ class Esp32Device:
             "frames_received": self.frames_received,
             "frames_processed": self.frames_processed,
             "frames_dropped": self.frames_dropped,
+            "backlog_frames": self.backlog_frames,
             "errors": self.errors,
             "fps": round(self.fps, 2),
             "last_seq": self.last_seq,
@@ -355,14 +409,18 @@ class Esp32Hub:
         detector: Detector | None = None,
         depth_estimator: DepthEstimator | None = None,
         clock: Callable[[], float] = time.time,
+        memory: Any = None,
     ) -> None:
         self.cfg = cfg or Esp32Config()
         self._ingestion = ingestion
+        self._memory = memory  # SpatialMemory-like (current_objects) for the board's local cache
         self._detector: Detector = detector or HostYoloDetector(
             self.cfg.yolo_model,
             classes=list(getattr(ingestion, "classes", []) or []),
             rotate_deg=self.cfg.rotate_deg,
             conf=self.cfg.min_confidence,
+            imgsz=self.cfg.imgsz,
+            white_balance=self.cfg.white_balance,
         )
         self._depth = depth_estimator if self.cfg.depth != "none" else None
         self._clock = clock
@@ -393,6 +451,19 @@ class Esp32Hub:
     def devices(self) -> list[Esp32Device]:
         return list(self._devices.values())
 
+    def corrected_latest_jpeg(self, device_id: str | None = None) -> bytes | None:
+        """Latest frame as the detector sees it (rotation + white balance applied)."""
+        jpeg = self.latest_jpeg(device_id)
+        if jpeg is None:
+            return None
+        if self.cfg.white_balance == "none" and self.cfg.rotate_deg == 0:
+            return jpeg
+        try:
+            return corrected_jpeg(jpeg, rotate_deg=self.cfg.rotate_deg)
+        except Exception as e:  # a truncated JPEG from the board must not break the preview
+            logger.debug("corrected preview failed: %s", e)
+            return jpeg
+
     def latest_jpeg(self, device_id: str | None = None) -> bytes | None:
         dev = self._devices.get(device_id or self.cfg.default_device)
         return dev.last_jpeg if dev else None
@@ -407,6 +478,8 @@ class Esp32Hub:
         seq: int | None = None,
         device_ms: int | None = None,
         rssi: int | None = None,
+        captured_ms: int | None = None,
+        backlog: bool = False,
     ) -> FrameResult:
         """Detect objects in one JPEG frame and feed them to the shared ingestion.
 
@@ -436,9 +509,19 @@ class Esp32Hub:
         dev.last_seq = dev.last_seq + 1 if seq is None else seq
         self.frames_total += 1
 
+        # Store-and-forward: a frame the board kept on its card while the host was unreachable is
+        # stored at its capture time (the board's clock is derived from our now_ms), never rate
+        # limited (the backlog is spaced in time already), and not treated as "live".
+        ts = now_ms
+        if backlog and captured_ms and 0 < captured_ms <= now_ms + 60_000:
+            if now_ms - captured_ms <= 30 * 24 * 3600 * 1000:
+                ts = int(captured_ms)
+            dev.backlog_frames += 1
+
         min_interval = 1.0 / self.cfg.max_fps if self.cfg.max_fps > 0 else 0.0
         if (
-            dev._last_processed_mono is not None
+            not backlog
+            and dev._last_processed_mono is not None
             and min_interval > 0
             and mono - dev._last_processed_mono < 0.9 * min_interval
         ):
@@ -475,7 +558,7 @@ class Esp32Hub:
                 logger.warning("ESP32 depth estimator failed: %s", e)
         infer_ms = (time.perf_counter() - t0) * 1000.0
 
-        self._feed(detections, now_ms)
+        self._feed(detections, ts)
 
         dev.frames_processed += 1
         dev.last_detections = detections
@@ -484,13 +567,16 @@ class Esp32Hub:
         result = FrameResult(
             device_id=dev.device_id,
             seq=dev.last_seq,
-            timestamp_ms=now_ms,
+            timestamp_ms=ts,
             detections=detections,
             width=dev.last_size[0] if dev.last_size else None,
             height=dev.last_size[1] if dev.last_size else None,
             audio_pending=len(dev.audio_queue),
             next_interval_ms=self.cfg.frame_interval_ms,
             infer_ms=infer_ms,
+            now_ms=now_ms,
+            memory_rev=self.memory_rev(),
+            backlog=backlog,
         )
         self._publish(result)
         return result
@@ -569,6 +655,64 @@ class Esp32Hub:
         dev = self._devices.get(device_id or self.cfg.default_device)
         return len(dev.audio_queue) if dev else 0
 
+    # -- memory snapshot for the board's local cache -----------------------------
+
+    def memory_objects(self, limit: int = 12) -> list[dict]:
+        """Compact view of what the host remembers, newest first (for the board's SD cache)."""
+        mem = self._memory
+        if mem is None or not hasattr(mem, "current_objects"):
+            return []
+        out: list[dict] = []
+        try:
+            objects = list(mem.current_objects())
+        except Exception as e:
+            logger.warning("memory snapshot failed: %s", e)
+            return []
+        for o in objects[:limit]:
+            out.append(
+                {
+                    "label": getattr(o, "label", "?"),
+                    "where": getattr(o, "position_description", "") or "",
+                    "room": getattr(o, "room", None),
+                    "last_seen_ms": int(getattr(o, "timestamp_ms", 0) or 0),
+                    "age_s": int(getattr(o, "age_seconds", 0) or 0),
+                }
+            )
+        return out
+
+    def memory_rev(self, objects: list[dict] | None = None) -> str:
+        """Short digest of the remembered objects; stable while nothing moves or appears."""
+        import hashlib
+
+        objs = self.memory_objects() if objects is None else objects
+        key = "|".join(f"{o['label']}@{o['where']}@{o.get('room') or ''}" for o in objs)
+        return hashlib.blake2s(key.encode(), digest_size=4).hexdigest() if objs else "empty"
+
+    @staticmethod
+    def memory_summary_text(objects: list[dict], *, max_items: int = 6) -> str:
+        """One spoken sentence the board can play when it cannot reach the host."""
+        if not objects:
+            return "I can't reach the host right now, and I don't remember any objects yet."
+        parts = []
+        for o in objects[:max_items]:
+            where = f" {o['where']}" if o.get("where") else ""
+            room = f" in the {o['room']}" if o.get("room") else ""
+            parts.append(f"{o['label']}{room}{where}")
+        more = len(objects) - max_items
+        tail = f", and {more} more" if more > 0 else ""
+        lead = "I can't reach the host right now. The last things I remember: "
+        return lead + "; ".join(parts) + tail + "."
+
+    def memory_snapshot(self) -> dict:
+        objs = self.memory_objects()
+        return {
+            "rev": self.memory_rev(objs),
+            "count": len(objs),
+            "objects": objs,
+            "summary": self.memory_summary_text(objs),
+            "now_ms": int(self._clock() * 1000),
+        }
+
     # -- subscribers (DetectionSource adapter) -----------------------------------
 
     def subscribe(self, maxsize: int = 64) -> queue.Queue:
@@ -609,6 +753,7 @@ class Esp32Hub:
                 for dev in self._devices.values()
             },
             "ingestion_frame_count": getattr(self._ingestion, "frame_count", None),
+            "memory_rev": self.memory_rev(),
         }
 
 

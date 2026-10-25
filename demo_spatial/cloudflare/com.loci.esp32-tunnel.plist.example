@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job that keeps the named LOCI tunnel up on a Mac host (logout- and reboot-proof).
+
+  1. Run demo_spatial/run_esp32_tunnel.sh once with TUNNEL_NAME / TUNNEL_HOSTNAME: it writes
+     ~/.cloudflared/<TUNNEL_NAME>.yml (the config this job uses).
+  2. Copy this file to ~/Library/LaunchAgents/com.loci.esp32-tunnel.plist, replace /Users/you and,
+     if cloudflared lives elsewhere (`which cloudflared`), the first ProgramArguments entry.
+  3. launchctl load -w ~/Library/LaunchAgents/com.loci.esp32-tunnel.plist
+     (launchctl unload -w ... to stop it; the log is in /tmp/loci-esp32-tunnel.log)
+
+  The tunnel only forwards /api/esp32/* and /esp32 to port 8002; the host itself
+  (demo_spatial/run_esp32_demo.sh) still has to be running for requests to succeed.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.loci.esp32-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/cloudflared</string>
+    <string>tunnel</string>
+    <string>--no-autoupdate</string>
+    <string>--config</string>
+    <string>/Users/you/.cloudflared/loci-esp32.yml</string>
+    <string>run</string>
+    <string>loci-esp32</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/loci-esp32-tunnel.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/loci-esp32-tunnel.log</string>
+</dict>
+</plist>

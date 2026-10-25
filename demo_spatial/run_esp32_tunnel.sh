@@ -52,24 +52,41 @@ echo
 
 if [[ -n "${TUNNEL_NAME:-}" ]]; then
   : "${TUNNEL_HOSTNAME:?set TUNNEL_HOSTNAME=loci.example.com (routed with: cloudflared tunnel route dns $TUNNEL_NAME <hostname>)}"
-  CREDS="$(ls "$HOME"/.cloudflared/*.json 2>/dev/null | head -1 || true)"
   TUNNEL_ID="$(cloudflared tunnel list --name "$TUNNEL_NAME" --output json 2>/dev/null | "${PYTHON:-python3}" -c 'import json,sys; t=json.load(sys.stdin); print(t[0]["id"] if t else "")' || true)"
   if [[ -z "$TUNNEL_ID" ]]; then
-    echo "tunnel '$TUNNEL_NAME' not found: run 'cloudflared tunnel login' and 'cloudflared tunnel create $TUNNEL_NAME' first" >&2
+    echo "tunnel '$TUNNEL_NAME' not found in this account: run 'cloudflared tunnel create $TUNNEL_NAME' (after 'cloudflared tunnel login' if needed)" >&2
     exit 1
   fi
-  CONFIG="$(mktemp -t loci-tunnel)"
-  cat > "$CONFIG" <<EOF
+  CREDS="${HOME}/.cloudflared/${TUNNEL_ID}.json"
+  if [[ ! -s "$CREDS" ]]; then
+    echo "no credentials file ${CREDS}: the tunnel must be created on this machine ('cloudflared tunnel create $TUNNEL_NAME')" >&2
+    exit 1
+  fi
+  # A config of its own, kept next to the credentials so a launchd job can use it (never the default
+  # ~/.cloudflared/config.yml, which may belong to another tunnel). Only the board's surface is forwarded.
+  CONFIG="${TUNNEL_CONFIG:-$HOME/.cloudflared/${TUNNEL_NAME}.yml}"
+  (umask 077; cat > "$CONFIG" <<EOF
+# written by demo_spatial/run_esp32_tunnel.sh — LOCI ESP32 host behind the named tunnel ${TUNNEL_NAME}
 tunnel: ${TUNNEL_ID}
-credentials-file: ${HOME}/.cloudflared/${TUNNEL_ID}.json
+credentials-file: ${CREDS}
 ingress:
   - hostname: ${TUNNEL_HOSTNAME}
     path: ^/(api/esp32/|esp32$)
     service: http://127.0.0.1:${PORT}
+    originRequest:
+      connectTimeout: 10s
+      noHappyEyeballs: true
   - service: http_status:404
 EOF
-  echo "Named tunnel ${TUNNEL_NAME} -> https://${TUNNEL_HOSTNAME} (config ${CONFIG}${CREDS:+, credentials in ~/.cloudflared})"
-  exec cloudflared tunnel --no-autoupdate --config "$CONFIG" run "$TUNNEL_NAME"
+  )
+  echo "Named tunnel ${TUNNEL_NAME} (${TUNNEL_ID}) -> https://${TUNNEL_HOSTNAME}"
+  echo "Config: ${CONFIG}"
+  # The --config matters for the DNS step too: with another tunnel in ~/.cloudflared/config.yml,
+  # cloudflared resolves a tunnel *name* to that one and the CNAME ends up on the wrong tunnel.
+  echo "DNS (once): cloudflared tunnel --config ${CONFIG} route dns ${TUNNEL_NAME} ${TUNNEL_HOSTNAME}   (add --overwrite-dns to replace an existing record)"
+  echo "Keep it running after logout: demo_spatial/cloudflare/com.loci.esp32-tunnel.plist.example"
+  # cloudflared reads TUNNEL_* environment variables as its own (legacy) flags: keep ours out of its way
+  exec env -u TUNNEL_NAME -u TUNNEL_HOSTNAME -u TUNNEL_CONFIG cloudflared tunnel --no-autoupdate --config "$CONFIG" run "$TUNNEL_NAME" "$@"
 fi
 
 # Quick tunnel. cloudflared would otherwise read ~/.cloudflared/config.yml, and the ingress rules
@@ -83,4 +100,4 @@ ingress:
   - service: http_status:404
 EOF
 echo "Quick tunnel: watch for the https://....trycloudflare.com line below (new URL on every start)."
-exec cloudflared tunnel --no-autoupdate --config "$CONFIG" --url "http://127.0.0.1:${PORT}" "$@"
+exec env -u TUNNEL_NAME -u TUNNEL_HOSTNAME -u TUNNEL_CONFIG cloudflared tunnel --no-autoupdate --config "$CONFIG" --url "http://127.0.0.1:${PORT}" "$@"

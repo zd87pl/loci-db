@@ -143,9 +143,24 @@ hotspot, the LTE pendant later) without opening a port, put the host behind a Cl
    token in `~/.local/share/loci-esp32/device_token` (mode 0600, never printed) and shows the path.
 2. Start the tunnel: `demo_spatial/run_esp32_tunnel.sh`. Without a Cloudflare account it opens a
    *quick tunnel* and prints a random `https://….trycloudflare.com` URL (new on every start; for
-   tests). With `TUNNEL_NAME=… TUNNEL_HOSTNAME=…` it runs a named tunnel on your own hostname after
-   a one-time `cloudflared tunnel login` / `create` / `route dns` done by you
-   (`demo_spatial/cloudflare/esp32-tunnel.yml.example` shows the ingress it writes).
+   tests). For a stable hostname on your own domain, once, in your own terminal:
+
+   ```bash
+   cloudflared tunnel login                          # only if ~/.cloudflared/cert.pem is missing
+   cloudflared tunnel create loci-esp32
+   TUNNEL_NAME=loci-esp32 TUNNEL_HOSTNAME=loci.example.com demo_spatial/run_esp32_tunnel.sh
+   cloudflared tunnel --config ~/.cloudflared/loci-esp32.yml route dns loci-esp32 loci.example.com
+   ```
+
+   The script writes `~/.cloudflared/loci-esp32.yml` (the ingress in
+   `demo_spatial/cloudflare/esp32-tunnel.yml.example`: only the board's routes, 404 for the rest) and
+   never touches `~/.cloudflared/config.yml`, so another tunnel on the same machine keeps running.
+   Pass that config to the `route dns` step as well: when `~/.cloudflared/config.yml` names another
+   tunnel, cloudflared resolves a tunnel *name* to that one (`cloudflared tunnel info loci-esp32`
+   shows the other tunnel) and the CNAME lands on the wrong tunnel, whose catch-all then answers an
+   empty 404. `--overwrite-dns` replaces such a record.
+   `demo_spatial/cloudflare/com.loci.esp32-tunnel.plist.example` is a launchd job that keeps it up
+   across logouts and reboots.
 3. On the board's console, once: `token <contents of the token file>`, then `host https://<url>`.
    Both live in NVS, so neither needs a reflash or a change to `secrets.h`; `host default` returns
    to the compiled-in LAN URL and `token clear` removes the token. `status` shows the host in use

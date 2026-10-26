@@ -94,6 +94,47 @@ adds `imu` (accelerometer and temperature), `mic` (2 s microphone level), `af` /
 (camera resolution at runtime). Opening the port does not reset the board when DTR and RTS stay
 asserted (the scratchpad `serial_cmd.py` helper does that).
 
+## On-board detection (`detect`)
+
+The firmware carries ESP-DL's COCO detector (YOLO11n, 320×320, int8; `coco_detect` component,
+model in the 4 MB `coco_det` partition that `idf.py flash` writes). It is a measuring tool for now:
+the frame loop still uploads JPEGs and the host still decides what is remembered.
+
+* `detect [n]` runs it on `n` live frames. Each frame is decoded at reduced size (JPEG → RGB565,
+  scaled by ½, ¼ or ⅛ until it is at most 640 px wide) and the labels are printed with the timing.
+* `detect sd [n]` runs it on every 100th frame of the card's dataset and prints the host's
+  YOLOv8n labels for that frame next to the board's.
+
+Measured on the W11 (2026-10-26): model load 0.40 s, **1.38–1.49 s per frame** (up to 1.8 s while
+the upload loop competes), decode 41 ms for VGA and ~230 ms for UXGA. Results are in
+`docs/MESHOLOGY_EVALUATION.md`.
+
+Three build details this needed:
+
+* **ESP-DL op stripping.** ESP-DL 3.3 compiles only the operators and Conv kernels named in
+  registered `compile_req` files. esp-sr registers its own list and `coco_detect` registers none,
+  so the detector failed at load with `dl::Model: Do not support Swish` and then crashed.
+  The project `CMakeLists.txt` clears `ESPDL_COMPILE_REQS` after `project()`, before ESP-DL's
+  deferred finalize step, which builds the full operator set. The app grows to 3.4 MB of the 4 MB
+  partition.
+* **Data cache.** `CONFIG_ESP32S3_DATA_CACHE_64KB` with 64-byte lines, as in ESP-DL's examples,
+  took inference from 1.97 s to 1.38 s per frame. The weights stay in flash because ESP-DL copies
+  them to PSRAM only on boards with 9 MB or more.
+* **Watchdog.** One inference keeps CPU1 busy for over a second, so the IDLE1 task-watchdog check
+  is off.
+
+## Measured on the desk (2026-10-26)
+
+| | |
+|---|---|
+| Boot | `app_main` at 0.86 s; Wi-Fi joins in 4–13 s; SD, cached memory and ESP-SR ready ~3 s later |
+| Camera | OV3660, JPEG at quality 12: VGA 24 kB, XGA 61 kB, SXGA 190–214 kB, UXGA 64–312 kB (scene-dependent); capture returns immediately (grab latest) |
+| microSD | the P4's 64 GB FAT32 card read as is over SPI at 20 MHz: 3,231 dataset frames, cached memory, no P4 backlog. Offline capture to `backlog/` at 1 fps |
+| ESP-SR | MultiNet7 English, 54 phrases from the cached memory; 1.5–1.7 s for a 4 s clip. Recognition not yet verified with a real voice |
+| IMU | QMI8658C at 0x6B |
+| Heap with Wi-Fi + ESP-SR + detector | PSRAM 2.4–2.9 MB free, internal 59 kB free (17.5 kB minimum) |
+| Wi-Fi | −81 to −86 dBm **without the antenna** on the u.FL connector; pings lose 75–100 %, frame uploads stall, everything goes to the backlog. Attach the antenna that comes with the kit |
+
 ## Without a speaker
 
 The shared code checks `audio_speaker_ready()`:
@@ -107,3 +148,19 @@ The shared code checks `audio_speaker_ready()`:
   sentence. With no object recognised, `offline` and the button print every remembered object
   with its place.
 * Beeps are silent, and the RGB LED cannot stand in for them because GPIO48 is also camera D7.
+
+## Troubleshooting
+
+* **RSSI around −85 dBm, pings losing most packets, frames failing with `Poll timeout or error,
+  errno=Connection already in progress` / `write failed after 0 bytes`.** The antenna is not
+  plugged into the u.FL socket; the module has no PCB antenna. The errno text is a stale
+  `EINPROGRESS` from the non-blocking connect, not the cause. Small requests (`ask`) may still get
+  through.
+* **The camera reports OV3660 although the box and the factory test say OV5640.** The factory test
+  string is hard-coded; trust the PID in the boot log. `CONFIG_OV3660_SUPPORT`,
+  `CONFIG_OV5640_SUPPORT` and `CONFIG_OV2640_SUPPORT` are all on, so any of them works. Autofocus
+  is only attempted on an OV5640.
+* **Reading the whole flash back is slow.** `esptool read-flash 0 ALL` over the USB-Serial/JTAG
+  port runs at about 12 kB/s, so 16 MB takes about 24 minutes. Writing is about 1.3 Mbit/s.
+* **Opening the serial port reboots the board.** Leave DTR and RTS asserted as `idf.py monitor`
+  does. Dropping DTR while RTS is high resets the S3 through its USB-Serial/JTAG logic.

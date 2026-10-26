@@ -88,7 +88,8 @@ esp_err_t audio_init(i2c_master_bus_handle_t i2c_bus, int volume_pct) {
   return ESP_OK;
 }
 
-bool audio_ready(void) { return s_dev != NULL; }
+bool audio_speaker_ready(void) { return s_dev != NULL; }
+bool audio_mic_ready(void) { return s_dev != NULL; }
 
 esp_err_t audio_play_pcm16(const int16_t *mono, size_t samples) {
   if (!s_dev || samples == 0) return ESP_ERR_INVALID_STATE;

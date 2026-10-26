@@ -15,7 +15,7 @@
 #include "esp_timer.h"
 #include "model_path.h"
 
-#include "board_p4_nano.h"
+#include "loci_config.h"
 
 static const char *TAG = "voice";
 

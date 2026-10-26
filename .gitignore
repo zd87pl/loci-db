@@ -42,5 +42,5 @@ loci-core/target/
 # Downloaded YOLO weights (demo servers fetch them into the working directory)
 /*.pt
 
-# public root certificate appended to the ESP32-P4 firmware's CA bundle (not a key)
-!firmware/esp32-p4-client/certs/extra_roots.pem
+# public root certificate appended to the ESP32 firmwares' CA bundle (not a key)
+!firmware/common/certs/extra_roots.pem

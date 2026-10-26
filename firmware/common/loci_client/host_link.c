@@ -13,8 +13,8 @@
 #include "esp_timer.h"
 #include "nvs.h"
 
-#include "audio.h"
-#include "board_p4_nano.h"
+#include "loci_config.h"
+#include "loci_hw.h"
 #include "wifi_link.h"
 
 static const char *TAG = "host";
@@ -373,7 +373,7 @@ esp_err_t host_fetch_file(const char *path_and_query, const char *dest_path, siz
 }
 
 bool host_fetch_and_play_audio(int wait_s) {
-  if (!audio_ready()) return false;
+  if (!audio_speaker_ready()) return false;
   char url[224];
   snprintf(url, sizeof(url), "%s/api/esp32/audio/next?device=%s&wait=%d", s_base, s_device, wait_s);
   esp_http_client_handle_t c = client_new(url, HTTP_METHOD_GET, (wait_s + 15) * 1000);

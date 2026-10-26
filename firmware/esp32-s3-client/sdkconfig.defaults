@@ -1,0 +1,67 @@
+# LOCI thin client on ESP32-S3 camera boards (Meshnology W11, Seeed XIAO ESP32S3 Sense)
+CONFIG_IDF_TARGET="esp32s3"
+
+# Flash and PSRAM as on the W11: 16 MB quad flash (Puya), 8 MB octal PSRAM in the package (ESP32-S3R8)
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# Wi-Fi/lwIP buffers and mbedTLS sessions may live in PSRAM: internal RAM (~320 kB) is the scarce part
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# CPU / RTOS
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Console on the native USB port (USB-Serial/JTAG; the W11 has no USB-UART bridge)
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Camera: esp32-camera on the LCD_CAM DVP interface; its SCCB gets I2C port 1 (the IMU uses port 0)
+CONFIG_SCCB_HARDWARE_I2C_PORT1=y
+CONFIG_OV5640_SUPPORT=y
+CONFIG_OV3660_SUPPORT=y
+CONFIG_OV2640_SUPPORT=y
+# OV5640 continuous autofocus (loads the AF firmware into the sensor; harmless on fixed-focus modules)
+CONFIG_CAMERA_AF_SUPPORT=y
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# microSD: larger FatFs stat block size for faster writes (as on the P4)
+CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
+
+# Big TCP windows for the 100-250 kB frame uploads; lwIP mailboxes deeper than the defaults
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=16
+
+# ESP-SR: MultiNet7 English + WebRTC noise suppression from the "model" flash partition; no wake word
+# (the BOOT button is the trigger). esp-sr adds the model image to `idf.py flash`.
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_MN_EN_MULTINET7_QUANT=y
+
+# On-board detection (console `detect`): ESP-DL COCO YOLO11n at 320x320, int8, from its own flash
+# partition (`idf.py flash` writes it). The 640x640 variant takes ~4 s per frame on the S3.
+CONFIG_FLASH_COCO_DETECT_YOLO11N_S8_V1=n
+CONFIG_FLASH_COCO_DETECT_YOLO11N_320_S8_V1=y
+CONFIG_COCO_DETECT_YOLO11N_320_S8_V1=y
+CONFIG_COCO_DETECT_MODEL_IN_FLASH_PARTITION=y
+# as in the ESP-DL examples: a bigger data cache with long lines for weights streamed from flash
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+# one inference keeps CPU1 busy for about a second; that is expected, not a hung task
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# Online mode: https:// hosts (the Cloudflare Tunnel) verified against the IDF CA bundle plus the
+# GlobalSign root Cloudflare's chain still ends in (see the P4 README, "Online mode").
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH="../common/certs/extra_roots.pem"

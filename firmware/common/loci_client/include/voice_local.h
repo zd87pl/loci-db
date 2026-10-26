@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Offline speech commands (ESP-SR MultiNet7 English on the P4), used when the host cannot be
+// Offline speech commands (ESP-SR MultiNet7 English, P4 and S3), used when the host cannot be
 // reached: the user holds the button and says "where is my cup" / "what do you see"; the clip is run
 // through the AFE (noise suppression) and MultiNet; the matched command names an object that the
 // cached memory can answer from the card. No wake word: the button is the trigger.
@@ -24,5 +24,5 @@ bool voice_local_ready(void);
 void voice_local_set_labels(const char labels[][32], int count);
 
 // Run a recorded 16 kHz mono PCM16 clip through AFE + MultiNet. Returns VOICE_CMD_NONE or a command id;
-// for object commands `label_out` receives the object label. Takes about real-time/4 on the P4.
+// for object commands `label_out` receives the object label. Takes about real-time/4 on the P4 (measured per board in its README).
 int voice_local_recognize(const int16_t *pcm, size_t samples, char *label_out, size_t label_cap);

@@ -12,8 +12,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
-#include "audio.h"
-#include "board_p4_nano.h"
+#include "loci_config.h"
+#include "loci_hw.h"
 #include "host_link.h"
 #include "storage.h"
 
@@ -212,8 +212,10 @@ void local_memory_refresh(const char *rev) {
   char q[96];
   snprintf(q, sizeof(q), "/api/esp32/memory?device=%s", host_device_id());
   if (host_fetch_file(q, MEMORY_JSON, &n1) != ESP_OK) return;
-  snprintf(q, sizeof(q), "/api/esp32/memory.pcm?device=%s", host_device_id());
-  if (host_fetch_file(q, MEMORY_PCM, &n2) != ESP_OK) return;
+  if (audio_speaker_ready()) {  // the spoken summary is of no use to a board without a speaker
+    snprintf(q, sizeof(q), "/api/esp32/memory.pcm?device=%s", host_device_id());
+    if (host_fetch_file(q, MEMORY_PCM, &n2) != ESP_OK) return;
+  }
   save_rev(rev);
   ESP_LOGI(TAG, "memory cache refreshed (rev %s): %u B json, %.1f s of speech", rev, (unsigned)n1,
            n2 / (2.0f * LOCI_AUDIO_RATE));
@@ -327,6 +329,11 @@ void local_memory_cache_object_phrases(void) {
       fclose(f);
     }
     struct stat st;
+    if (!audio_speaker_ready()) {  // no speaker: the answer is the text itself, assembled here
+      if (strcmp(stamp_old, text) != 0 && storage_write_file(stamp_path, text, strlen(text)) > 0)
+        ESP_LOGI(TAG, "cached answer for \"%s\" (text)", labels[i]);
+      continue;
+    }
     if (!strcmp(stamp_old, text) && stat(path, &st) == 0 && st.st_size > 1000) continue;
     url_encode(text, enc, sizeof(enc));
     snprintf(q, sizeof(q), "/api/esp32/phrase.pcm?text=%.399s", enc);
@@ -338,18 +345,33 @@ void local_memory_cache_object_phrases(void) {
   }
 }
 
+// The answer as text: the stamp file written next to each clip. On a board without a speaker this
+// is the whole answer (serial console today, a phone over BLE later).
+static bool print_phrase(const char *pcm_path) {
+  char stamp_path[100], text[200] = "";
+  snprintf(stamp_path, sizeof(stamp_path), "%.95s.txt", pcm_path);
+  FILE *f = fopen(stamp_path, "r");
+  if (!f) return false;
+  if (!fgets(text, sizeof(text), f)) text[0] = 0;
+  fclose(f);
+  if (text[0]) ESP_LOGI(TAG, "answer from the card: %s", text);
+  return text[0] != 0;
+}
+
 bool local_memory_play_object(const char *label) {
   if (!storage_ready() || !label || !label[0]) return false;
   char name[40], path[96];
   safe_name(label, name, sizeof(name));
   snprintf(path, sizeof(path), "%s/obj_%.39s.pcm", STORAGE_DIR, name);
+  bool printed = print_phrase(path);
+  if (!audio_speaker_ready()) return printed;
   struct stat st;
   if (stat(path, &st) != 0 || st.st_size < 1000) return false;
   return play_file(path);
 }
 
 void local_memory_ensure_prompt(void) {
-  if (!storage_ready() || s_prompt_checked) return;
+  if (!storage_ready() || s_prompt_checked || !audio_speaker_ready()) return;
   struct stat st;
   if (stat(OFFLINE_PCM, &st) == 0 && st.st_size > 1000) {
     s_prompt_checked = true;
@@ -363,6 +385,7 @@ void local_memory_ensure_prompt(void) {
 }
 
 static bool play_file(const char *path) {
+  if (!audio_speaker_ready()) return false;
   static int16_t *buf;  // 4 kB in PSRAM (allocated once); internal RAM is kept for the system
   if (!buf) buf = heap_caps_malloc(PLAY_CHUNK * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!buf) return false;
@@ -377,6 +400,18 @@ static bool play_file(const char *path) {
   fclose(f);
   ESP_LOGI(TAG, "played %s (%.1f s) from the card", path, total / (float)LOCI_AUDIO_RATE);
   return total > 0;
+}
+
+bool local_memory_print_summary(void) {
+  if (!storage_ready()) return false;
+  char labels[12][32], where[96];
+  int n = local_memory_labels(labels, 12);
+  for (int i = 0; i < n; i++) {
+    if (!object_where(labels[i], where, sizeof(where))) where[0] = 0;
+    ESP_LOGI(TAG, "remembered: %s%s%s", labels[i], where[0] ? ", last seen " : "", where);
+  }
+  if (n == 0) ESP_LOGI(TAG, "the cached memory holds no objects yet");
+  return n > 0;
 }
 
 bool local_memory_play_offline(void) {

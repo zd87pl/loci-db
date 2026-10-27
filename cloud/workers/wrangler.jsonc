@@ -1,0 +1,38 @@
+{
+  // LOCI Cloud, Phase 0 data and control plane (see docs/CLOUD_PLATFORM_DESIGN.md).
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "loci-cloud",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "observability": { "enabled": true },
+
+  // Control plane: organisations' projects, keys, spaces, devices, usage.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "loci-control",
+      // Replace with the id printed by `wrangler d1 create loci-control` before the first deploy.
+      "database_id": "646af731-91fc-4483-82f7-ac8a850c756d",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // Data plane: one SQLite-backed Durable Object per space.
+  "durable_objects": {
+    "bindings": [{ "name": "SPACE", "class_name": "SpaceObject" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SpaceObject"] }],
+
+  // Per-principal write throttle (Workers rate-limiting binding).
+  "ratelimits": [
+    { "name": "WRITE_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } }
+  ],
+
+  "vars": {
+    // When set (e.g. "loci.cloud"), requests to <ref>.loci.cloud/v1/... are routed by host.
+    // Empty: path routing /p/<ref>/v1/... on workers.dev (Phase 0 default).
+    "PROJECT_HOST_SUFFIX": "",
+    "DEVICE_TOKEN_TTL_S": "3600"
+  }
+  // Secrets (wrangler secret put): ADMIN_TOKEN — bootstrap token for POST /admin/projects.
+}

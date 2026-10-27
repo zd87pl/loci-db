@@ -51,6 +51,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .cloud_sync import CloudSync, start_cloud_sync_from_env
 from .esp32_api import install_esp32_routes
 from .handheld import (
     HandheldConfig,
@@ -128,6 +129,7 @@ voice = VoicePipeline(
 _ws_subscribers: set[WebSocket] = set()
 _restore_report: Any = None
 _voice_loop: VoiceLoopHandle | None = None
+_cloud_sync: CloudSync | None = None
 _push_task: asyncio.Task | None = None
 _started_at_ms = int(time.time() * 1000)
 
@@ -242,6 +244,12 @@ async def lifespan(app: FastAPI):
         runtime.start()
     _push_task = asyncio.create_task(_live_push_loop())
     _voice_loop = _start_voice()
+    global _cloud_sync
+    try:
+        _cloud_sync = start_cloud_sync_from_env(memory, cfg.data_dir if cfg.persist else None)
+    except Exception as exc:
+        _handheld_errors["cloud_sync"] = f"{type(exc).__name__}: {exc}"
+        logger.exception("cloud sync not started: %s", exc)
     logger.info(
         "Spatial Memory Assistant starting — source: %s, rooms: %s, embedder: %s, "
         "restored: %s, VLM: %s, TTS: %s, STT: %s, voice: %s",
@@ -261,6 +269,8 @@ async def lifespan(app: FastAPI):
         _push_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await _push_task
+    if _cloud_sync is not None:
+        _cloud_sync.stop()
     if runtime is not None:
         runtime.stop()
     await ingestion.stop_capture()
@@ -763,6 +773,12 @@ async def list_rooms():
         "tag_family": rooms.tag_family,
         "rooms_seen": memory.rooms_seen,
     }
+
+
+@app.get("/api/cloud/status")
+async def cloud_status():
+    """LOCI Cloud mirror status (LOCI_CLOUD_* env); {"enabled": false} when not configured."""
+    return _cloud_sync.status() if _cloud_sync is not None else {"enabled": False}
 
 
 @app.get("/api/handheld/status")

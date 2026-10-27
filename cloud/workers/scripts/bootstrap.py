@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Create a LOCI Cloud project, a space and a claimed device; print LOCI_CLOUD_* env lines.
+
+    python3 cloud/workers/scripts/bootstrap.py --url http://127.0.0.1:8787 \
+        --admin-token "$ADMIN_TOKEN" --space home --device "ESP32 pendant" > .cloud.env
+
+Secrets are printed to stdout only; keep that file private (chmod 600) and never commit it.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import urllib.error
+import urllib.request
+
+
+def call(
+    url: str, method: str, path: str, token: str | None = None, body: dict | None = None
+) -> dict:
+    data = None if body is None else json.dumps(body).encode()
+    target = url.rstrip("/") + path  # scheme checked in main()
+    req = urllib.request.Request(target, data=data, method=method)  # noqa: S310
+    req.add_header("content-type", "application/json")
+    if token:
+        req.add_header("authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310 - operator-supplied URL
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        sys.exit(f"{method} {path} failed: HTTP {e.code} {e.read().decode()[:300]}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--url", required=True)
+    ap.add_argument("--admin-token", required=True)
+    ap.add_argument("--name", default="LOCI assistant")
+    ap.add_argument("--jurisdiction", choices=["us", "eu"], default="us")
+    ap.add_argument("--space", default="home")
+    ap.add_argument("--device", default="ESP32 assistant")
+    a = ap.parse_args()
+    if not a.url.startswith(("http://", "https://")):
+        sys.exit("--url must be http(s)")
+
+    body = {"name": a.name, "jurisdiction": a.jurisdiction}
+    proj = call(a.url, "POST", "/admin/projects", a.admin_token, body)
+    ref, sk = proj["ref"], proj["secret_key"]
+    base = f"/p/{ref}/v1"
+    space = {"space": a.space, "name": a.space.title(), "frame": "room"}
+    call(a.url, "POST", f"{base}/spaces", sk, space)
+    dev = call(a.url, "POST", f"{base}/devices", sk, {"name": a.device, "spaces": [a.space]})
+    claimed = call(a.url, "POST", f"{base}/devices/claim", None, {"claim_code": dev["claim_code"]})
+    print(f"LOCI_CLOUD_URL={a.url.rstrip('/')}")
+    print(f"LOCI_CLOUD_PROJECT={ref}")
+    print(f"LOCI_CLOUD_SPACE={a.space}")
+    print(f"LOCI_CLOUD_DEVICE_ID={claimed['device_id']}")
+    print(f"LOCI_CLOUD_DEVICE_SECRET={claimed['device_secret']}")
+    print(f"# secret key (server use only): LOCI_CLOUD_KEY={sk}")
+    print(f"# publishable key (apps, read-only): {proj['publishable_key']}")
+
+
+if __name__ == "__main__":
+    main()

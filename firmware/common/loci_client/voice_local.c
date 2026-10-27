@@ -15,7 +15,7 @@
 #include "esp_timer.h"
 #include "model_path.h"
 
-#include "board_p4_nano.h"
+#include "loci_config.h"
 
 static const char *TAG = "voice";
 
@@ -122,9 +122,15 @@ bool voice_local_init(void) {
 bool voice_local_ready(void) { return s_ready; }
 
 void voice_local_set_labels(const char labels[][32], int count) {
+  static char before[MAX_LABELS][LABEL_LEN];
+  int before_count = s_label_count;
+  memcpy(before, s_labels, sizeof(before));
   s_label_count = 0;
   for (int i = 0; i < count; i++) add_label(labels[i]);  // remembered objects first: they must fit
   for (size_t i = 0; i < sizeof(k_default_labels) / sizeof(k_default_labels[0]); i++) add_label(k_default_labels[i]);
+  // Every memory refresh lands here, but a moved object changes no phrase: MultiNet is only
+  // rebuilt (a few hundred ms in the frame loop) when the list of objects itself changed.
+  if (s_label_count == before_count && !memcmp(before, s_labels, sizeof(before))) return;
   rebuild_commands();
 }
 
@@ -138,6 +144,11 @@ int voice_local_recognize(const int16_t *pcm, size_t samples, char *label_out, s
   // Feed the clip plus half a second of silence so the last word is flushed through the pipeline.
   const size_t tail = LOCI_AUDIO_RATE / 2;
   int16_t *zeros = heap_caps_calloc(s_feed_chunk, sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!zeros) zeros = heap_caps_calloc(s_feed_chunk, sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!zeros) {
+    ESP_LOGE(TAG, "no memory to flush the recogniser");
+    return VOICE_CMD_NONE;
+  }
   int result = VOICE_CMD_NONE;
   float prob = 0.0f;
   size_t fed = 0;

@@ -8,7 +8,28 @@ same job with the same host protocol (`docs/ESP32_THIN_CLIENT_DEMO.md`, section 
 * camera (OV5647, MIPI-CSI 2-lane) → ISP → **hardware JPEG** → `POST /api/esp32/frame`
 * `GET /api/esp32/audio/next` → 16 kHz mono PCM16 → **ES8311 + NS4150B** speaker
 * BOOT button held → onboard mic → `POST /api/esp32/voice` → answer plays back
-* serial console: `status | beep | audio | ask <q> | say <text> | fps <n> | vol <0-100>`
+* serial console: `status | beep | audio | ask <q> | say <text> | fps <n> | vol <0-100>` (`help` lists all)
+
+Code layout: this project holds only the P4-specific parts (`main/camera.c` esp_video + hardware
+JPEG, `main/audio.c` ES8311, `main/storage_board.c` the SDMMC slot, `main/app_main.c` bring-up).
+The main loop, the host link, the microSD memory and the offline commands live in
+`../common/loci_client` and are shared with the ESP32-S3 client in `../esp32-s3-client`; the
+interface a board implements is `../common/loci_client/include/loci_hw.h`.
+
+## On the desk with the shared code (2026-10-26)
+
+Firmware `0.5.0-p4` (this project plus `../common/loci_client`, the first run of the shared loop on
+the P4) flashed over yesterday's `0.4.0-p4`. The host URL `https://loci.0x7d0.com` and the device
+token stayed in NVS. The boot keeps the same retention-RAM margin (10,800 B free at `app_main`).
+ES8311, OV5647 + hardware JPEG at 1280×960, the C6 link, the 4-bit card and ESP-SR (54 phrases)
+came up as before.
+
+Through the Cloudflare tunnel, with the camera facing a dark surface (noisy 280–390 kB frames):
+
+| | 40 MHz SDIO (IDF default here) | 20 MHz SDIO + 20 MHz card (now) |
+|---|---|---|
+| 10-minute soak | 1,004 frames, POST 400 ms median / 502 ms p90, **2 resets** (C6 link timeouts) | 855 frames, POST 420 ms median / 545 ms p90, **0 resets**, 0 failed uploads |
+| Spoken answers | 12.9 s and 28.7 s clips played | 6 clips played (7.8–28.7 s); the frame loop pauses while a clip plays |
 
 ## Board facts (discovered 2026-10-25)
 
@@ -93,7 +114,7 @@ in ~36 ms).
 
 ## microSD card
 
-A FAT32 card in the slot (SDMMC slot 0: CLK 43, CMD 44, D0–D3 39–42, powered by LDO channel 4)
+A FAT32 card in the slot (SDMMC slot 0: CLK 43, CMD 44, D0–D3 39–42, 4-bit at 20 MHz, powered by LDO channel 4)
 is mounted at `/sdcard` after Wi-Fi comes up and used for:
 
 | Path | Purpose |
@@ -107,19 +128,24 @@ is mounted at `/sdcard` after Wi-Fi comes up and used for:
 Two things the P4 needs for this to work, both in `sdkconfig.defaults`: `CONFIG_VFS_MAX_COUNT=15`
 (esp_video registers every `/dev/video*` node with the VFS and the default table of 8 is full, so the
 card's `esp_vfs_fat_register` fails with `ESP_ERR_NO_MEM`), and the card is attached by hand to the
-SDMMC controller that ESP-Hosted already created for the C6 on slot 1 (`storage.c`): a second
+SDMMC controller that ESP-Hosted already created for the C6 on slot 1 (`main/storage_board.c`): a second
 `sdmmc_host_init()` returns `ESP_ERR_NOT_FOUND` on IDF 6.1 and the all-in-one mount helper gives up.
 
 A 64 GB card arrives formatted as exFAT, which IDF's FatFs cannot read. The firmware reports
 "card has no FAT filesystem"; build with `-DLOCI_SD_FORMAT_IF_NEEDED=1` once (it formats the card as
 FAT32, erasing it) or format it on a computer. Console: `sd` (card info), `objects` (cached memory),
-`offline` (play the cached summary).
+`offline` (play the cached summary), `requeue` (put backlog frames the host refused, kept in
+`backlog_bad/`, back in the upload queue), `reboot` (soft reset: the clock taken from the host
+survives it, a power cut does not; `status` shows the boot number and the clock's source).
+
+Backlog and voice files are named `<ms>_<boot>_<seq>`, so frames recorded before the clock is known
+(their `<ms>` counts from boot) no longer overwrite each other across resets.
 
 ## Offline questions (ESP-SR on the board)
 
 When the host cannot be reached, a button press no longer just plays the generic summary: the
 recorded clip is run through ESP-SR's audio front end (WebRTC noise suppression) and **MultiNet7
-English** (`voice_local.c`), with no wake word because the button is the trigger. The command list
+English** (`../common/loci_client/voice_local.c`), with no wake word because the button is the trigger. The command list
 is rebuilt whenever the cached memory changes: "what do you see" plus "where is my / where are my
 <label>" for every remembered label and for a fixed set of household objects. A recognised object
 plays `/sdcard/loci/obj_<label>.pcm` ("Your cup was last seen in the center, in the middle area."),
@@ -181,7 +207,7 @@ Known gap: `CONFIG_MBEDTLS_HAVE_TIME_DATE` is off (the IDF default), so certific
 are not checked; the board has no clock before its first host reply. Turning it on needs SNTP
 before the first HTTPS request, a follow-up for a production pendant.
 
-## Tuning (`main/board_p4_nano.h`, overridable with `-D`)
+## Tuning (`main/board_p4_nano.h` and `../common/loci_client/include/loci_config.h`, overridable with `-D`)
 
 | Macro | Default | Meaning |
 |---|---|---|
@@ -229,11 +255,19 @@ before the first HTTPS request, a follow-up for a production pendant.
   Cloudflare's edge sends `GTS Root R4` cross-signed by `GlobalSign Root CA`, the bundle verifier
   only looks up the issuer of the *last* certificate it receives, and that 1998 root is no longer in
   Mozilla's list (so not in the IDF bundle) although it is valid until 2028 and still shipped by
-  Apple and Microsoft. `certs/extra_roots.pem` adds it through
+  Apple and Microsoft. `../common/certs/extra_roots.pem` adds it through
   `CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH`; remove it once Cloudflare drops the cross-sign.
 * **`esp_video_init failed`** — camera ribbon not seated or a sensor other than OV5647: enable it
   under `Component config → Camera sensor configuration` (SC2336 is the other one Waveshare ships).
 * **`ES8311 not found on I2C 0x18`** — I2C pull-ups or a hung bus; power-cycle the board.
+* **`sdmmc_send_cmd returned 0x107`, `H_SDIO_DRV: Unrecoverable host sdio state`, then a reboot** —
+  the SDIO link to the C6 timed out twice in a row and ESP-Hosted restarted the P4. At the 40 MHz
+  maximum this happened twice in 10 minutes on 2026-10-26, once 4.7 s after boot before the card was
+  mounted, so it was not the card. The P4 was streaming 300 kB frames through the Cloudflare tunnel
+  from a different USB port than the day before. With `CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000`,
+  and the card at 20 MHz so the shared controller never re-clocks, the next 10 minutes had none. If
+  it comes back, suspect the power supply first: Wi-Fi TX bursts plus the speaker amplifier on a weak
+  USB port.
 * **No IP / `esp_wifi_init` error** — the C6 slave firmware must speak ESP-Hosted 2.x; the log prints
   the slave's version at start. Reset GPIO54 is pulsed on every boot (`HOST_CP_RESET_STRATEGY_ALWAYS`).
 * **Image upside down** — rotate on the host with `LOCI_ESP32_ROTATE=180` (no sensor flip is wired yet).

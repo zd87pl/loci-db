@@ -23,6 +23,10 @@ static esp_codec_dev_handle_t s_dev;
 esp_err_t audio_init(i2c_master_bus_handle_t i2c_bus, int volume_pct) {
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(BOARD_I2S_PORT, I2S_ROLE_MASTER);
   chan_cfg.auto_clear = true;
+  // 16 x 20 ms (default 6 x 15 ms): the RX driver keeps the newest 15 buffers while nobody reads,
+  // so push-to-talk starts with the ~300 ms before the loop noticed the button (10 kB per direction)
+  chan_cfg.dma_desc_num = 16;
+  chan_cfg.dma_frame_num = 320;
   ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &s_tx, &s_rx), TAG, "i2s_new_channel");
 
   i2s_std_config_t std_cfg = {
@@ -88,7 +92,8 @@ esp_err_t audio_init(i2c_master_bus_handle_t i2c_bus, int volume_pct) {
   return ESP_OK;
 }
 
-bool audio_ready(void) { return s_dev != NULL; }
+bool audio_speaker_ready(void) { return s_dev != NULL; }
+bool audio_mic_ready(void) { return s_dev != NULL; }
 
 esp_err_t audio_play_pcm16(const int16_t *mono, size_t samples) {
   if (!s_dev || samples == 0) return ESP_ERR_INVALID_STATE;

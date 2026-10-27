@@ -26,6 +26,7 @@ import io
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -65,40 +66,64 @@ class QueryIntent:
         return {"kind": self.kind, "object_name": self.object_name, "room": self.room}
 
 
+# The patterns run on normalised text (see ``_normalise``): lower case, no punctuation
+# but apostrophes, no wake word or filler in front, no time phrase or "please" at the end.
 _WHERE_PATTERNS = [
-    r"where(?:'s| is| are| did i (?:put|leave|place|set))?\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
-    r"(?:find|locate|show me)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
-    r"(?:have you seen|did you see)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
-    r"(?:what happened to|where did)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$|go)",
+    # "where did my keys go" before the generic form, which would take "did my keys go"
+    r"where\s+(?:did|has|have)\s+(?:my\s+|the\s+|our\s+)?(.+?)\s+(?:go|gone|went|end up|ended up)$",
+    r"where(?:'s| is| are| was| were| did (?:i|we|you) (?:last )?(?:put|leave|place|set|drop|see)"
+    r"| have (?:i|we) (?:put|left))?\s+(?:my\s+|the\s+)?(.+?)$",
+    r"(?:find|locate|show me)\s+(?:my\s+|the\s+)?(.+?)$",
+    r"(?:have you seen|did you see|can you see|do you see)\s+"
+    r"(?:my\s+|the\s+|a\s+|an\s+|any\s+)?(.+?)$",
+    r"(?:looking|searching|hunting)\s+for\s+(?:my\s+|the\s+)?(.+?)$",
+    r"(?:^|\s)lost\s+(?:my\s+|the\s+)(.+?)$",
+    r"what happened to\s+(?:my\s+|the\s+)?(.+?)$",
+    # "is there a bottle (in the kitchen)", "is my laptop in the kitchen"; without a room the
+    # second shape is a yes/no question about something else ("is my laptop charged")
+    r"^(?:is|are)\s+there\s+(?:a\s+|an\s+|any\s+|my\s+|the\s+)?(.+)$",
+    r"^(?:is|are)\s+(?:my\s+|the\s+|a\s+|an\s+|our\s+|your\s+)(.+?\s+(?:in|inside|around)\s+.+)$",
 ]
 
 _HISTORY_PATTERNS = [
     r"(?:when|last time)\s+(?:was|did|have)\s+(?:i\s+)?"
-    r"(?:seen|used|placed|put|left)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
+    r"(?:seen|used|placed|put|left)\s+(?:my\s+|the\s+)?(.+?)$",
     r"when\s+(?:did you|did i|have you)\s+(?:last\s+)?"
-    r"(?:see|seen|spot|notice)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$)",
+    r"(?:see|seen|spot|notice)\s+(?:my\s+|the\s+)?(.+?)$",
+    r"the\s+last\s+time\s+(?:you|i|we)\s+(?:saw|seen|spotted|noticed|had|used)\s+(?:my\s+|the\s+)?(.+?)$",
     r"when\s+(?:was\s+)?(?:my\s+|the\s+)?(.+?)\s+(?:last\s+)?(?:seen|spotted|detected)",
-    r"how\s+long\s+(?:ago|since)\s+(?:was|did|have)\s+(?:my\s+|the\s+)?(.+?)(?:\?|$|seen|spotted)",
-    r"history\s+(?:of\s+)?(?:my\s+)?(.+?)(?:\?|$)",
+    r"how\s+long\s+(?:ago|since)\s+(?:was|did|have)\s+(?:my\s+|the\s+)?(.+?)(?:$|seen|spotted)",
+    r"how\s+long\s+since\s+(?:my\s+|the\s+)?(.+?)\s+(?:was|were)\s+(?:last\s+)?(?:seen|spotted)$",
+    r"how\s+long\s+since\s+(?:you|i)\s+(?:last\s+)?(?:saw|seen)\s+(?:my\s+|the\s+)?(.+?)$",
+    r"history\s+(?:of\s+)?(?:my\s+)?(.+?)$",
 ]
 
 _LIST_PATTERNS = [
     r"(?:what(?:'s| is| are)?\s+(?:in\s+the\s+room|around|nearby|here|visible))",
     r"(?:list|show|tell me)\s+(?:all\s+)?(?:the\s+)?objects",
-    r"what\s+(?:objects|things|items)\s+(?:can you|do you)\s+(?:see|know about)",
-    r"what\s+do\s+(?:i|you)\s+(?:have|see|know)",
+    r"^(?:list|name)\s+(?:all|everything|every|what)\b",
+    r"what\s+(?:can|could|did|have)\s+you\s+(?:see|seen|spot|spotted|notice|noticed|remember)",
+    r"what\s+do\s+(?:i|you)\s+(?:have|see|know|remember)",
+    r"(?:tell me|show me)\s+what\s+(?:you\s+)?(?:can\s+)?"
+    r"(?:see|is around|'s around|is here|is nearby)",
+    r"^describe\b",
+    # "what objects do you have in your memory", "what things are in the kitchen"
+    r"what\s+(?:objects|things|items|stuff)\b"
+    r"(?:.*?\s+in\s+(?:the\s+|my\s+|your\s+)?(?P<room>[\w' ]+?))?$",
     # handheld: "what's in the kitchen" / "what is in my living room"
-    r"what(?:'s| is)\s+in\s+(?:the\s+|my\s+)?(?P<room>[\w ]+?)(?:\?|$)",
+    r"what(?:'s| is)\s+in\s+(?:the\s+|my\s+|your\s+)?(?P<room>[\w' ]+?)$",
 ]
 
 _CHANGES_PATTERNS = [
     r"what(?:'s| has| have)\s+(?:changed|moved|been moved)",
     r"(?:any|what)\s+(?:new|recent)\s+(?:changes|updates|movements)",
+    r"(?:has\s+)?anything\s+(?:changed|moved|new|different)"
+    r"(?:\s+(?:in|around)\s+(?:the\s+|my\s+)?(?P<room>[\w' ]+?))?$",
     # handheld: "what changed in the kitchen", "what's new around my living room".
     # The auxiliary is optional: the spec's "what(?:'s| has| have| is)" alone misses
     # the plain past tense "what changed", which is the demo's own phrase.
     r"what(?:'s|s| has| have| is)?\s+(?:changed|moved|been moved|new|different)"
-    r"(?:\s+(?:in|around)\s+(?:the\s+|my\s+)?(?P<room>[\w ]+?))?(?:\?|$)",
+    r"(?:\s+(?:in|around)\s+(?:the\s+|my\s+)?(?P<room>[\w' ]+?))?$",
 ]
 
 _WHERE_AM_I_PATTERNS = [
@@ -108,13 +133,71 @@ _WHERE_AM_I_PATTERNS = [
 
 # Trailing "in the kitchen" / "in my living room" on an object name.
 _ROOM_TAIL = re.compile(
-    r"^(?P<obj>.+)\s+(?:in|inside|around)\s+(?:the\s+|my\s+|our\s+)?(?P<room>[\w ]+?)\s*$"
+    r"^(?P<obj>.+)\s+(?:in|inside|around)\s+(?:the\s+|my\s+|our\s+|your\s+)?(?P<room>[\w' ]+?)\s*$"
 )
 
 # Captured "rooms" that mean "here", not a room name.
 _NOT_A_ROOM = frozenset(
     {"room", "the room", "here", "view", "frame", "scene", "picture", "front", "front of me"}
 )
+
+# A spoken room that is not a known room still counts when it ends in one of these, so
+# "where is my mug in the bedroom" gets an honest "not seen in the bedroom" while
+# "in your memory" or "in the car" is not taken for a room.
+_ROOM_NOUNS = frozenset(
+    {
+        "attic", "balcony", "basement", "bathroom", "bedroom", "cellar", "closet", "corridor",
+        "den", "downstairs", "entrance", "entryway", "foyer", "garage", "garden", "hall",
+        "hallway", "kitchen", "kitchenette", "landing", "laundry", "lobby", "loft", "lounge",
+        "nursery", "office", "pantry", "patio", "porch", "restroom", "room", "shed", "study",
+        "upstairs", "washroom", "workshop", "yard",
+    }
+)  # fmt: skip
+
+_SPELLINGS = {
+    "wheres": "where's",
+    "whats": "what's",
+    "where'd": "where did",
+    "where're": "where are",
+}
+
+# Wake word, fillers and "can you" in front of a question; "please" and thanks anywhere.
+_WAKE = r"(?:loci|lucy|lucie|loki|low key)"  # how Whisper tiny hears "Loci"
+_LEAD_FILLER = re.compile(
+    rf"^(?:(?:hey|hi|hello|ok|okay)\s+{_WAKE}|{_WAKE}|hey|hi|hello|ok|okay|um+|uh+|erm|er|hmm+|so|well|"
+    r"and|now|right|alright|all right|excuse me|sorry|yeah|oh|do you know|i wonder)(?:\s+|$)"
+)
+_LEAD_POLITE = re.compile(
+    r"^(?:can|could|would|will)\s+you\s+(?=(?:tell|find|locate|show|help|check|look|describe|list|remind)\b)"
+)
+_COURTESY = re.compile(r"\b(?:please|thank you very much|thank you|thanks)\b")
+
+# A time phrase at the end ("since lunch", "yesterday", "right now") is not part of the
+# object or room; "how long since ..." keeps its "since".
+_TIME_TAIL = re.compile(
+    r"\s+(?:(?<!long )since\s+.+|yesterday|today|tonight|this (?:morning|afternoon|evening|week)"
+    r"|last night|earlier(?: today)?|recently|lately|just now|right now|now|at the moment"
+    r"|(?:a|an|one|two|three|\d+|a few|a couple of)\s+(?:minutes?|hours?|days?)\s+ago|a while ago)$"
+)
+
+_OBJ_HEAD = re.compile(r"^(?:my|the|a|an|our|your|any|some|that|this)\s+")
+_OBJ_TAIL = re.compile(r"\s+(?:is|are|was|were|go|gone|went|anywhere|again|for me|at the moment)$")
+
+# Words that make leftover text a sentence rather than an object name.
+_NOT_IN_OBJECTS = frozenset(
+    {
+        "what", "where", "when", "who", "why", "how", "which", "whose",
+        "is", "are", "was", "were", "am", "do", "does", "did", "don", "doesn", "didn",
+        "can", "could", "would", "will", "won", "should", "shall", "have", "has", "had",
+        "may", "might", "isn", "aren", "wasn", "let",
+        "i", "you", "we", "me", "it", "he", "she", "they", "us", "them",
+        "tell", "say", "thank", "thanks",
+    }
+)  # fmt: skip
+_NOT_OBJECTS = frozenset(
+    {"yes", "no", "hello", "hi", "hey", "bye", "goodbye", "okay", "ok", "stop", "cancel",
+     "nothing", "never mind", "nevermind", "help", "loci", "sorry", "test", "testing"}
+)  # fmt: skip
 
 
 def _clean_room(text: str) -> str:
@@ -145,15 +228,49 @@ def match_room(captured: str | None, known_rooms: Iterable[str] = ()) -> str:
     return cap
 
 
+def _room(captured: str | None, known_rooms: Iterable[str]) -> str:
+    """``match_room``, but only for a known room or a phrase that ends in a room noun."""
+    known = list(known_rooms or ())
+    room = match_room(captured, known)
+    if not room or room in known:
+        return room
+    return room if room.split()[-1] in _ROOM_NOUNS else ""
+
+
 def _split_room(obj: str, known_rooms: Iterable[str]) -> tuple[str, str]:
-    """ "mug in the living room" -> ("mug", "living_room")."""
+    """ "mug in the living room" -> ("mug", "living_room").
+
+    A tail that is not a room ("cup in your memory", "phone in the car") is dropped, so the
+    object is still found wherever it was seen last.
+    """
     m = _ROOM_TAIL.match(obj)
     if not m:
         return obj, ""
-    room = match_room(m.group("room"), known_rooms)
-    if not room:
-        return obj, ""
-    return m.group("obj").strip(), room
+    return m.group("obj").strip(), _room(m.group("room"), known_rooms)
+
+
+def _clean_object(obj: str) -> str:
+    """Strip determiners in front and "is" / "anywhere" / "go" at the end."""
+    obj = obj.strip()
+    prev = None
+    while obj != prev:
+        prev = obj
+        obj = _OBJ_TAIL.sub("", _OBJ_HEAD.sub("", obj)).strip()
+    return obj
+
+
+def _normalise(text: str) -> str:
+    """Lower case, punctuation off, wake word / fillers / courtesy / trailing time phrase off."""
+    t = text.lower().replace("’", "'")
+    t = re.sub(r"[^\w' -]+", " ", t)
+    t = " ".join(_SPELLINGS.get(w, w) for w in t.split())
+    t = " ".join(_COURTESY.sub(" ", t).split())
+    prev = None
+    while t != prev:
+        prev = t
+        t = _LEAD_POLITE.sub("", _LEAD_FILLER.sub("", t))
+        t = _TIME_TAIL.sub("", t).strip()
+    return t
 
 
 def _search(patterns: Sequence[str], cleaned: str) -> tuple[re.Match[str] | None, str | None]:
@@ -172,9 +289,10 @@ def _search(patterns: Sequence[str], cleaned: str) -> tuple[re.Match[str] | None
 
 def parse_intent(text: str, known_rooms: Iterable[str] = ()) -> QueryIntent:
     """Extract structured intent (kind, object, room) from a transcribed query."""
-    cleaned = text.strip().lower().rstrip("?!.")
-    cleaned = " ".join(cleaned.split())
+    cleaned = _normalise(text)
     rooms = [r for r in (known_rooms or ()) if isinstance(r, str)]
+    if not cleaned:  # "Thank you." (Whisper's favourite on silence), "um", "hey loci"
+        return QueryIntent(kind="unknown", object_name="", raw_text=text)
 
     for pat in _WHERE_AM_I_PATTERNS:
         if re.search(pat, cleaned):
@@ -183,38 +301,32 @@ def parse_intent(text: str, known_rooms: Iterable[str] = ()) -> QueryIntent:
     # Check change/movement queries
     m, room = _search(_CHANGES_PATTERNS, cleaned)
     if m:
-        return QueryIntent(
-            kind="changes", object_name="", raw_text=text, room=match_room(room, rooms)
-        )
+        return QueryIntent(kind="changes", object_name="", raw_text=text, room=_room(room, rooms))
 
     # Check list-all queries
     m, room = _search(_LIST_PATTERNS, cleaned)
     if m:
         return QueryIntent(
-            kind="list_objects", object_name="", raw_text=text, room=match_room(room, rooms)
+            kind="list_objects", object_name="", raw_text=text, room=_room(room, rooms)
         )
 
-    # Check history queries
-    for pat in _HISTORY_PATTERNS:
-        m = re.search(pat, cleaned)
-        if m:
-            obj = m.group(1).strip().rstrip("?")
-            obj, room_name = _split_room(obj, rooms)
-            return QueryIntent(kind="history", object_name=obj, raw_text=text, room=room_name)
+    # History, then where-is: the object is what the pattern captured, minus a room tail
+    for kind, patterns in (("history", _HISTORY_PATTERNS), ("where_is", _WHERE_PATTERNS)):
+        for pat in patterns:
+            m = re.search(pat, cleaned)
+            if m:
+                obj, room_name = _split_room(m.group(1).strip(), rooms)
+                obj = _clean_object(obj)
+                if obj:
+                    return QueryIntent(kind=kind, object_name=obj, raw_text=text, room=room_name)
 
-    # Check where-is queries
-    for pat in _WHERE_PATTERNS:
-        m = re.search(pat, cleaned)
-        if m:
-            obj = m.group(1).strip().rstrip("?")
-            obj, room_name = _split_room(obj, rooms)
-            return QueryIntent(kind="where_is", object_name=obj, raw_text=text, room=room_name)
-
-    # Generic fallback: treat as where_is with the full cleaned text as object
-    # (handles short queries like "my keys?" or "glasses?")
-    simple_match = re.match(r"^(?:my\s+|the\s+)?(.+)$", cleaned)
-    if simple_match and len(cleaned) < 40:
-        obj, room_name = _split_room(simple_match.group(1), rooms)
+    # Bare object names ("my keys", "glasses", "mug in the kitchen"): at most three words
+    # and nothing that makes it a sentence, so "what time is it" or "tell me a joke" stay
+    # unknown instead of becoming a search for an object called that.
+    obj, room_name = _split_room(cleaned, rooms)
+    obj = _clean_object(obj)
+    words = set(re.split(r"[ ']", cleaned))
+    if obj and len(obj.split()) <= 3 and not words & _NOT_IN_OBJECTS and obj not in _NOT_OBJECTS:
         return QueryIntent(kind="where_is", object_name=obj, raw_text=text, room=room_name)
 
     return QueryIntent(kind="unknown", object_name="", raw_text=text)
@@ -615,8 +727,48 @@ def ensure_pyav_compat() -> bool:
     return True
 
 
+# Whisper's stock phrases for silence, breathing or a bumped button (it learned them from
+# subtitles). A transcript that is only one of these is treated as "nothing was said".
+_STT_HALLUCINATIONS = frozenset(
+    {
+        "thank you", "thank you very much", "thanks", "thanks for watching",
+        "thank you for watching", "thank you so much", "you", "bye", "bye bye", "okay",
+        "oh", "uh", "um", "hmm", "so", "the end", "please subscribe",
+        "subtitles by the amara org community",
+    }
+)  # fmt: skip
+
+# Household objects the camera can recognise, so a question about one not seen yet is still
+# heard right; the remembered labels come first.
+_STT_HOUSEHOLD = ("cup", "bottle", "cell phone", "laptop", "remote", "book", "keyboard", "mouse",
+                  "backpack", "handbag", "umbrella", "scissors", "chair", "bowl")  # fmt: skip
+
+
+def is_stt_hallucination(text: str) -> bool:
+    """True for an empty transcript or one that is only a Whisper stock phrase."""
+    t = " ".join(re.sub(r"[^\w' ]+", " ", text.lower()).split())
+    return not t or t in _STT_HALLUCINATIONS
+
+
+def stt_prompt(labels: Iterable[str] = (), rooms: Iterable[str] = ()) -> str:
+    """Vocabulary hint for Whisper's ``initial_prompt``: the things the user can ask about."""
+    names = [str(x).replace("_", " ") for x in (*labels, *_STT_HOUSEHOLD) if x]
+    labs = list(dict.fromkeys(names))[:40]
+    rms = list(dict.fromkeys(str(r).replace("_", " ") for r in rooms if r))[:10]
+    prompt = "Hey Loci, where is my " + ", ".join(labs) + "?"
+    if rms:
+        prompt += " What changed in the " + ", ".join(rms) + "?"
+    return prompt
+
+
 class WhisperSTT:
-    """Speech-to-text via OpenAI Whisper API or local faster-whisper."""
+    """Speech-to-text via OpenAI Whisper API or local faster-whisper.
+
+    Local decoding (``transcribe_samples``) uses Silero VAD, a vocabulary prompt built from
+    ``vocabulary()`` (set by :class:`VoicePipeline`: remembered labels and rooms) and drops
+    transcripts that are only Whisper's stock phrases for silence. ``WHISPER_BEAM`` (1) and
+    ``WHISPER_VAD`` (1) tune it; ``warm_up()`` loads the model off the event loop.
+    """
 
     def __init__(self) -> None:
         self._use_local = os.environ.get("WHISPER_LOCAL", "0") == "1"
@@ -624,6 +776,8 @@ class WhisperSTT:
         self._model_name = os.environ.get("WHISPER_MODEL", "whisper-1")
         self._local_model = None
         self._openai_client = None
+        self._load_lock = threading.Lock()
+        self.vocabulary: Callable[[], tuple[list[str], list[str]]] | None = None
 
     def _get_openai_client(self):
         if self._openai_client is None:
@@ -633,17 +787,91 @@ class WhisperSTT:
         return self._openai_client
 
     def _load_local_model(self):
+        """Blocking (seconds on a cold start): call it from a thread or an executor."""
         if self._local_model is not None:
             return
-        try:
-            from faster_whisper import WhisperModel
-
+        with self._load_lock:
+            if self._local_model is not None:
+                return
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError:
+                logger.warning("faster-whisper not installed — falling back to OpenAI API")
+                self._use_local = False
+                return
             model_size = os.environ.get("WHISPER_LOCAL_MODEL", "base")
-            self._local_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            try:
+                # cached weights first: a plain load asks huggingface.co for updates every time
+                model = WhisperModel(
+                    model_size, device="cpu", compute_type="int8", local_files_only=True
+                )
+            except Exception:
+                model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            self._local_model = model
             logger.info("Loaded local Whisper model: %s", model_size)
-        except ImportError:
-            logger.warning("faster-whisper not installed — falling back to OpenAI API")
-            self._use_local = False
+
+    def warm_up(self) -> None:
+        """Load the local model and run one decode, so the first question does not pay for it."""
+        if not self._use_local:
+            return
+        t0 = time.perf_counter()
+        self._load_local_model()
+        if self._local_model is None:
+            return
+        import numpy as np
+
+        silence = np.zeros(WHISPER_SAMPLE_RATE, dtype=np.float32)
+        list(self._local_model.transcribe(silence, language="en", beam_size=1, vad_filter=False)[0])
+        self.transcribe_samples(silence)  # loads the Silero VAD model too (~0.9 s the first time)
+        logger.info("Whisper warmed up in %.0f ms", (time.perf_counter() - t0) * 1000.0)
+
+    def decode_options(self) -> dict:
+        opts: dict[str, Any] = {
+            "beam_size": max(1, int(os.environ.get("WHISPER_BEAM", "1") or 1)),
+            "temperature": (0.0, 0.2, 0.4),
+            "condition_on_previous_text": False,
+            "without_timestamps": True,
+        }
+        if os.environ.get("WHISPER_VAD", "1") != "0":
+            opts["vad_filter"] = True
+            opts["vad_parameters"] = {
+                "threshold": 0.5,
+                "min_speech_duration_ms": 200,
+                "min_silence_duration_ms": 300,
+                "speech_pad_ms": 200,
+            }
+        labels: list[str] = []
+        rooms: list[str] = []
+        if self.vocabulary is not None:
+            try:
+                labels, rooms = self.vocabulary()
+            except Exception as e:
+                logger.debug("STT vocabulary unavailable: %s", e)
+        opts["initial_prompt"] = stt_prompt(labels, rooms)
+        return opts
+
+    def transcribe_samples(self, audio: Any, language: str = "en") -> str:
+        """Blocking local decode with the guards (run it in an executor); '' for no speech."""
+        self._load_local_model()
+        if self._local_model is None:
+            return ""
+        segments, _info = self._local_model.transcribe(
+            audio, language=language, **self.decode_options()
+        )
+        segs = list(segments)
+        if not segs:
+            return ""  # VAD found no speech
+        if all(
+            getattr(s, "no_speech_prob", 0.0) > 0.6 and getattr(s, "avg_logprob", 0.0) < -1.0
+            for s in segs
+        ):
+            logger.info("STT: dropped a clip Whisper itself rates as no speech")
+            return ""
+        text = " ".join(s.text.strip() for s in segs).strip()
+        if is_stt_hallucination(text):
+            logger.info("STT: dropped %r (Whisper's stock phrase for silence)", text)
+            return ""
+        return text
 
     async def transcribe(self, audio_bytes: bytes, language: str = "en") -> str:
         """Transcribe audio bytes to text. Returns empty string on failure."""
@@ -671,7 +899,8 @@ class WhisperSTT:
             return ""
 
     async def _transcribe_local(self, audio_bytes: bytes, language: str) -> str:
-        self._load_local_model()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._load_local_model)  # never on the event loop
         if self._local_model is None:
             return await self._transcribe_openai(audio_bytes, language)
         try:
@@ -683,18 +912,7 @@ class WhisperSTT:
             if audio is None:
                 ensure_pyav_compat()
                 audio = io.BytesIO(audio_bytes)
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: list(
-                    self._local_model.transcribe(
-                        audio,
-                        language=language,
-                        beam_size=1,
-                    )[0]
-                ),
-            )
-            return " ".join(seg.text.strip() for seg in result)
+            return await loop.run_in_executor(None, self.transcribe_samples, audio, language)
         except Exception as e:
             logger.error("Local Whisper transcription failed: %s", e)
             return ""
@@ -815,18 +1033,30 @@ class TTS:
         return buf.getvalue()
 
     async def _synthesize_edge(self, text: str) -> bytes:
-        """Synthesize using Microsoft Edge TTS (edge-tts library)."""
+        """Synthesize using Microsoft Edge TTS (edge-tts library).
+
+        A cloud service: ``TTS_TIMEOUT_S`` (10) bounds it, so a stalled connection costs the
+        answer's audio rather than holding the board's voice request until it times out.
+        """
         try:
             import edge_tts
+        except ImportError:
+            logger.debug("edge-tts not installed")
+            return b""
 
+        async def stream() -> bytes:
             communicate = edge_tts.Communicate(text, self._edge_voice)
             buf = io.BytesIO()
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
                     buf.write(chunk["data"])
             return buf.getvalue()
-        except ImportError:
-            logger.debug("edge-tts not installed")
+
+        timeout = float(os.environ.get("TTS_TIMEOUT_S", "10") or 10)
+        try:
+            return await asyncio.wait_for(stream(), timeout=timeout)
+        except TimeoutError:
+            logger.error("Edge TTS gave no audio within %.0f s", timeout)
             return b""
         except Exception as e:
             logger.error("Edge TTS error: %s", e)
@@ -864,7 +1094,16 @@ class VoicePipeline:
         self._vlm = vlm_client
         self._pose_provider = pose_provider
         self._stt = WhisperSTT()
+        self._stt.vocabulary = self._stt_vocabulary
         self._tts = TTS()
+
+    def _stt_vocabulary(self) -> tuple[list[str], list[str]]:
+        """Remembered labels and rooms, for Whisper's vocabulary prompt."""
+        tracked = getattr(self._memory, "tracked_labels", None)
+        labels: list[str] = []
+        with contextlib.suppress(Exception):
+            labels = _str_list(tracked() if callable(tracked) else tracked)
+        return labels, self.known_rooms()
 
     @dataclass
     class QueryResult:

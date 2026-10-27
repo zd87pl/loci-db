@@ -8,68 +8,34 @@
 
 #include "diskio_impl.h"
 #include "diskio_sdmmc.h"
-#include "driver/sdmmc_host.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "ff.h"
-#include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "sdmmc_cmd.h"
 
-#include "board_p4_nano.h"
+#include "loci_hw.h"
 
 static const char *TAG = "storage";
 static sdmmc_card_t *s_card;  // non-NULL once the card is initialised and registered with FatFs/VFS
-static sdmmc_host_t s_host;
-static sd_pwr_ctrl_handle_t s_pwr;
 static FATFS *s_fs;
 static BYTE s_pdrv = FF_DRV_NOT_USED;
 static char s_drive[3] = "0:";
 static storage_info_t s_info;
 
-// ESP-Hosted drives the ESP32-C6 through SDMMC slot 1 and has created the one SDMMC controller
-// long before the app runs; a second sdmmc_host_init() returns ESP_ERR_NOT_FOUND on IDF 6.1 and
-// the all-in-one FAT mount helper gives up on that. So the card on slot 0 is brought up by hand on
-// the shared controller: slot init -> card init -> FatFs drive -> VFS -> f_mount, one log line each.
-// The card stays registered after a "no filesystem" result so storage_init(true) can format later.
+// The board hook (storage_board_open_card) powers the slot and initialises the card over SDMMC or
+// SPI; the rest is the same for every board and done by hand rather than with the all-in-one FAT
+// mount helpers (which cannot share the P4's SDMMC controller with ESP-Hosted): FatFs drive -> VFS
+// -> f_mount, one log line each. The card stays registered after a "no filesystem" result so
+// storage_init(true) can format later.
 
 static esp_err_t bring_up_card(void) {
-  s_host = (sdmmc_host_t)SDMMC_HOST_DEFAULT();
-  s_host.slot = SDMMC_HOST_SLOT_0;  // CLK 43, CMD 44, D0-D3 39-42: the slot-0 IOMUX pins on the P4
-  s_host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
-
-  esp_err_t err = sdmmc_host_init();
-  if (err == ESP_OK) {
-    ESP_LOGI(TAG, "SDMMC controller created by the app");
-  } else {
-    ESP_LOGI(TAG, "SDMMC controller already up (%s); sharing it with ESP-Hosted", esp_err_to_name(err));
-  }
-
-  sd_pwr_ctrl_ldo_config_t ldo_cfg = {.ldo_chan_id = BOARD_SD_LDO_CHANNEL};
-  ESP_RETURN_ON_ERROR(sd_pwr_ctrl_new_on_chip_ldo(&ldo_cfg, &s_pwr), TAG, "SD LDO power control");
-  s_host.pwr_ctrl_handle = s_pwr;
-
-  sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
-  slot.cd = SDMMC_SLOT_NO_CD;
-  slot.wp = SDMMC_SLOT_NO_WP;
-  slot.width = 4;
-  slot.flags = 0;
-  err = sdmmc_host_init_slot(SDMMC_HOST_SLOT_0, &slot);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "slot 0 init failed: %s", esp_err_to_name(err));
-    goto fail_pwr;
-  }
-
-  sdmmc_card_t *card = calloc(1, sizeof(sdmmc_card_t));
-  if (!card) {
-    err = ESP_ERR_NO_MEM;
-    goto fail_slot;
-  }
-  err = sdmmc_card_init(&s_host, card);
+  sdmmc_card_t *card = NULL;
+  esp_err_t err = storage_board_open_card(&card);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "no card or card init failed: %s", esp_err_to_name(err));
-    goto fail_card;
+    return err;
   }
   snprintf(s_info.name, sizeof(s_info.name), "%.7s", card->cid.name);
   s_info.capacity_bytes = (uint64_t)card->csd.capacity * card->csd.sector_size;
@@ -100,13 +66,7 @@ fail_diskio:
   ff_diskio_unregister(s_pdrv);
   s_pdrv = FF_DRV_NOT_USED;
 fail_card:
-  free(card);
-fail_slot:
-  sdmmc_host_deinit_slot(SDMMC_HOST_SLOT_0);
-fail_pwr:
-  sd_pwr_ctrl_del_on_chip_ldo(s_pwr);
-  s_pwr = NULL;
-  s_host.pwr_ctrl_handle = NULL;
+  storage_board_close_card(card);
   return err;
 }
 

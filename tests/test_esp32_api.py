@@ -207,6 +207,106 @@ def test_frame_post_rejects_empty_and_non_jpeg() -> None:
     assert r.status_code == 400 and "JPEG" in r.json()["detail"]
 
 
+def test_frame_upload_cut_off_mid_body_is_a_quiet_499(caplog) -> None:
+    """A board that resets mid-upload ends the body with a disconnect: a log line, no traceback."""
+    import asyncio
+
+    t = _build()
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/esp32/frame",
+        "raw_path": b"/api/esp32/frame",
+        "query_string": b"device=w11",
+        "root_path": "",
+        "headers": [(b"content-type", b"image/jpeg"), (b"content-length", b"50000")],
+        "client": ("192.168.1.50", 50000),
+        "server": ("testserver", 80),
+    }
+    messages = iter(
+        [
+            {"type": "http.request", "body": _jpeg()[:100], "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+    )
+
+    async def receive():
+        return next(messages)
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    with caplog.at_level("INFO"):
+        asyncio.run(t.app(scope, receive, send))
+    assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 499
+    assert "cut off" in caplog.text
+    assert t.hub.status()["frames_total"] == 0
+
+
+def _raw_frame_post(t, headers: list[tuple[bytes, bytes]], messages) -> list[dict]:
+    """Drive the ASGI app with hand-made body messages (chunked bodies, stalls)."""
+    import asyncio
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/esp32/frame",
+        "raw_path": b"/api/esp32/frame",
+        "query_string": b"device=w11",
+        "root_path": "",
+        "headers": [(b"content-type", b"image/jpeg"), *headers],
+        "client": ("192.168.1.50", 50000),
+        "server": ("testserver", 80),
+    }
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(t.app(scope, messages, send))
+    return sent
+
+
+def test_frame_upload_size_cap_and_deadline() -> None:
+    import asyncio
+
+    t = _build(max_upload_bytes=100_000, body_deadline_s=0.2)
+    big = b"\xff\xd8" + b"\0" * 150_000
+    r = t.client.post("/api/esp32/frame", content=big, headers={"Content-Type": "image/jpeg"})
+    assert r.status_code == 413  # declared Content-Length over the cap
+
+    chunks = iter([_jpeg()[:2] + b"\0" * 60_000, b"\0" * 60_000, b""])
+
+    async def chunked():  # no Content-Length: the cap is enforced while reading
+        data = next(chunks)
+        return {"type": "http.request", "body": data, "more_body": bool(data)}
+
+    assert _raw_frame_post(t, [], chunked)[0]["status"] == 413
+
+    first = [True]
+
+    async def stalled():  # a board that sends 100 bytes and then nothing
+        if first[0]:
+            first[0] = False
+            return {"type": "http.request", "body": _jpeg()[:100], "more_body": True}
+        await asyncio.sleep(5)
+        return {"type": "http.disconnect"}
+
+    sent = _raw_frame_post(t, [(b"content-length", b"50000")], stalled)
+    assert sent[0]["status"] == 408
+    assert t.hub.status()["frames_total"] == 0
+    ok = t.client.post("/api/esp32/frame", content=_jpeg(), headers={"Content-Type": "image/jpeg"})
+    assert ok.status_code == 200
+
+
 def test_frame_jpg_and_status() -> None:
     t = _build()
     assert t.client.get("/api/esp32/frame.jpg").status_code == 404

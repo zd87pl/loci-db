@@ -39,7 +39,7 @@ listed at ~1.8× the S3 in Espressif's tables) before committing to a PCB.
 | RAM for detector + speech + hot window | 8 MB PSRAM (2.4–2.9 MB free with everything loaded), internal heap minimum 17.5 kB | 32 MB PSRAM | **P4** |
 | Camera | OV3660 3 MP DVP, JPEG on the sensor, no ISP, fixed focus; its 20 MHz clock disturbed Wi-Fi and the SD lines, runs at 10 MHz | OV5647 5 MP MIPI, P4 ISP + hardware JPEG, fixed focus | P4 for image pipeline; S3 is simpler |
 | Thin-client streaming to the host | **2.0 fps, POST median 109 ms, p90 205 ms**, 1024×768 frames | 2.0 fps, 145–220 ms per POST, 1280×960 frames | even |
-| Wi-Fi | native in the S3, −31 to −56 dBm with the u.FL antenna (unusable without it) | C6 over SDIO via ESP-Hosted: retention-RAM boot loops, shared SDMMC, pinned versions | **W11** (one chip, no Hosted) |
+| Wi-Fi | native in the S3, −31 to −56 dBm with the u.FL antenna (unusable without it) | C6 over SDIO via ESP-Hosted: retention-RAM boot loops, shared SDMMC, pinned versions, link timeouts at 40 MHz (2 resets in 10 min; none at 20 MHz) | **W11** (one chip, no Hosted) |
 | BLE phone tether | native BLE 5 in the S3 | BLE on the C6, through ESP-Hosted's HCI | **W11** |
 | Battery and power | Li-ion charger + BAT pads on the board; deep sleep ≤ 8 µA (vendor); one chip | no charger; P4 + C6 always on | **W11** |
 | Size and weight | module 24.5 × 17.8 × 4.5 mm, 2.4 g, plus a stacked expansion board | 50 × 50 mm dev board with RJ45 | **W11** |
@@ -132,6 +132,21 @@ Problems the desk test found, and what fixed them:
 Backlog frames captured before the board first hears from the host this boot carry only a
 monotonic stamp, so the host files them at arrival time rather than capture time. A per-boot id in
 the file name would let the board convert them once the clock is known.
+
+### The P4-NANO again, on the shared code and the cloud link
+
+After the W11, the P4-NANO went back on the desk with the same microSD card. It was flashed with
+`0.5.0-p4`, the first P4 run of the shared `loci_client`, and kept streaming to the cloud host
+(`https://loci.0x7d0.com`, host URL and token from NVS):
+- **Boot:** same retention-RAM margin as before (10,800 B); camera, codec, card and ESP-SR came up.
+- **Stream:** 1280×960 frames through the tunnel, POST 400–420 ms median.
+- **Speaker:** the answers to questions asked through the tunnel played (7.8–28.7 s clips).
+
+With the C6's SDIO link at its 40 MHz maximum the P4 reset twice in 10 minutes, on link timeouts
+("Unrecoverable host sdio state"). At 20 MHz, with the card at 20 MHz too, the next 10 minutes had no
+reset. The board was on a different USB port and cable that day, because the Mac's USB-C ports
+would not power it, so the power supply is the other suspect if it comes back. The W11 has no
+second chip to lose a link to; this is part of the ESP-Hosted cost in the decision table.
 
 ## 3. Vendor numbers for on-device detection (ESP-DL model zoo, int8)
 

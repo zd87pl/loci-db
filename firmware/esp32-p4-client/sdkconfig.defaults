@@ -45,6 +45,13 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=8
 CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=8
 
+# SDIO to the C6 at 20 MHz instead of the 40 MHz maximum: at 40 MHz the link timed out now and then
+# ("sdmmc_send_cmd returned 0x107", "Unrecoverable host sdio state", host restart: 2 resets in 10 min
+# while streaming 320 kB frames through the tunnel, once 4.7 s after boot). 20 MHz x 4 bits is still
+# ~10 MB/s, far above what Wi-Fi carries. The microSD on the same controller runs at 20 MHz too
+# (main/storage_board.c), so the controller never re-clocks between the two slots.
+CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000
+
 # Run the ISP pipeline controller (IPA auto-exposure, white balance, denoise); without it the raw
 # sensor data is demosaiced with fixed gains and the picture is dark with a colour cast.
 CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y

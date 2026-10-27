@@ -16,6 +16,21 @@ The main loop, the host link, the microSD memory and the offline commands live i
 `../common/loci_client` and are shared with the ESP32-S3 client in `../esp32-s3-client`; the
 interface a board implements is `../common/loci_client/include/loci_hw.h`.
 
+## On the desk with the shared code (2026-10-26)
+
+Firmware `0.5.0-p4` (this project plus `../common/loci_client`, the first run of the shared loop on
+the P4) flashed over yesterday's `0.4.0-p4`. The host URL `https://loci.0x7d0.com` and the device
+token stayed in NVS. The boot keeps the same retention-RAM margin (10,800 B free at `app_main`).
+ES8311, OV5647 + hardware JPEG at 1280×960, the C6 link, the 4-bit card and ESP-SR (54 phrases)
+came up as before.
+
+Through the Cloudflare tunnel, with the camera facing a dark surface (noisy 280–390 kB frames):
+
+| | 40 MHz SDIO (IDF default here) | 20 MHz SDIO + 20 MHz card (now) |
+|---|---|---|
+| 10-minute soak | 1,004 frames, POST 400 ms median / 502 ms p90, **2 resets** (C6 link timeouts) | 855 frames, POST 420 ms median / 545 ms p90, **0 resets**, 0 failed uploads |
+| Spoken answers | 12.9 s and 28.7 s clips played | 6 clips played (7.8–28.7 s); the frame loop pauses while a clip plays |
+
 ## Board facts (discovered 2026-10-25)
 
 | Item | Value |
@@ -99,7 +114,7 @@ in ~36 ms).
 
 ## microSD card
 
-A FAT32 card in the slot (SDMMC slot 0: CLK 43, CMD 44, D0–D3 39–42, powered by LDO channel 4)
+A FAT32 card in the slot (SDMMC slot 0: CLK 43, CMD 44, D0–D3 39–42, 4-bit at 20 MHz, powered by LDO channel 4)
 is mounted at `/sdcard` after Wi-Fi comes up and used for:
 
 | Path | Purpose |
@@ -240,6 +255,14 @@ before the first HTTPS request, a follow-up for a production pendant.
 * **`esp_video_init failed`** — camera ribbon not seated or a sensor other than OV5647: enable it
   under `Component config → Camera sensor configuration` (SC2336 is the other one Waveshare ships).
 * **`ES8311 not found on I2C 0x18`** — I2C pull-ups or a hung bus; power-cycle the board.
+* **`sdmmc_send_cmd returned 0x107`, `H_SDIO_DRV: Unrecoverable host sdio state`, then a reboot** —
+  the SDIO link to the C6 timed out twice in a row and ESP-Hosted restarted the P4. At the 40 MHz
+  maximum this happened twice in 10 minutes on 2026-10-26, once 4.7 s after boot before the card was
+  mounted, so it was not the card. The P4 was streaming 300 kB frames through the Cloudflare tunnel
+  from a different USB port than the day before. With `CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000`,
+  and the card at 20 MHz so the shared controller never re-clocks, the next 10 minutes had none. If
+  it comes back, suspect the power supply first: Wi-Fi TX bursts plus the speaker amplifier on a weak
+  USB port.
 * **No IP / `esp_wifi_init` error** — the C6 slave firmware must speak ESP-Hosted 2.x; the log prints
   the slave's version at start. Reset GPIO54 is pulsed on every boot (`HOST_CP_RESET_STRATEGY_ALWAYS`).
 * **Image upside down** — rotate on the host with `LOCI_ESP32_ROTATE=180` (no sensor flip is wired yet).

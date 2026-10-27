@@ -23,7 +23,7 @@ static sd_pwr_ctrl_handle_t s_pwr;
 esp_err_t storage_board_open_card(sdmmc_card_t **card_out) {
   s_host = (sdmmc_host_t)SDMMC_HOST_DEFAULT();
   s_host.slot = SDMMC_HOST_SLOT_0;  // CLK 43, CMD 44, D0-D3 39-42: the slot-0 IOMUX pins on the P4
-  s_host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+  s_host.max_freq_khz = SDMMC_FREQ_DEFAULT;  // 20 MHz, the same clock as the C6's SDIO slot (sdkconfig.defaults)
 
   esp_err_t err = sdmmc_host_init();
   if (err == ESP_OK) {

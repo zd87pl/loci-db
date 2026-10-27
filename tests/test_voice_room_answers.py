@@ -240,6 +240,8 @@ def test_parse_intent_legacy_shapes_unchanged():
         ("Thank you.", "unknown", "", ""),
         ("thanks", "unknown", "", ""),
         ("hey loci", "unknown", "", ""),
+        ("Hey, Lucy.", "unknown", "", ""),
+        ("Hey, Lucy, where did I leave my keys?", "where_is", "keys", ""),
         ("what time is it", "unknown", "", ""),
         ("how are you", "unknown", "", ""),
         ("tell me a joke", "unknown", "", ""),

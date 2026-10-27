@@ -427,6 +427,8 @@ def install_esp32_routes(
     detector = hub.detector
     if cfg.warmup and isinstance(detector, HostYoloDetector):
         threading.Thread(target=detector.load, name="esp32-yolo-warmup", daemon=True).start()
+    if cfg.warmup:
+        threading.Thread(target=bridge.warm_up, name="esp32-stt-warmup", daemon=True).start()
     logger.info(
         "ESP32 thin-client routes mounted (model=%s, max_fps=%s, audio=%d Hz)",
         cfg.yolo_model,

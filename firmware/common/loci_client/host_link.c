@@ -443,7 +443,9 @@ bool host_fetch_and_play_audio(int wait_s) {
 
 esp_err_t host_post_voice(const uint8_t *pcm, size_t len) {
   char url[224];
-  snprintf(url, sizeof(url), "%s/api/esp32/voice?device=%s&rate=%d", s_base, s_device, LOCI_AUDIO_RATE);
+  // speak=0 on a board without a speaker: the host then skips TTS (an edge-tts round trip)
+  snprintf(url, sizeof(url), "%s/api/esp32/voice?device=%s&rate=%d&speak=%d", s_base, s_device, LOCI_AUDIO_RATE,
+           audio_speaker_ready() ? 1 : 0);
   esp_http_client_handle_t c = client_new(url, HTTP_METHOD_POST, 45000);
   if (!c) return ESP_ERR_NO_MEM;
   esp_http_client_set_header(c, "Content-Type", "audio/L16; rate=16000");
@@ -465,10 +467,11 @@ esp_err_t host_post_voice(const uint8_t *pcm, size_t len) {
 }
 
 static esp_err_t post_text(const char *path, const char *text, bool play) {
-  char url[224], escaped[256], payload[320];
+  char url[224], escaped[256], payload[352];
   snprintf(url, sizeof(url), "%s%s", s_base, path);
   json_escape(text, escaped, sizeof(escaped));
-  snprintf(payload, sizeof(payload), "{\"text\":\"%s\",\"device\":\"%s\"}", escaped, s_device);
+  snprintf(payload, sizeof(payload), "{\"text\":\"%s\",\"device\":\"%s\",\"speak\":%s}", escaped, s_device,
+           play && audio_speaker_ready() ? "true" : "false");
   esp_http_client_handle_t c = client_new(url, HTTP_METHOD_POST, 30000);
   if (!c) return ESP_ERR_NO_MEM;
   esp_http_client_set_header(c, "Content-Type", "application/json");

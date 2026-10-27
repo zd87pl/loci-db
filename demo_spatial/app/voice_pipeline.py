@@ -26,6 +26,7 @@ import io
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -161,9 +162,10 @@ _SPELLINGS = {
 }
 
 # Wake word, fillers and "can you" in front of a question; "please" and thanks anywhere.
+_WAKE = r"(?:loci|lucy|lucie|loki|low key)"  # how Whisper tiny hears "Loci"
 _LEAD_FILLER = re.compile(
-    r"^(?:(?:hey|hi|hello|ok|okay)\s+loci|loci|hey|hi|hello|ok|okay|um+|uh+|erm|er|hmm+|so|well|"
-    r"and|now|right|alright|all right|excuse me|sorry|yeah|oh|do you know|i wonder)\s+"
+    rf"^(?:(?:hey|hi|hello|ok|okay)\s+{_WAKE}|{_WAKE}|hey|hi|hello|ok|okay|um+|uh+|erm|er|hmm+|so|well|"
+    r"and|now|right|alright|all right|excuse me|sorry|yeah|oh|do you know|i wonder)(?:\s+|$)"
 )
 _LEAD_POLITE = re.compile(
     r"^(?:can|could|would|will)\s+you\s+(?=(?:tell|find|locate|show|help|check|look|describe|list|remind)\b)"
@@ -725,8 +727,48 @@ def ensure_pyav_compat() -> bool:
     return True
 
 
+# Whisper's stock phrases for silence, breathing or a bumped button (it learned them from
+# subtitles). A transcript that is only one of these is treated as "nothing was said".
+_STT_HALLUCINATIONS = frozenset(
+    {
+        "thank you", "thank you very much", "thanks", "thanks for watching",
+        "thank you for watching", "thank you so much", "you", "bye", "bye bye", "okay",
+        "oh", "uh", "um", "hmm", "so", "the end", "please subscribe",
+        "subtitles by the amara org community",
+    }
+)  # fmt: skip
+
+# Household objects the camera can recognise, so a question about one not seen yet is still
+# heard right; the remembered labels come first.
+_STT_HOUSEHOLD = ("cup", "bottle", "cell phone", "laptop", "remote", "book", "keyboard", "mouse",
+                  "backpack", "handbag", "umbrella", "scissors", "chair", "bowl")  # fmt: skip
+
+
+def is_stt_hallucination(text: str) -> bool:
+    """True for an empty transcript or one that is only a Whisper stock phrase."""
+    t = " ".join(re.sub(r"[^\w' ]+", " ", text.lower()).split())
+    return not t or t in _STT_HALLUCINATIONS
+
+
+def stt_prompt(labels: Iterable[str] = (), rooms: Iterable[str] = ()) -> str:
+    """Vocabulary hint for Whisper's ``initial_prompt``: the things the user can ask about."""
+    names = [str(x).replace("_", " ") for x in (*labels, *_STT_HOUSEHOLD) if x]
+    labs = list(dict.fromkeys(names))[:40]
+    rms = list(dict.fromkeys(str(r).replace("_", " ") for r in rooms if r))[:10]
+    prompt = "Hey Loci, where is my " + ", ".join(labs) + "?"
+    if rms:
+        prompt += " What changed in the " + ", ".join(rms) + "?"
+    return prompt
+
+
 class WhisperSTT:
-    """Speech-to-text via OpenAI Whisper API or local faster-whisper."""
+    """Speech-to-text via OpenAI Whisper API or local faster-whisper.
+
+    Local decoding (``transcribe_samples``) uses Silero VAD, a vocabulary prompt built from
+    ``vocabulary()`` (set by :class:`VoicePipeline`: remembered labels and rooms) and drops
+    transcripts that are only Whisper's stock phrases for silence. ``WHISPER_BEAM`` (1) and
+    ``WHISPER_VAD`` (1) tune it; ``warm_up()`` loads the model off the event loop.
+    """
 
     def __init__(self) -> None:
         self._use_local = os.environ.get("WHISPER_LOCAL", "0") == "1"
@@ -734,6 +776,8 @@ class WhisperSTT:
         self._model_name = os.environ.get("WHISPER_MODEL", "whisper-1")
         self._local_model = None
         self._openai_client = None
+        self._load_lock = threading.Lock()
+        self.vocabulary: Callable[[], tuple[list[str], list[str]]] | None = None
 
     def _get_openai_client(self):
         if self._openai_client is None:
@@ -743,17 +787,91 @@ class WhisperSTT:
         return self._openai_client
 
     def _load_local_model(self):
+        """Blocking (seconds on a cold start): call it from a thread or an executor."""
         if self._local_model is not None:
             return
-        try:
-            from faster_whisper import WhisperModel
-
+        with self._load_lock:
+            if self._local_model is not None:
+                return
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError:
+                logger.warning("faster-whisper not installed — falling back to OpenAI API")
+                self._use_local = False
+                return
             model_size = os.environ.get("WHISPER_LOCAL_MODEL", "base")
-            self._local_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            try:
+                # cached weights first: a plain load asks huggingface.co for updates every time
+                model = WhisperModel(
+                    model_size, device="cpu", compute_type="int8", local_files_only=True
+                )
+            except Exception:
+                model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            self._local_model = model
             logger.info("Loaded local Whisper model: %s", model_size)
-        except ImportError:
-            logger.warning("faster-whisper not installed — falling back to OpenAI API")
-            self._use_local = False
+
+    def warm_up(self) -> None:
+        """Load the local model and run one decode, so the first question does not pay for it."""
+        if not self._use_local:
+            return
+        t0 = time.perf_counter()
+        self._load_local_model()
+        if self._local_model is None:
+            return
+        import numpy as np
+
+        silence = np.zeros(WHISPER_SAMPLE_RATE, dtype=np.float32)
+        list(self._local_model.transcribe(silence, language="en", beam_size=1, vad_filter=False)[0])
+        self.transcribe_samples(silence)  # loads the Silero VAD model too (~0.9 s the first time)
+        logger.info("Whisper warmed up in %.0f ms", (time.perf_counter() - t0) * 1000.0)
+
+    def decode_options(self) -> dict:
+        opts: dict[str, Any] = {
+            "beam_size": max(1, int(os.environ.get("WHISPER_BEAM", "1") or 1)),
+            "temperature": (0.0, 0.2, 0.4),
+            "condition_on_previous_text": False,
+            "without_timestamps": True,
+        }
+        if os.environ.get("WHISPER_VAD", "1") != "0":
+            opts["vad_filter"] = True
+            opts["vad_parameters"] = {
+                "threshold": 0.5,
+                "min_speech_duration_ms": 200,
+                "min_silence_duration_ms": 300,
+                "speech_pad_ms": 200,
+            }
+        labels: list[str] = []
+        rooms: list[str] = []
+        if self.vocabulary is not None:
+            try:
+                labels, rooms = self.vocabulary()
+            except Exception as e:
+                logger.debug("STT vocabulary unavailable: %s", e)
+        opts["initial_prompt"] = stt_prompt(labels, rooms)
+        return opts
+
+    def transcribe_samples(self, audio: Any, language: str = "en") -> str:
+        """Blocking local decode with the guards (run it in an executor); '' for no speech."""
+        self._load_local_model()
+        if self._local_model is None:
+            return ""
+        segments, _info = self._local_model.transcribe(
+            audio, language=language, **self.decode_options()
+        )
+        segs = list(segments)
+        if not segs:
+            return ""  # VAD found no speech
+        if all(
+            getattr(s, "no_speech_prob", 0.0) > 0.6 and getattr(s, "avg_logprob", 0.0) < -1.0
+            for s in segs
+        ):
+            logger.info("STT: dropped a clip Whisper itself rates as no speech")
+            return ""
+        text = " ".join(s.text.strip() for s in segs).strip()
+        if is_stt_hallucination(text):
+            logger.info("STT: dropped %r (Whisper's stock phrase for silence)", text)
+            return ""
+        return text
 
     async def transcribe(self, audio_bytes: bytes, language: str = "en") -> str:
         """Transcribe audio bytes to text. Returns empty string on failure."""
@@ -781,7 +899,8 @@ class WhisperSTT:
             return ""
 
     async def _transcribe_local(self, audio_bytes: bytes, language: str) -> str:
-        self._load_local_model()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._load_local_model)  # never on the event loop
         if self._local_model is None:
             return await self._transcribe_openai(audio_bytes, language)
         try:
@@ -793,18 +912,7 @@ class WhisperSTT:
             if audio is None:
                 ensure_pyav_compat()
                 audio = io.BytesIO(audio_bytes)
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: list(
-                    self._local_model.transcribe(
-                        audio,
-                        language=language,
-                        beam_size=1,
-                    )[0]
-                ),
-            )
-            return " ".join(seg.text.strip() for seg in result)
+            return await loop.run_in_executor(None, self.transcribe_samples, audio, language)
         except Exception as e:
             logger.error("Local Whisper transcription failed: %s", e)
             return ""
@@ -925,18 +1033,30 @@ class TTS:
         return buf.getvalue()
 
     async def _synthesize_edge(self, text: str) -> bytes:
-        """Synthesize using Microsoft Edge TTS (edge-tts library)."""
+        """Synthesize using Microsoft Edge TTS (edge-tts library).
+
+        A cloud service: ``TTS_TIMEOUT_S`` (10) bounds it, so a stalled connection costs the
+        answer's audio rather than holding the board's voice request until it times out.
+        """
         try:
             import edge_tts
+        except ImportError:
+            logger.debug("edge-tts not installed")
+            return b""
 
+        async def stream() -> bytes:
             communicate = edge_tts.Communicate(text, self._edge_voice)
             buf = io.BytesIO()
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
                     buf.write(chunk["data"])
             return buf.getvalue()
-        except ImportError:
-            logger.debug("edge-tts not installed")
+
+        timeout = float(os.environ.get("TTS_TIMEOUT_S", "10") or 10)
+        try:
+            return await asyncio.wait_for(stream(), timeout=timeout)
+        except TimeoutError:
+            logger.error("Edge TTS gave no audio within %.0f s", timeout)
             return b""
         except Exception as e:
             logger.error("Edge TTS error: %s", e)
@@ -974,7 +1094,16 @@ class VoicePipeline:
         self._vlm = vlm_client
         self._pose_provider = pose_provider
         self._stt = WhisperSTT()
+        self._stt.vocabulary = self._stt_vocabulary
         self._tts = TTS()
+
+    def _stt_vocabulary(self) -> tuple[list[str], list[str]]:
+        """Remembered labels and rooms, for Whisper's vocabulary prompt."""
+        tracked = getattr(self._memory, "tracked_labels", None)
+        labels: list[str] = []
+        with contextlib.suppress(Exception):
+            labels = _str_list(tracked() if callable(tracked) else tracked)
+        return labels, self.known_rooms()
 
     @dataclass
     class QueryResult:

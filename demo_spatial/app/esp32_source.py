@@ -78,6 +78,9 @@ class Esp32Config:
     audio_rate: int = 16000  # LOCI_ESP32_AUDIO_RATE: PCM rate the board plays/records
     audio_gain: float = 1.0  # LOCI_ESP32_AUDIO_GAIN: linear gain applied before queueing
     audio_queue_max: int = 8  # oldest clip is dropped when a device falls this far behind
+    # LOCI_ESP32_AUDIO_TTL_S: a queued clip older than this is dropped instead of played (an
+    # answer to a question asked minutes ago, heard after the board comes back, is wrong)
+    audio_ttl_s: float = 60.0
     stale_after_s: float = 10.0  # device reported "offline" after this many silent seconds
     dataset_dir: str = (
         ""  # LOCI_ESP32_DATASET_DIR: save every Nth frame + detections here ("" = off)
@@ -109,6 +112,7 @@ class Esp32Config:
             audio_rate=_env_int(env, "LOCI_ESP32_AUDIO_RATE", 16000),
             audio_gain=_env_float(env, "LOCI_ESP32_AUDIO_GAIN", 1.0),
             audio_queue_max=_env_int(env, "LOCI_ESP32_AUDIO_QUEUE_MAX", 8),
+            audio_ttl_s=_env_float(env, "LOCI_ESP32_AUDIO_TTL_S", 60.0),
             stale_after_s=_env_float(env, "LOCI_ESP32_STALE_S", 10.0),
             dataset_dir=env.get("LOCI_ESP32_DATASET_DIR") or "",
             dataset_every=max(1, _env_int(env, "LOCI_ESP32_DATASET_EVERY", 10)),
@@ -130,6 +134,7 @@ class Esp32Config:
             "audio_rate": self.audio_rate,
             "audio_gain": self.audio_gain,
             "audio_queue_max": self.audio_queue_max,
+            "audio_ttl_s": self.audio_ttl_s,
             "stale_after_s": self.stale_after_s,
             "dataset_dir": self.dataset_dir,
             "dataset_every": self.dataset_every,
@@ -371,7 +376,7 @@ class Esp32Device:
     fps: float = 0.0
     rssi: int | None = None
     device_ms: int | None = None  # the board's millis() of the last frame, for the status page
-    audio_queue: deque[bytes] = field(default_factory=deque)
+    audio_queue: deque[tuple[float, bytes]] = field(default_factory=deque)  # (queued mono, pcm)
     audio_queued_total: int = 0
     audio_sent_total: int = 0
     audio_dropped_total: int = 0
@@ -639,7 +644,7 @@ class Esp32Hub:
         while len(dev.audio_queue) >= max(1, self.cfg.audio_queue_max):
             dev.audio_queue.popleft()
             dev.audio_dropped_total += 1
-        dev.audio_queue.append(bytes(pcm))
+        dev.audio_queue.append((time.monotonic(), bytes(pcm)))
         dev.audio_queued_total += 1
         self._notify_audio(dev)
         return len(dev.audio_queue)
@@ -657,12 +662,24 @@ class Esp32Hub:
         else:
             ev.set()
 
+    def _pop_fresh_audio(self, dev: Esp32Device) -> bytes | None:
+        """Oldest clip younger than ``cfg.audio_ttl_s``; expired ones are dropped and counted."""
+        now = time.monotonic()
+        while dev.audio_queue:
+            queued, pcm = dev.audio_queue.popleft()
+            if self.cfg.audio_ttl_s > 0 and now - queued > self.cfg.audio_ttl_s:
+                dev.audio_dropped_total += 1
+                continue
+            dev.audio_sent_total += 1
+            return pcm
+        return None
+
     async def next_audio(self, device_id: str | None = None, wait_s: float = 0.0) -> bytes | None:
         """Pop the next PCM clip, waiting up to ``wait_s`` for one (long poll)."""
         dev = self.device(device_id)
-        if dev.audio_queue:
-            dev.audio_sent_total += 1
-            return dev.audio_queue.popleft()
+        pcm = self._pop_fresh_audio(dev)
+        if pcm is not None:
+            return pcm
         if wait_s <= 0:
             return None
         loop = asyncio.get_running_loop()
@@ -674,10 +691,7 @@ class Esp32Hub:
             await asyncio.wait_for(dev._audio_event.wait(), timeout=wait_s)
         except TimeoutError:
             return None
-        if dev.audio_queue:
-            dev.audio_sent_total += 1
-            return dev.audio_queue.popleft()
-        return None
+        return self._pop_fresh_audio(dev)
 
     def pending_audio(self, device_id: str | None = None) -> int:
         dev = self._devices.get(device_id or self.cfg.default_device)

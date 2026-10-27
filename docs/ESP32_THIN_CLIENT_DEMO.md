@@ -299,6 +299,9 @@ storage; its live image is polled as single JPEGs so the request can carry the h
 | `LOCI_ESP32_AUDIO_RATE` | 16000 | PCM rate the board plays/records |
 | `LOCI_ESP32_AUDIO_GAIN` | 1.0 | Linear gain applied to answers before queueing |
 | `LOCI_ESP32_AUDIO_QUEUE_MAX` | 8 | Oldest clip dropped when a device falls this far behind |
+| `LOCI_ESP32_AUDIO_TTL_S` | 60 | A queued clip older than this is dropped instead of played (an answer heard minutes late is wrong) |
+| `WHISPER_BEAM` / `WHISPER_VAD` | 1 / 1 | Local Whisper beam size; `0` turns off the Silero VAD that drops silence before decoding |
+| `TTS_TIMEOUT_S` | 10 | edge-tts gives up after this, so a stalled cloud call costs the audio, not the request |
 | `LOCI_ESP32_AUTH` | `auto` | Device token required for requests from outside the LAN (`auto`), everywhere (`always`) or never (`off`) |
 | `LOCI_ESP32_TOKEN` / `LOCI_ESP32_TOKEN_FILE` | – / `$LOCI_DATA_DIR/device_token` | The shared device token, inline or in a file (`run_esp32_demo.sh` creates the file) |
 | `LOCI_ESP32_TOKENS` | – | `device:token,device:token` for one token per board; such a token also pins the device id |

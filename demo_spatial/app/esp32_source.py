@@ -750,11 +750,16 @@ class Esp32Hub:
         return out
 
     def memory_rev(self, objects: list[dict] | None = None) -> str:
-        """Short digest of the remembered objects; stable while nothing moves or appears."""
+        """Short digest of the remembered objects; stable while nothing moves or appears.
+
+        Order-independent: ``memory_objects`` lists the newest sighting first, so two objects
+        seen in turn swapped places every few frames and changed the digest, and each change
+        makes the board refetch the memory and its spoken summary.
+        """
         import hashlib
 
         objs = self.memory_objects() if objects is None else objects
-        key = "|".join(f"{o['label']}@{o['where']}@{o.get('room') or ''}" for o in objs)
+        key = "|".join(sorted(f"{o['label']}@{o['where']}@{o.get('room') or ''}" for o in objs))
         return hashlib.blake2s(key.encode(), digest_size=4).hexdigest() if objs else "empty"
 
     @staticmethod

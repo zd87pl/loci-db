@@ -122,9 +122,15 @@ bool voice_local_init(void) {
 bool voice_local_ready(void) { return s_ready; }
 
 void voice_local_set_labels(const char labels[][32], int count) {
+  static char before[MAX_LABELS][LABEL_LEN];
+  int before_count = s_label_count;
+  memcpy(before, s_labels, sizeof(before));
   s_label_count = 0;
   for (int i = 0; i < count; i++) add_label(labels[i]);  // remembered objects first: they must fit
   for (size_t i = 0; i < sizeof(k_default_labels) / sizeof(k_default_labels[0]); i++) add_label(k_default_labels[i]);
+  // Every memory refresh lands here, but a moved object changes no phrase: MultiNet is only
+  // rebuilt (a few hundred ms in the frame loop) when the list of objects itself changed.
+  if (s_label_count == before_count && !memcmp(before, s_labels, sizeof(before))) return;
   rebuild_commands();
 }
 

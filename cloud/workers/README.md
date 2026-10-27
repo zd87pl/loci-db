@@ -7,7 +7,113 @@ The Cloudflare-native managed service described in [docs/CLOUD_PLATFORM_DESIGN.m
 - **Data plane** (`src/space.ts`): one SQLite-backed Durable Object per space with observations, a revision log for device sync, and where / changes / digest / ask / query.
 - **SDK compatibility** (`src/compat.ts`): the old `/insert` and `/query`, so `LociClient(base_url=..., api_key=...)` works against a project with no client changes beyond the URL.
 
-The older Fly.io service in `cloud/api` is not deployed; it stays as the reference for the compatibility contract.
+The compatibility contract comes from the retired Fly.io service, `cloud/api/server.py`. To read it after its removal, run `git show 917cc68:cloud/api/server.py`.
+
+## Quickstart: insert and query from Python
+
+**1. Get a project.** A project is created with the operator's admin token. `scripts/bootstrap.py --sdk` creates one and prints the two values the SDK needs.
+
+Locally, run the Worker in the local Workers runtime (no Cloudflare account needed):
+
+```bash
+cd cloud/workers
+npm ci
+printf 'ADMIN_TOKEN=%s\nDEV_ALLOW_UNPINNED=1\n' "$(openssl rand -hex 16)" > .dev.vars
+npm run db:migrate:local
+npx wrangler dev --port 8787
+```
+
+In a second shell, from the repository root:
+
+```bash
+python3 cloud/workers/scripts/bootstrap.py --url http://127.0.0.1:8787 \
+  --admin-token "$(sed -n 's/^ADMIN_TOKEN=//p' cloud/workers/.dev.vars)" --sdk > .loci-sdk.env
+chmod 600 .loci-sdk.env
+set -a; . ./.loci-sdk.env; set +a
+```
+
+On the hosted beta, the operator runs the same command with `--url https://loci-cloud.zd-66b.workers.dev` and the production admin token, then hands you the output.
+
+The output holds two lines:
+
+- `LOCI_BASE_URL=<worker>/p/<ref>`: the project URL.
+- `LOCI_API_KEY=loci_sk_…`: the secret key. It can read and write; keep it on servers.
+
+A commented line also carries the publishable key (`loci_pk_…`), which can query but not insert. Never commit either key.
+
+**2. Insert and query.**
+
+```bash
+pip install -e .   # from the repository root: the SDK must send its own User-Agent (see Production)
+```
+
+```python
+import os
+import time
+
+from loci import LociClient, WorldState
+
+client = LociClient(
+    base_url=os.environ["LOCI_BASE_URL"], api_key=os.environ["LOCI_API_KEY"], vector_size=4
+)
+now = int(time.time() * 1000)
+door = client.insert(
+    WorldState(
+        x=0.42,
+        y=0.17,
+        z=0.88,  # normalised to [0, 1]
+        timestamp_ms=now - 60_000,
+        vector=[1.0, 0.0, 0.0, 0.0],
+        scene_id="hallway",
+        metadata={"label": "door", "source": "cam0"},
+    )
+)
+chair = client.insert(
+    WorldState(
+        x=0.10,
+        y=0.50,
+        z=0.20,
+        timestamp_ms=now,
+        vector=[0.6, 0.8, 0.0, 0.0],
+        scene_id="hallway",
+        confidence=0.7,
+    )
+)
+
+hits = client.query(vector=[1.0, 0.0, 0.0, 0.0], limit=5)  # chair.prev_state_id == door
+near_door = client.query(
+    vector=[1.0, 0.0, 0.0, 0.0],
+    spatial_bounds={"x_min": 0.3, "x_max": 0.5},  # missing keys default to 0 and 1
+    time_window_ms=(now - 120_000, now),
+    min_confidence=0.8,
+    limit=5,
+)
+```
+
+Each result is a full `WorldState`: metadata, scale level, confidence, causal links, and the vector. Vectors are stored as float32, so `0.6` comes back as `0.6000000238418579`.
+
+`AsyncLociClient` takes the same arguments (`async with AsyncLociClient(...) as client`) and needs `httpx`. Only `insert` and `query` work in cloud mode; the other methods raise `CloudModeUnsupportedError`.
+
+**3. The same calls with curl** (curl's own User-Agent is accepted):
+
+```bash
+curl -X POST "$LOCI_BASE_URL/insert" -H "Authorization: Bearer $LOCI_API_KEY" -H "Content-Type: application/json" \
+  -d '{"x": 0.42, "y": 0.17, "z": 0.88, "timestamp_ms": 1793140000000, "vector": [1, 0, 0, 0],
+       "scene_id": "hallway", "metadata": {"label": "door"}}'
+# → {"id": "0bab12a5-..."}
+curl -X POST "$LOCI_BASE_URL/query" -H "Authorization: Bearer $LOCI_API_KEY" -H "Content-Type: application/json" \
+  -d '{"vector": [1, 0, 0, 0], "x_min": 0.3, "x_max": 0.5, "min_confidence": 0.8, "limit": 5, "include_vectors": false}'
+# → {"results": [{"id": "...", "x": 0.42, ..., "scene_id": "hallway", "scale_level": "patch", "confidence": 1,
+#                 "metadata": {"label": "door"}, "prev_state_id": null, "next_state_id": "...", "vector": []}]}
+```
+
+**4. Beyond the SDK.** The `default` space is an ordinary space, so the v1 endpoints below read the same data, for example:
+
+```bash
+curl -X POST "$LOCI_BASE_URL/v1/spaces/default/query" -H "Authorization: Bearer $LOCI_API_KEY" \
+  -H "Content-Type: application/json" -d '{"label": "door", "limit": 5}'
+curl "$LOCI_BASE_URL/v1/spaces/default/where?label=door" -H "Authorization: Bearer $LOCI_API_KEY"
+```
 
 ## API (v1, Phase 0)
 
@@ -62,7 +168,7 @@ A region becomes Hilbert cell ranges (`hilbertRanges3` in `src/hilbert.ts`) over
 `LociClient(base_url="https://<worker>/p/<ref>", api_key="loci_sk_...")` posts to `<base_url>/insert` and `<base_url>/query`. With `PROJECT_HOST_SUFFIX` set, the base URL is `https://<ref>.<suffix>`.
 
 - **Default space.** Everything goes to the project's `default` space, created by the first insert from a secret key with unit extents (frame `room`). WorldState coordinates are its coordinates.
-- **Contract.** Validation, payloads and responses follow `cloud/api/server.py`:
+- **Contract.** Validation, payloads and responses follow the retired `cloud/api/server.py`:
   - coordinates, confidence and `min_confidence` in [0, 1];
   - `scale_level` is `patch`, `frame` or `sequence`;
   - `scene_id` is 1–256 characters;
@@ -96,7 +202,7 @@ python3 scripts/bootstrap.py --url http://127.0.0.1:8787 --admin-token <ADMIN_TO
 
 Then start the demo host (`demo_spatial`) with the `LOCI_CLOUD_*` lines from `.cloud.env` in its environment; it mirrors its memory into the space (`GET /api/cloud/status` on the host shows progress). Deletes go through a breaker: a pass that would delete more than 200 sightings or more than half of them, or anything while the local memory is empty, holds its deletes (`delete_breaker: "open"`, `deletes_held`) until you check and release them with `POST /api/cloud/deletes/accept` (`{"confirm": true, "expect": <deletes_held>}` plus the host's `X-Device-Token`). See `demo_spatial/app/cloud_sync.py`.
 
-For the Python SDK instead, `bootstrap.py --sdk` prints `LOCI_BASE_URL` and `LOCI_API_KEY`; [cloud/docs/quickstart.md](../docs/quickstart.md) walks through inserting and querying.
+For the Python SDK instead, `bootstrap.py --sdk` prints `LOCI_BASE_URL` and `LOCI_API_KEY` (see the quickstart above).
 
 `DEV_ALLOW_UNPINNED=1` exists only because the local runtime does not implement Durable Object jurisdictions; without it an EU project fails closed. Never set it in production.
 
@@ -115,6 +221,29 @@ npm run db:migrate:remote
 npx wrangler secret put ADMIN_TOKEN
 npm run deploy
 ```
+
+## Limits and errors
+
+| What | Limit |
+|---|---|
+| Writes (`/observations`, `/insert`) | 120 per minute per key or device |
+| Queries (`/query`, `/v1/.../query`) | 600 per minute per key or device |
+| Embedding or vector dimension | 1–1536 |
+| Query `limit` | 1–1000 |
+| Request body | 512 KB |
+
+Errors have the shape `{"detail": "<message>", "code": "<code>"}`:
+
+| Status | Code | Typical cause |
+|---|---|---|
+| 400 | `bad_json` | The body is not valid JSON |
+| 401 | `unauthenticated` | Missing, malformed or revoked key or token |
+| 403 | `forbidden` | Key from another project, or a write with a publishable key |
+| 404 | `not_found` | Unknown project path or space |
+| 405 | `method_not_allowed` | `/insert` and `/query` take `POST` only |
+| 413 | `too_large` | Body or batch too large |
+| 422 | `invalid` | Validation failed, e.g. `vector must have 4 dimensions, got 3` |
+| 429 | `rate_limited` | Rate limit exceeded |
 
 ## Hilbert parity
 

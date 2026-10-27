@@ -5,9 +5,10 @@
  *   POST <project>/query    vector + box + time window → {"results": [WorldState...]}
  *
  * <project> is /p/<ref> (or <ref>.<PROJECT_HOST_SUFFIX>). Payloads, validation and responses follow
- * the retired FastAPI service (cloud/api/server.py). The project comes only from the route and the
- * credential, never the body; everything lands in the project's `default` space, which the first
- * insert creates with unit extents, so WorldState's normalised coordinates are its coordinates.
+ * the retired FastAPI service (`git show 917cc68:cloud/api/server.py`). The project comes only from
+ * the route and the credential, never the body; everything lands in the project's `default` space,
+ * which the first insert creates with unit extents, so WorldState's normalised coordinates are its
+ * coordinates.
  */
 
 import { canRead, canWrite, principalKey } from "./auth";

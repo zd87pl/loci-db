@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
@@ -149,8 +150,10 @@ class FakeMemory:
         return [dict(r) for r in self.records]
 
 
-def secret_cfg(url: str) -> CloudConfig:
-    return CloudConfig(base_url=url, project=REF, space="home", secret_key="loci_sk_secret")
+def secret_cfg(url: str, **limits) -> CloudConfig:
+    return CloudConfig(
+        base_url=url, project=REF, space="home", secret_key="loci_sk_secret", **limits
+    )
 
 
 def test_record_mapping_uses_metres_per_frame() -> None:
@@ -177,7 +180,7 @@ def test_sync_pushes_new_records_in_batches_and_deletes_removed(cloud, tmp_path:
     assert [len(b["observations"]) for b in cloud.batches] == [50, 50, 20]
     assert len(cloud.observations) == 120
 
-    assert sync.sync_once() == {"sent": 0, "deleted": 0, "rev": 3}
+    assert sync.sync_once() == {"sent": 0, "deleted": 0, "held": 0, "rev": 3}
 
     mem.records = mem.records[5:] + [rec(500)]  # merge: 5 records gone, one new
     second = sync.sync_once()
@@ -193,7 +196,7 @@ def test_state_survives_restart_so_deletes_are_not_lost(cloud, tmp_path: Path) -
     mem.records = mem.records[1:]
     restarted = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
     out = restarted.sync_once()
-    assert out == {"sent": 0, "deleted": 1, "rev": 2}
+    assert out == {"sent": 0, "deleted": 1, "held": 0, "rev": 2}
     assert set(cloud.observations) == {"h_r1", "h_r2"}
 
 
@@ -254,6 +257,14 @@ def test_config_from_env() -> None:
         CloudConfig.from_env(env)
     cfg = CloudConfig.from_env({**env, "LOCI_CLOUD_KEY": "loci_sk_x", "LOCI_CLOUD_SYNC_S": "2"})
     assert cfg is not None and cfg.interval_s == 2.0
+    assert (cfg.max_delete_fraction, cfg.max_delete_count) == (0.5, 200)
+    limits = {"LOCI_CLOUD_MAX_DELETE_FRACTION": "0.2", "LOCI_CLOUD_MAX_DELETE_COUNT": "50"}
+    tuned = CloudConfig.from_env({**env, "LOCI_CLOUD_KEY": "k", **limits})
+    assert tuned is not None
+    assert (tuned.max_delete_fraction, tuned.max_delete_count) == (0.2, 50)
+    for bad in ({"LOCI_CLOUD_MAX_DELETE_FRACTION": "1.5"}, {"LOCI_CLOUD_MAX_DELETE_COUNT": "-1"}):
+        with pytest.raises(ValueError):
+            CloudConfig.from_env({**env, "LOCI_CLOUD_KEY": "k", **bad})
     with pytest.raises(ValueError):
         CloudConfig.from_env({**env, "LOCI_CLOUD_URL": "file:///etc/passwd", "LOCI_CLOUD_KEY": "k"})
 
@@ -262,3 +273,140 @@ def test_requests_send_an_explicit_user_agent(cloud) -> None:
     # Cloudflare's edge rejects the default "Python-urllib/x.y" agent with error 1010.
     LociCloudClient(secret_cfg(cloud.url)).digest()
     assert cloud.user_agents and all(ua.startswith("loci-cloud-sync/") for ua in cloud.user_agents)
+
+
+# ---------------------------------------------------------------------------
+# Mass-delete breaker
+# ---------------------------------------------------------------------------
+
+LIVE = 1225  # acknowledged sightings in the live host's data dir
+
+
+def _seeded(cloud, tmp_path: Path, n: int = LIVE) -> tuple[FakeMemory, Path]:
+    """Upload ``n`` sightings through a first host run; return its memory and state file."""
+    state = tmp_path / "cloud_sync.json"
+    mem = FakeMemory([rec(i) for i in range(n)])
+    CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state).sync_once()
+    assert len(cloud.observations) == n
+    cloud.batches.clear()
+    return mem, state
+
+
+def _deletes_sent(cloud) -> int:
+    return sum(len(b.get("deletes", [])) for b in cloud.batches)
+
+
+def test_empty_restore_sends_no_deletes_and_keeps_the_breaker_open(
+    cloud, tmp_path: Path, caplog
+) -> None:
+    mem, state = _seeded(cloud, tmp_path)
+    mem.records = []  # failed restore: the host came back with an empty memory
+    sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
+    with caplog.at_level(logging.WARNING, logger="app.cloud_sync"):
+        for _ in range(3):
+            out = sync.sync_once()
+            assert (out["sent"], out["deleted"], out["held"]) == (0, 0, LIVE)
+    assert cloud.batches == [] and len(cloud.observations) == LIVE
+    trips = [r.getMessage() for r in caplog.records if "breaker OPEN" in r.getMessage()]
+    assert len(trips) == 1 and "local memory is empty" in trips[0]
+    status = sync.status()
+    assert (status["delete_breaker"], status["deletes_held"]) == ("open", LIVE)
+    assert status["delete_breaker_since_ms"] is not None
+
+    # new sightings still go up while the deletes wait
+    mem.records = [rec(5000 + i) for i in range(3)]
+    out = sync.sync_once()
+    assert (out["sent"], out["deleted"], out["held"]) == (3, 0, LIVE)
+    assert len(cloud.observations) == LIVE + 3
+
+    # a restart does not close it
+    restarted = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
+    assert restarted.status()["delete_breaker"] == "open"
+    assert restarted.sync_once()["held"] == LIVE
+    assert _deletes_sent(cloud) == 0
+
+
+def test_restart_with_fresh_ids_uploads_them_and_holds_the_old_ones(cloud, tmp_path: Path) -> None:
+    # Until stable sighting ids (CLOUD-1), restore gives every record a new id, so a restart
+    # looks like "all gone, all new": the new ids go up and the old ones wait for a human.
+    mem, state = _seeded(cloud, tmp_path)
+    mem.records = [{**rec(i), "id": f"new{i}"} for i in range(LIVE)]
+    sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
+    out = sync.sync_once()
+    assert (out["sent"], out["deleted"], out["held"]) == (LIVE, 0, LIVE)
+    assert len(cloud.observations) == 2 * LIVE
+
+
+@pytest.mark.parametrize(
+    ("acked", "kept", "limits"),
+    [
+        (1000, 799, {}),  # 201 deletes in one pass: over the count limit
+        (120, 50, {}),  # 70 of 120 (58 %): over the share limit
+        (3, 0, {}),  # empty local memory, even below BREAKER_MIN_DELETES
+        (120, 105, {"max_delete_count": 10}),  # tuned limit
+    ],
+)
+def test_breaker_holds_large_or_total_deletes(cloud, acked, kept, limits) -> None:
+    mem = FakeMemory([rec(i) for i in range(acked)])
+    sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url, **limits)))
+    sync.sync_once()
+    mem.records = mem.records[:kept]
+    out = sync.sync_once()
+    assert (out["deleted"], out["held"]) == (0, acked - kept)
+    assert sync.status()["delete_breaker"] == "open"
+    assert len(cloud.observations) == acked
+
+
+@pytest.mark.parametrize(
+    ("acked", "kept"),
+    [
+        (LIVE, LIVE - 12),  # a few merges in a live-sized space
+        (300, 150),  # exactly half is not more than half
+        (6, 2),  # small space: 4 deletes are below BREAKER_MIN_DELETES
+    ],
+)
+def test_normal_passes_still_delete(cloud, acked, kept) -> None:
+    mem = FakeMemory([rec(i) for i in range(acked)])
+    sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)))
+    sync.sync_once()
+    mem.records = mem.records[:kept]
+    out = sync.sync_once()
+    assert (out["deleted"], out["held"]) == (acked - kept, 0)
+    assert sync.status()["delete_breaker"] == "closed"
+    assert len(cloud.observations) == kept
+
+
+def test_accepting_lets_the_large_delete_through(cloud, tmp_path: Path) -> None:
+    mem, state = _seeded(cloud, tmp_path)
+    mem.records = []
+    sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
+    sync.sync_once()
+    with pytest.raises(ValueError, match="1225 cloud deletes are held, not 1000"):
+        sync.accept_deletes(expect=1000)
+    assert sync.status()["delete_breaker"] == "open"
+    assert sync.accept_deletes(expect=LIVE) == {"accepted": LIVE}
+    assert sync.status()["delete_breaker"] == "closed"
+
+    # the acceptance is saved: it holds even if the host restarts before the next pass
+    restarted = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
+    out = restarted.sync_once()
+    assert (out["deleted"], out["held"]) == (LIVE, 0)
+    assert [len(b["deletes"]) for b in cloud.batches] == [200] * 6 + [25]
+    assert cloud.observations == {}
+    status = restarted.status()
+    assert (status["pushed"], status["deletes_accepted"]) == (0, 0)
+    with pytest.raises(ValueError, match="no cloud deletes are held"):
+        restarted.accept_deletes()
+
+
+def test_acceptance_covers_only_the_deletes_that_were_checked(cloud, tmp_path: Path) -> None:
+    mem, state = _seeded(cloud, tmp_path, n=300)
+    mem.records = mem.records[:50]
+    sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
+    assert sync.sync_once()["held"] == 250
+    sync.accept_deletes()
+    mem.records = []  # the rest vanished after the human looked
+    out = sync.sync_once()
+    assert (out["deleted"], out["held"]) == (250, 50)
+    assert sync.status()["delete_breaker"] == "open"
+    assert len(cloud.observations) == 50

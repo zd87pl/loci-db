@@ -7,8 +7,9 @@ the same as for the P4 (`docs/ESP32_THIN_CLIENT_DEMO.md`, section 2), and so is 
 the main loop, host link, microSD memory and offline commands are shared with
 `../esp32-p4-client` through `../common/loci_client`. This project only has the S3 parts:
 
-* `main/camera.c`: esp32-camera on the S3's LCD_CAM DVP port. The sensor encodes JPEG itself
-  (the S3 has no JPEG encoder). Two PSRAM frame buffers in "grab latest" mode. Continuous
+* `main/camera.c`: esp32-camera on the S3's LCD_CAM DVP port at a 10 MHz XCLK. The sensor encodes
+  JPEG itself (the S3 has no JPEG encoder). Streaming is at 1024×768; two UXGA-sized PSRAM frame
+  buffers in "grab latest" mode, and the JPEG quality step rises by itself if frames overflow them. Continuous
   autofocus is enabled when the sensor supports it (OV5640 modules with a focus motor).
 * `main/audio.c`: the PDM microphone through I2S0 PDM-RX (hardware PDM→PCM, 16 kHz), with a DC
   blocker and a fixed gain. There is **no speaker**, so `audio_speaker_ready()` is false.
@@ -127,13 +128,15 @@ Three build details this needed:
 
 | | |
 |---|---|
-| Boot | `app_main` at 0.86 s; Wi-Fi joins in 4–13 s; SD, cached memory and ESP-SR ready ~3 s later |
+| Boot | `app_main` at 0.86 s; Wi-Fi joins in under 2 s (4–13 s without the antenna); SD, cached memory and ESP-SR ready ~3 s later |
 | Camera | OV3660, JPEG at quality 12: VGA 24 kB, XGA 61 kB, SXGA 190–214 kB, UXGA 64–312 kB (scene-dependent); capture returns immediately (grab latest) |
-| microSD | the P4's 64 GB FAT32 card read as is over SPI at 20 MHz: 3,231 dataset frames, cached memory, no P4 backlog. Offline capture to `backlog/` at 1 fps |
+| microSD | the P4's 64 GB FAT32 card read as is over SPI (now 10 MHz): 3,231 dataset frames, cached memory, no P4 backlog. Offline capture to `backlog/` at 1 fps; a dataset save (every 10th frame) takes ~0.6 s |
 | ESP-SR | MultiNet7 English, 54 phrases from the cached memory; 1.5–1.7 s for a 4 s clip. Recognition not yet verified with a real voice |
 | IMU | QMI8658C at 0x6B |
 | Heap with Wi-Fi + ESP-SR + detector | PSRAM 2.4–2.9 MB free, internal 59 kB free (17.5 kB minimum) |
-| Wi-Fi | −81 to −86 dBm **without the antenna** on the u.FL connector; pings lose 75–100 %, frame uploads stall, everything goes to the backlog. Attach the antenna that comes with the kit |
+| Wi-Fi | −31 to −56 dBm with the kit's antenna on the u.FL connector, 0 % loss and 9 ms average for 1,000-byte pings. Without it: −81 to −86 dBm, 75–100 % loss, uploads stall and everything goes to the backlog |
+| **Streaming to the host** | 150 s at 1024×768: **1.96 fps, POST 109 ms median / 205 ms p90 / 345 ms max**, 0 failures, host YOLOv8n 63–82 ms per frame |
+| `ask` | answered by the host in 2.2 s and printed on the console |
 
 ## Without a speaker
 
@@ -160,6 +163,25 @@ The shared code checks `audio_speaker_ready()`:
   string is hard-coded; trust the PID in the boot log. `CONFIG_OV3660_SUPPORT`,
   `CONFIG_OV5640_SUPPORT` and `CONFIG_OV2640_SUPPORT` are all on, so any of them works. Autofocus
   is only attempted on an OV5640.
+* **Pings of 0.2–8 s, heavy loss at a good RSSI, SD card init failing with CRC or `send_if_cond`
+  errors.** The camera clock disturbs the radio and the SD lines on the expansion board. It was
+  bad at a 20 MHz XCLK, worse at XGA; the default is 10 MHz (`BOARD_CAM_XCLK_HZ`) with the SD bus at
+  10 MHz.
+* **`cam_hal: FB-OVF`, then `Failed to get frame: timeout`, and the camera looks dead.** The JPEGs
+  are larger than the frame buffer (UXGA at quality 12 in a bright, detailed scene reached 370 kB of
+  384 kB). Use a smaller `res` or a higher `quality` step. The firmware raises the step by itself
+  after repeated empty captures.
+* **One frame in ten takes many seconds, and the host closes the keep-alive connection.** SD saves
+  into a huge flat folder: FatFs scans the whole folder several times to make up an 8.3 alias for
+  each long name (~18 s with 6,600 files over SPI). Dataset frames now go to `dataset/<NNNN>/`
+  (250 per folder). The frame log shows the POST time and warns separately when a save is slow.
+* **The card is not found after a soft reset.** A reset does not power-cycle the card, so one that
+  was mid-write may not answer at first. The firmware retries the init up to four times; unplugging
+  USB always clears it.
+* **The host stops accepting connections after many board resets.** Every upload cut off by a reset
+  stays open on the host, because uvicorn has no request-body timeout. Its launchd job allows only
+  256 open files. `launchctl kickstart -k gui/$(id -u)/com.loci.esp32-host` clears it; the lasting
+  fix belongs on the host.
 * **Reading the whole flash back is slow.** `esptool read-flash 0 ALL` over the USB-Serial/JTAG
   port runs at about 12 kB/s, so 16 MB takes about 24 minutes. Writing is about 1.3 Mbit/s.
 * **Opening the serial port reboots the board.** Leave DTR and RTS asserted as `idf.py monitor`

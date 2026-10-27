@@ -357,8 +357,10 @@ Pillow-made JPEGs for the camera, a callable for YOLO, a coroutine for STT, a WA
 - ✅ Second board (2026-10-26): **Meshnology W11** (ESP32-S3 + OV3660 + PDM mic + microSD, no
   speaker) on `firmware/esp32-s3-client`, which shares the main loop, host link and microSD memory
   with the P4 through `firmware/common/loci_client`. On the board: camera, card (the P4's data read
-  as is), ESP-SR (1.6 s per 4 s clip) and ESP-DL YOLO11n-320 detection (1.4 s per frame). Frame
-  streaming is blocked until its Wi-Fi antenna is attached. Comparison and recommendation:
+  as is), ESP-SR (1.6 s per 4 s clip) and ESP-DL YOLO11n-320 detection (1.4 s per frame). With its
+  u.FL antenna it streams 1024×768 frames at 2.0 fps with a 109 ms median POST, after three fixes found
+  on the desk: camera clock at 10 MHz (interference), XGA default (buffer overflow), and dataset
+  saves in small folders (an 18 s SD stall). Comparison and recommendation:
   `docs/MESHOLOGY_EVALUATION.md`.
 - ⬜ Push-to-talk over WebSocket (streaming STT) instead of one POST per utterance.
 - ⬜ Optional monocular depth plug-in behind `LOCI_ESP32_DEPTH=mono`.

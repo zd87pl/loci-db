@@ -18,6 +18,9 @@ uplink, and LOCI behind Cloudflare for older history.
   internal RAM dips to 17 kB.
 * **No speaker:** answers have to reach the user through the phone (BLE, which is the plan) or an
   add-on amplifier.
+* **As a thin client** (frames to the host, as the P4 does today) it works as well as the P4:
+  **2.0 fps, POST median 109 ms**, once its antenna was attached and three board problems
+  found on the desk were fixed (§2).
 
 Recommendation: build the **Stage 1 BLE-tethered pendant prototype on the S3 class (W11 or a
 XIAO ESP32S3 Sense, same pins and same firmware)**. It should run detection at about 0.5 Hz, or
@@ -34,14 +37,15 @@ listed at ~1.8× the S3 in Espressif's tables) before committing to a PCB.
 | Smaller single-purpose detectors (people, faces) | Pico 224²: 125 ms (vendor) | 50 ms (vendor) | P4, but both are usable |
 | Local speech commands (ESP-SR MultiNet7, 4 s clip) | runs: **1.5–1.7 s per 4 s clip measured**; recognition accuracy not verified (see §2) | 0.72–0.73 s, recognised "where is my cup" at p = 0.81 | P4 (S3 is fine for button-triggered use) |
 | RAM for detector + speech + hot window | 8 MB PSRAM (2.4–2.9 MB free with everything loaded), internal heap minimum 17.5 kB | 32 MB PSRAM | **P4** |
-| Camera | OV3660 3 MP DVP, JPEG on the sensor, no ISP, fixed focus | OV5647 5 MP MIPI, P4 ISP + hardware JPEG, fixed focus | P4 for image pipeline; S3 is simpler |
-| Wi-Fi | native in the S3; **no antenna was attached on the desk** (see §2) | C6 over SDIO via ESP-Hosted: retention-RAM boot loops, shared SDMMC, pinned versions | **W11** (one chip, no Hosted) |
+| Camera | OV3660 3 MP DVP, JPEG on the sensor, no ISP, fixed focus; its 20 MHz clock disturbed Wi-Fi and the SD lines, runs at 10 MHz | OV5647 5 MP MIPI, P4 ISP + hardware JPEG, fixed focus | P4 for image pipeline; S3 is simpler |
+| Thin-client streaming to the host | **2.0 fps, POST median 109 ms, p90 205 ms**, 1024×768 frames | 2.0 fps, 145–220 ms per POST, 1280×960 frames | even |
+| Wi-Fi | native in the S3, −31 to −56 dBm with the u.FL antenna (unusable without it) | C6 over SDIO via ESP-Hosted: retention-RAM boot loops, shared SDMMC, pinned versions | **W11** (one chip, no Hosted) |
 | BLE phone tether | native BLE 5 in the S3 | BLE on the C6, through ESP-Hosted's HCI | **W11** |
 | Battery and power | Li-ion charger + BAT pads on the board; deep sleep ≤ 8 µA (vendor); one chip | no charger; P4 + C6 always on | **W11** |
 | Size and weight | module 24.5 × 17.8 × 4.5 mm, 2.4 g, plus a stacked expansion board | 50 × 50 mm dev board with RJ45 | **W11** |
 | Speaking answers | no speaker; mic only | ES8311 + amplifier + speaker header | P4 on the board; for the pendant, the phone does it either way |
 | Motion sensing | QMI8658C IMU on the board (gate capture, detect falls, steadiness) | none | **W11** |
-| Firmware effort today | this branch: same loop as the P4 (shared `loci_client`), runs on the board | runs (PR #71) | even |
+| Firmware effort today | this branch: same loop as the P4 (shared `loci_client`), streaming on the board | runs (PR #71) | even |
 
 ## 1. What the W11 is (found on the desk, not assumed)
 
@@ -80,7 +84,7 @@ The full 16 MB factory image was read back before flashing (kept outside the rep
 |---|---|
 | Boot to `app_main` | 0.86 s; 8 MB PSRAM found, 80 MHz octal |
 | Camera | OV3660 detected, warm-up 0.55 s; JPEG straight from the sensor, a capture is ready immediately ("grab latest"). Sizes at quality 12: VGA 24 kB, XGA 61 kB, SXGA 190–214 kB, UXGA 64–312 kB depending on the scene |
-| microSD (the P4's card, untouched) | SanDisk 64 GB FAT32 mounted over SPI at 20 MHz, 1-bit; the P4's data was readable: 3,231 dataset frames, cached memory rev `7ef24afc` (the same rev the host reports), spoken summary present; 0 backlog frames left from the P4 |
+| microSD (the P4's card, nothing deleted) | SanDisk 64 GB FAT32 over SPI, 1-bit (20 MHz at first, 10 MHz now); the P4's data was readable: 3,231 dataset frames, cached memory rev `7ef24afc` (the same rev the host reports), spoken summary present; 0 backlog frames left from the P4 |
 | Store-and-forward without a host | frames go to `/sdcard/loci/backlog/` at 1 fps (500 frames in ~8 min); the live loop probes the host every 5 s |
 | ESP-SR | MultiNet7 English loads from the `model` partition; 54 command phrases built from the cached memory's labels; a 4 s clip is processed in **1.50–1.67 s** |
 | ESP-SR recognition | **not verified**: the test clips from the Mac speaker (44 % volume, about a metre away) reached the PDM mic at peak 3–5 k over a 300–650 noise floor and nothing was recognised. Yesterday's P4 test needed the clip right next to the board too. Push-to-talk with a voice close to the mic is the next check |
@@ -88,15 +92,43 @@ The full 16 MB factory image was read back before flashing (kept outside the rep
 | Board vs host on the same frames | 15 of the P4's 1280×960 frames from the card (`detect sd 15`): the board's 320-px YOLO11n and the host's YOLOv8n at 960 px agree on large objects (person 0.90, refrigerator 0.62–0.88, chair) and disagree on small or partial ones (host-only dining table/oven, board-only microwave). Live, the board found the person at the desk at 0.88–0.94 |
 | Memory with Wi-Fi + ESP-SR + detector loaded | PSRAM 2.4–2.9 MB free of 8 MB; internal heap 59 kB free, **17.5 kB minimum** |
 | IMU | QMI8658C at 0x6B, WHO_AM_I 0x05; reads 1 g with the board at rest, 42 °C die temperature |
-| **Wi-Fi** | joins the AP in 4–13 s, but at **−81 to −86 dBm** where the P4 read −40 to −50 at the same desk; pings lose 75 % (56 B) to 100 % (1,400 B). TCP connects complete but frame uploads stall; a short `ask` got through once (answered by the host). The W11 has only a u.FL connector and **no antenna was attached**; frame streaming to the host is untested until it is |
+| Wi-Fi without the antenna | −81 to −86 dBm where the P4 read −40 to −50 at the same desk; pings lost 75 % (56 B) to 100 % (1,400 B) and frame uploads stalled. The W11 has only a u.FL connector |
+| Wi-Fi with the antenna | −31 to −56 dBm; joins in under 2 s; 450 pings of 1,000 B: 0 % loss, 9 ms average |
+| **Thin-client streaming** (firmware `0b7f87c`, 150 s, card mounted) | **293 live frames, 1.96 fps** on the board and at the host; **POST 109 ms median, 205 ms p90, 345 ms max**; 0 failures, 0 frames dropped by the host; host YOLOv8n 63–82 ms per frame; 1024×768 JPEGs of 20–23 kB (ceiling view) to 60–100 kB (lit room) |
+| Without the card (75 s) | 150 frames, 2.0 fps, POST 107 ms median, 234 ms p90, 323 ms max |
+| Backlog | the ~980 frames captured to the card while the board had no antenna uploaded interleaved with the live stream until the backlog was empty. While they drained, the host's 4 fps limit dropped many live frames (it counts the backlog frames it processes) |
+| Typed question | `ask what do you see` answered by the host in 2.2 s, printed on the board; `offline` printed the 11 remembered objects with their places from the card |
 
 For comparison, yesterday's P4-NANO on the same desk and host: 1280×960 frames of 135–145 kB at
 2.0 fps, 145–220 ms per POST with keep-alive, host YOLOv8n 74 ms at 960 px; push-to-talk answer
-1.3 s after the button was released. The W11's streaming numbers go here once the antenna is on:
-the firmware, host protocol and host page (`/esp32?device=meshology`) are ready. The ~500
-frames it captured to the card while offline will upload as backlog. They carry only monotonic
-stamps, because the board never received the host's clock this boot, so the host files them at
-arrival time.
+1.3 s after the button was released.
+
+Problems the desk test found, and what fixed them:
+
+1. **The camera disturbed the radio and the card.** With the camera clock (XCLK) at the usual
+   20 MHz, and worse after switching to XGA (faster pixel clock), pings went to 0.2–8 s with up to
+   87 % loss at −49 dBm, and the microSD stopped initialising (CRC errors). At 10 MHz both are clean.
+   The camera flex, the SD slot and the antenna share one small expansion board; a pendant PCB
+   needs this layout checked.
+2. **Frames overflowed the camera buffer.** At UXGA, quality 12, a bright scene produced 370 kB
+   JPEGs against a 384 kB buffer. The driver dropped them ("FB-OVF"), so the camera looked dead.
+   The default is now XGA, which is all the host's YOLO uses at 960 px, and the camera compresses
+   harder by itself after repeated empty captures.
+3. **SD dataset saves stalled the stream.** Every 10th frame is saved for training. In the flat
+   `frames/` folder (~6,600 files with similar long names) FatFs needed ~18 s per save, because it
+   makes up a unique 8.3 alias for each new name. Nothing was sent meanwhile, and the host closed
+   the idle keep-alive connection. New saves go into folders of 250 and take ~0.6 s. This is shared
+   code, so the P4 benefits too.
+4. **Host: dead uploads use up its file descriptors.** Each upload cut off by a board reset or a
+   dead link left a connection open on the host. uvicorn has no timeout for a request body that
+   stops arriving. After ~20 resets the host held 241 of them, hit the launchd job's 256-file limit
+   and reset every new connection, including the P4 and the Cloudflare hostname, until it was
+   restarted. A pendant that loses power mid-upload will hit this routinely, so the host needs a
+   body-read timeout and a higher limit. That is a host change, not part of this PR.
+
+Backlog frames captured before the board first hears from the host this boot carry only a
+monotonic stamp, so the host files them at arrival time rather than capture time. A per-boot id in
+the file name would let the board convert them once the clock is known.
 
 ## 3. Vendor numbers for on-device detection (ESP-DL model zoo, int8)
 
@@ -160,13 +192,17 @@ Sending the same text over a BLE characteristic is the next step.
   still has to be shown with a real voice.
 * **Phone uplink.** The S3's native BLE removes the ESP-Hosted layer the P4 would need for the
   same tether.
-* **Antenna.** A pendant needs an antenna that works against the body. The W11's u.FL connector
-  lets us choose one, but on the desk without it the link was unusable.
+* **Antenna and layout.** A pendant needs an antenna that works against the body. The W11's u.FL
+  connector lets us choose one; without it the link was unusable. The camera clock interfering with
+  Wi-Fi and the SD card on the W11's small expansion board is the layout lesson for our own PCB.
+* **Abrupt power loss is normal for a wearable.** The host must time out uploads that stop
+  mid-body (finding 4 above), and the card must survive resets mid-write: a soft reset left the
+  card unanswering until it was retried, and the firmware now retries.
 
 ## 6. Not verified on this board yet
 
-* Frame streaming to the host, backlog upload and round-trip times: blocked by the missing antenna.
-* Push-to-talk with a real voice and ESP-SR recognition accuracy on the PDM mic.
+* Push-to-talk (needs someone to hold BOOT) and ESP-SR recognition accuracy on the PDM mic with a
+  real voice.
 * Battery operation: no cell attached, no current measured. The vendor figures above are not ours.
 * HTTPS / Cloudflare online mode on the S3: the same code as the P4, built and configured, not yet
   exercised.

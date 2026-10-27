@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "esp_check.h"
@@ -39,8 +40,27 @@ static int64_t json_int64(const char *body, const char *key) {
   return atoll(p + strlen(needle));
 }
 
+// The host's time is copied into the system clock (settimeofday) on the first reply of a boot.
+// The system clock survives a panic, a watchdog reset or esp_restart() (IDF keeps the boot time
+// in RTC registers), so after a soft reset frames recorded before the host answers still get
+// their real time. A power cut loses it.
+#define UNIX_MS_MIN 1700000000000LL  // Nov 2023: an earlier system clock was never set
+
+static int64_t system_unix_ms(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  int64_t ms = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+  return ms > UNIX_MS_MIN ? ms : 0;
+}
+
 int64_t host_now_ms(void) {
-  return s_clock_synced ? esp_timer_get_time() / 1000 + s_clock_offset_ms : 0;
+  if (s_clock_synced) return esp_timer_get_time() / 1000 + s_clock_offset_ms;
+  return system_unix_ms();
+}
+
+const char *host_clock_source(void) {
+  if (s_clock_synced) return "host";
+  return system_unix_ms() > 0 ? "kept across reset" : "unknown";
 }
 const char *host_last_reply(void) { return s_resp ? s_resp : ""; }
 const char *host_device_id(void) { return s_device; }
@@ -270,6 +290,10 @@ void host_link_init(const char *base_url, const char *device_id, const char *tok
   if (!s_resp) ESP_LOGE(TAG, "no memory for the reply buffer; host requests will fail");
 }
 
+bool host_status_rejects_frame(int status) {
+  return status == 400 || status == 413 || status == 415 || status == 422;
+}
+
 esp_err_t host_post_frame(const uint8_t *jpeg, size_t len, uint32_t seq, host_frame_result_t *out) {
   return host_post_frame_ex(jpeg, len, seq, 0, false, out);
 }
@@ -302,25 +326,43 @@ esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int6
 
   int status = exchange(c, jpeg, len);
   s_frame_last_ms = esp_timer_get_time() / 1000;
+  memset(out, 0, sizeof(*out));
+  out->http_status = status;
   if (status != 200) {
     esp_http_client_close(c);  // drop the connection; the next frame reconnects
-    s_failures++;
+    // A refused frame says nothing about the link: counting it made one bad backlog file switch the
+    // board to offline mode (a probe every 5 s) and back, over and over.
+    if (!host_status_rejects_frame(status)) s_failures++;
     ESP_LOGW(TAG, "frame #%lu -> HTTP %d %s", (unsigned long)seq, status, status > 0 ? s_resp : "");
     return ESP_FAIL;
   }
   s_failures = 0;
-  memset(out, 0, sizeof(*out));
   out->dropped = json_int(s_resp, "dropped", 0) == 1;
   out->audio_pending = json_int(s_resp, "audio_pending", 0);
   out->next_ms = json_int(s_resp, "next_ms", 0);
   json_array(s_resp, "labels", out->labels, sizeof(out->labels));
   json_string(s_resp, "memory_rev", out->memory_rev, sizeof(out->memory_rev));
   int64_t now = json_int64(s_resp, "now_ms");
-  if (now > 1000000000000LL) {
+  if (now > UNIX_MS_MIN) {
     s_clock_offset_ms = now - esp_timer_get_time() / 1000;
+    int64_t sys = system_unix_ms();
+    if (!s_clock_synced || sys == 0 || llabs(sys - now) > 1000) {
+      struct timeval tv = {.tv_sec = (time_t)(now / 1000), .tv_usec = (suseconds_t)((now % 1000) * 1000)};
+      settimeofday(&tv, NULL);
+    }
     s_clock_synced = true;
   }
   return ESP_OK;
+}
+
+// 4 kB scratch for downloads and clip playback, shared because only the main loop calls host_link.
+// PSRAM: internal RAM is the scarce part on both boards (S3 heap minimum 17.5 kB, P4 retention RAM).
+static uint8_t *io_buffer(void) {
+  static uint8_t *buf;
+  if (!buf) buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buf) buf = heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!buf) ESP_LOGE(TAG, "no memory for the 4 kB I/O buffer");
+  return buf;
 }
 
 esp_err_t host_fetch_file(const char *path_and_query, const char *dest_path, size_t *bytes_out) {
@@ -347,8 +389,14 @@ esp_err_t host_fetch_file(const char *path_and_query, const char *dest_path, siz
     esp_http_client_cleanup(c);
     return ESP_FAIL;
   }
-  static uint8_t *buf;
-  if (!buf) buf = heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  uint8_t *buf = io_buffer();
+  if (!buf) {
+    fclose(f);
+    unlink(tmp);
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    return ESP_ERR_NO_MEM;
+  }
   size_t total = 0;
   bool ok = true;
   for (;;) {
@@ -390,9 +438,8 @@ bool host_fetch_and_play_audio(int wait_s) {
   if (esp_http_client_open(c, 0) == ESP_OK) {
     int64_t content_len = esp_http_client_fetch_headers(c);
     int status = esp_http_client_get_status_code(c);
-    if (status == 200) {
-      static uint8_t *buf;
-      if (!buf) buf = heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint8_t *buf = io_buffer();
+    if (status == 200 && buf) {
       size_t total = 0, carry = 0;
       int64_t t0 = esp_timer_get_time();
       for (;;) {
@@ -421,8 +468,12 @@ bool host_fetch_and_play_audio(int wait_s) {
 
 esp_err_t host_post_voice(const uint8_t *pcm, size_t len) {
   char url[224];
-  snprintf(url, sizeof(url), "%s/api/esp32/voice?device=%s&rate=%d", s_base, s_device, LOCI_AUDIO_RATE);
-  esp_http_client_handle_t c = client_new(url, HTTP_METHOD_POST, 45000);
+  // speak=0 on a board without a speaker: the host then skips TTS (an edge-tts round trip)
+  snprintf(url, sizeof(url), "%s/api/esp32/voice?device=%s&rate=%d&speak=%d", s_base, s_device, LOCI_AUDIO_RATE,
+           audio_speaker_ready() ? 1 : 0);
+  // 15 s covers upload, Whisper and the host's TTS (edge-tts gives up at 10 s); after that the
+  // board answers by itself rather than leaving the user in silence for 45 s
+  esp_http_client_handle_t c = client_new(url, HTTP_METHOD_POST, 15000);
   if (!c) return ESP_ERR_NO_MEM;
   esp_http_client_set_header(c, "Content-Type", "audio/L16; rate=16000");
   esp_http_client_set_header(c, "X-Device-Id", s_device);
@@ -443,10 +494,11 @@ esp_err_t host_post_voice(const uint8_t *pcm, size_t len) {
 }
 
 static esp_err_t post_text(const char *path, const char *text, bool play) {
-  char url[224], escaped[256], payload[320];
+  char url[224], escaped[256], payload[352];
   snprintf(url, sizeof(url), "%s%s", s_base, path);
   json_escape(text, escaped, sizeof(escaped));
-  snprintf(payload, sizeof(payload), "{\"text\":\"%s\",\"device\":\"%s\"}", escaped, s_device);
+  snprintf(payload, sizeof(payload), "{\"text\":\"%s\",\"device\":\"%s\",\"speak\":%s}", escaped, s_device,
+           play && audio_speaker_ready() ? "true" : "false");
   esp_http_client_handle_t c = client_new(url, HTTP_METHOD_POST, 30000);
   if (!c) return ESP_ERR_NO_MEM;
   esp_http_client_set_header(c, "Content-Type", "application/json");

@@ -134,7 +134,12 @@ SDMMC controller that ESP-Hosted already created for the C6 on slot 1 (`main/sto
 A 64 GB card arrives formatted as exFAT, which IDF's FatFs cannot read. The firmware reports
 "card has no FAT filesystem"; build with `-DLOCI_SD_FORMAT_IF_NEEDED=1` once (it formats the card as
 FAT32, erasing it) or format it on a computer. Console: `sd` (card info), `objects` (cached memory),
-`offline` (play the cached summary).
+`offline` (play the cached summary), `requeue` (put backlog frames the host refused, kept in
+`backlog_bad/`, back in the upload queue), `reboot` (soft reset: the clock taken from the host
+survives it, a power cut does not; `status` shows the boot number and the clock's source).
+
+Backlog and voice files are named `<ms>_<boot>_<seq>`, so frames recorded before the clock is known
+(their `<ms>` counts from boot) no longer overwrite each other across resets.
 
 ## Offline questions (ESP-SR on the board)
 

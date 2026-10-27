@@ -204,3 +204,13 @@ def test_memory_pcm_and_phrase_cache() -> None:
     assert t.voice.synthesized.count("Hold the button and ask again.") == 1
     assert t.client.get("/api/esp32/phrase.pcm").status_code == 422
     assert t.client.get("/api/esp32/status").json()["memory_rev"] == t.hub.memory_rev()
+
+
+def test_memory_rev_ignores_the_order_of_sightings() -> None:
+    t = _build()
+    cup = {"label": "cup", "where": "on the left", "room": "kitchen"}
+    cat = {"label": "cat", "where": "in the center", "room": None}
+    assert t.hub.memory_rev([cup, cat]) == t.hub.memory_rev([cat, cup])
+    moved = {**cup, "where": "on the right"}
+    assert t.hub.memory_rev([moved, cat]) != t.hub.memory_rev([cup, cat])
+    assert t.hub.memory_rev([]) == "empty"

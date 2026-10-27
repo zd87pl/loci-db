@@ -107,9 +107,14 @@ class Esp32VoiceBridge:
 
     async def _default_transcribe(self, samples: np.ndarray, pcm: bytes, language: str) -> str:
         stt = getattr(self._voice, "_stt", None)
-        model = self._local_whisper(stt)
+        loop = asyncio.get_running_loop()
+        decode = getattr(stt, "transcribe_samples", None)
+        if getattr(stt, "_use_local", False) and callable(decode):
+            # the pipeline's own decode: VAD, vocabulary prompt, stock-phrase guard
+            return await loop.run_in_executor(None, decode, samples, language)
+        # loading the model takes seconds on a cold start: never on the event loop
+        model = await loop.run_in_executor(None, self._local_whisper, stt)
         if model is not None:
-            loop = asyncio.get_running_loop()
 
             def run() -> str:
                 segments, _info = model.transcribe(samples, language=language, beam_size=1)
@@ -130,6 +135,17 @@ class Esp32VoiceBridge:
         if callable(loader):
             loader()
         return getattr(stt, "_local_model", None)
+
+    def warm_up(self) -> None:
+        """Load and exercise the local Whisper model (call from a thread at startup)."""
+        warm = getattr(getattr(self._voice, "_stt", None), "warm_up", None)
+        if self._transcriber is not None or not callable(warm):
+            return
+        try:
+            warm()
+        except Exception as e:
+            self.last_error = f"stt warm-up: {e}"
+            logger.warning("ESP32 voice: Whisper warm-up failed: %s", e)
 
     # -- text to speech ----------------------------------------------------------
 

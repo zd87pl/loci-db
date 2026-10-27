@@ -99,3 +99,7 @@ CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH="../common/certs/extra_roots.pem"
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 CONFIG_ESP_HOSTED_DFLT_TASK_FROM_SPIRAM=y
 CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y
+
+# FatFs file locking: a second open of a file that is already open (two writers of the same
+# obj_*.pcm.part, say) returns FR_LOCKED instead of corrupting the FAT. 10 files open at once.
+CONFIG_FATFS_FS_LOCK=10

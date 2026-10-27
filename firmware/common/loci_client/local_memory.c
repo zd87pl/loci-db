@@ -162,7 +162,8 @@ uint8_t *local_read_file(const char *path, size_t *len_out) {
     fclose(f);
     return NULL;
   }
-  uint8_t *buf = heap_caps_malloc((size_t)n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  // one spare byte: callers search JSON files with strstr, so the buffer is always NUL-terminated
+  uint8_t *buf = heap_caps_malloc((size_t)n + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!buf) {
     fclose(f);
     return NULL;
@@ -173,6 +174,7 @@ uint8_t *local_read_file(const char *path, size_t *len_out) {
     free(buf);
     return NULL;
   }
+  buf[got] = 0;
   *len_out = got;
   return buf;
 }

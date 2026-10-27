@@ -138,6 +138,11 @@ int voice_local_recognize(const int16_t *pcm, size_t samples, char *label_out, s
   // Feed the clip plus half a second of silence so the last word is flushed through the pipeline.
   const size_t tail = LOCI_AUDIO_RATE / 2;
   int16_t *zeros = heap_caps_calloc(s_feed_chunk, sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!zeros) zeros = heap_caps_calloc(s_feed_chunk, sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!zeros) {
+    ESP_LOGE(TAG, "no memory to flush the recogniser");
+    return VOICE_CMD_NONE;
+  }
   int result = VOICE_CMD_NONE;
   float prob = 0.0f;
   size_t fed = 0;

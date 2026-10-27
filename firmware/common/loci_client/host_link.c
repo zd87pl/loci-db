@@ -323,6 +323,16 @@ esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int6
   return ESP_OK;
 }
 
+// 4 kB scratch for downloads and clip playback, shared because only the main loop calls host_link.
+// PSRAM: internal RAM is the scarce part on both boards (S3 heap minimum 17.5 kB, P4 retention RAM).
+static uint8_t *io_buffer(void) {
+  static uint8_t *buf;
+  if (!buf) buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buf) buf = heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!buf) ESP_LOGE(TAG, "no memory for the 4 kB I/O buffer");
+  return buf;
+}
+
 esp_err_t host_fetch_file(const char *path_and_query, const char *dest_path, size_t *bytes_out) {
   char url[256], tmp[128];
   snprintf(url, sizeof(url), "%s%s", s_base, path_and_query);
@@ -347,8 +357,14 @@ esp_err_t host_fetch_file(const char *path_and_query, const char *dest_path, siz
     esp_http_client_cleanup(c);
     return ESP_FAIL;
   }
-  static uint8_t *buf;
-  if (!buf) buf = heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  uint8_t *buf = io_buffer();
+  if (!buf) {
+    fclose(f);
+    unlink(tmp);
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+    return ESP_ERR_NO_MEM;
+  }
   size_t total = 0;
   bool ok = true;
   for (;;) {
@@ -390,9 +406,8 @@ bool host_fetch_and_play_audio(int wait_s) {
   if (esp_http_client_open(c, 0) == ESP_OK) {
     int64_t content_len = esp_http_client_fetch_headers(c);
     int status = esp_http_client_get_status_code(c);
-    if (status == 200) {
-      static uint8_t *buf;
-      if (!buf) buf = heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint8_t *buf = io_buffer();
+    if (status == 200 && buf) {
       size_t total = 0, carry = 0;
       int64_t t0 = esp_timer_get_time();
       for (;;) {

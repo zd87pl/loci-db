@@ -11,6 +11,8 @@
 
 #include "board_w11.h"
 
+#define DMA_BUFFERS 16  // x 20 ms: ~300 ms of push-to-talk pre-roll
+
 static const char *TAG = "audio";
 static i2s_chan_handle_t s_rx;
 static float s_dc_x, s_dc_y;  // DC blocker state
@@ -20,7 +22,7 @@ esp_err_t audio_init(void) {
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   // 16 x 20 ms: the driver keeps the newest 15 buffers while nobody reads, so push-to-talk starts
   // with the ~300 ms before the loop noticed the button (10 kB of internal DMA RAM)
-  chan_cfg.dma_desc_num = 16;
+  chan_cfg.dma_desc_num = DMA_BUFFERS;
   chan_cfg.dma_frame_num = 320;  // 20 ms per DMA buffer
   ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, NULL, &s_rx), TAG, "i2s_new_channel");
   i2s_pdm_rx_config_t pdm_cfg = {
@@ -81,9 +83,11 @@ esp_err_t audio_record_pcm16(int16_t *mono, size_t samples) {
 }
 
 void audio_flush_mic(void) {
-  static int16_t scratch[320];
-  for (int i = 0; i < 6; i++) audio_record_pcm16(scratch, sizeof(scratch) / sizeof(scratch[0]));
+  static int16_t scratch[320];  // one DMA buffer
+  for (int i = 0; i < DMA_BUFFERS; i++) audio_record_pcm16(scratch, sizeof(scratch) / sizeof(scratch[0]));
 }
+
+int64_t audio_speaker_busy_until_us(void) { return 0; }  // no speaker
 
 void audio_last_levels(int *peak, int *mean) {
   if (peak) *peak = s_last_peak;

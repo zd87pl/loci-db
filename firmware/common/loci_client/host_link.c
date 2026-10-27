@@ -301,9 +301,16 @@ esp_err_t host_post_frame(const uint8_t *jpeg, size_t len, uint32_t seq, host_fr
 esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int64_t captured_ms, bool backlog,
                              host_frame_result_t *out) {
   char url[224], hdr[32];
+  memset(out, 0, sizeof(*out));
+  out->http_status = -1;  // no answer, until the exchange below says otherwise
   snprintf(url, sizeof(url), "%s/api/esp32/frame?device=%s&seq=%lu", s_base, s_device, (unsigned long)seq);
   esp_http_client_handle_t c = frame_client(url);
-  if (!c) return ESP_ERR_NO_MEM;
+  if (!c) {
+    // An unparsable host URL ("host http://", a port above 65535) fails here on every frame: that
+    // is a link failure too, or the board stays "online" and drains its backlog into the void.
+    s_failures++;
+    return ESP_ERR_NO_MEM;
+  }
   esp_http_client_set_header(c, "Content-Type", "image/jpeg");
   esp_http_client_set_header(c, "X-Device-Id", s_device);
   snprintf(hdr, sizeof(hdr), "%lld", esp_timer_get_time() / 1000);
@@ -326,7 +333,6 @@ esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int6
 
   int status = exchange(c, jpeg, len);
   s_frame_last_ms = esp_timer_get_time() / 1000;
-  memset(out, 0, sizeof(*out));
   out->http_status = status;
   if (status != 200) {
     esp_http_client_close(c);  // drop the connection; the next frame reconnects

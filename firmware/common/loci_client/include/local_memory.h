@@ -35,8 +35,10 @@ bool local_backlog_oldest(char *path, size_t cap, int64_t *captured_ms);
 void local_backlog_remove(const char *path);
 // Move a backlog file out of the queue into backlog_bad/ (deleted when that fails); `why` is logged.
 void local_backlog_quarantine(const char *path, const char *why);
-// Move everything in backlog_bad/ back into the queue (after the host is fixed); returns how many.
+// Start moving everything in backlog_bad/ back into the queue (after the host is fixed); returns how
+// many. The main loop moves them with local_backlog_requeue_step(), one file per call.
 int local_backlog_requeue(void);
+bool local_backlog_requeue_step(void);  // false when there is nothing (left) to move
 // Read a whole file into a PSRAM buffer (caller frees). Returns NULL on failure.
 uint8_t *local_read_file(const char *path, size_t *len_out);
 
@@ -50,7 +52,8 @@ void local_voice_save(const int16_t *pcm, size_t samples, int64_t ms);
 typedef esp_err_t (*local_fetch_fn)(const char *path_and_query, const char *dest_path, size_t *bytes_out);
 void local_memory_set_source(local_fetch_fn fetch);
 // Fetch memory.json / memory.pcm from the host when `rev` differs from the cached one (rate limited).
-void local_memory_refresh(const char *rev);
+// True when the card now holds a new memory (time to rebuild the offline commands).
+bool local_memory_refresh(const char *rev);
 // Cloud mode (no frame replies carry a rev): fetch memory.json, and when its rev differs from the
 // cached one, the spoken summary too. True when the cache changed (then fetch the phrases).
 bool local_memory_poll(void);

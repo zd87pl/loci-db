@@ -210,11 +210,19 @@ static void refresh_offline_commands(void) {
 
 // ---- push-to-talk --------------------------------------------------------------------------
 static void record_and_ask(void) {
+  int64_t pressed_us = esp_timer_get_time();
   vTaskDelay(pdMS_TO_TICKS(30));  // debounce
   if (!button_down() || !audio_mic_ready() || !s_ptt_buf) return;
   ESP_LOGI(TAG, "[ptt] recording... release the button to ask");
   // No flush: the I2S DMA ring (~300 ms, see the boards' audio.c) still holds what was said while
   // the loop was busy with a frame upload, and that is the start of the question ("where ...").
+  // Unless the speaker was playing: then the ring holds the answer's tail, so let the speaker
+  // finish and start clean.
+  int64_t busy_us = audio_speaker_busy_until_us() - esp_timer_get_time();
+  if (busy_us > 0) {
+    vTaskDelay(pdMS_TO_TICKS(busy_us / 1000 + 1));
+    audio_flush_mic();
+  }
   const size_t chunk = LOCI_AUDIO_RATE / 50;  // 20 ms
   size_t samples = 0;
   int64_t t0 = esp_timer_get_time();
@@ -225,8 +233,10 @@ static void record_and_ask(void) {
   }
   while (button_down()) vTaskDelay(pdMS_TO_TICKS(10));
   float seconds = samples / (float)LOCI_AUDIO_RATE;
-  ESP_LOGI(TAG, "[ptt] %.1f s captured", seconds);
-  if (seconds < 0.3f) {
+  // a tap is judged by how long the button was held: the pre-roll alone is ~0.3 s of audio
+  int64_t held_ms = (esp_timer_get_time() - pressed_us) / 1000;
+  ESP_LOGI(TAG, "[ptt] %.1f s captured, button held %lld ms", seconds, held_ms);
+  if (held_ms < 300) {
     audio_beep(220.0f, 80);
     return;
   }
@@ -327,7 +337,9 @@ static void live_frame(void) {
     if (sd_ms > 500) ESP_LOGW(TAG, "[sd] saving the dataset frame took %lld ms", sd_ms);
   } else {
     s_failed++;
-    local_backlog_push(jpeg, len, host_now_ms());  // keep it; it goes up when the host is back
+    // keep it for when the host is back, unless the host refused this very frame: it would refuse
+    // it again from the backlog, and the copy would only end up in backlog_bad/
+    if (!host_status_rejects_frame(r.http_status)) local_backlog_push(jpeg, len, host_now_ms());
   }
   camera_release();
   if (rc != ESP_OK) return;
@@ -338,14 +350,12 @@ static void live_frame(void) {
            (unsigned long)h, (unsigned)len, post_ms,
            r.dropped ? "(dropped by host) " : "", r.labels[0] ? r.labels : "-",
            r.audio_pending && audio_speaker_ready() ? "  [audio waiting]" : "");
-  static char last_rev[24];
   static bool phrases_checked;
-  local_memory_refresh(r.memory_rev);
+  // Labels are rebuilt only once the card holds the new memory: a reply's revision can be ahead of
+  // the card for a while (the fetch is rate limited or failed), and rebuilding from the old
+  // memory.json then marking the revision as seen kept new objects out of the offline commands.
+  if (local_memory_refresh(r.memory_rev)) refresh_offline_commands();
   local_memory_ensure_prompt();
-  if (r.memory_rev[0] && strcmp(last_rev, r.memory_rev) != 0 && storage_ready()) {
-    snprintf(last_rev, sizeof(last_rev), "%s", r.memory_rev);
-    refresh_offline_commands();
-  }
   if (!phrases_checked && storage_ready()) {  // once per boot: fill in per-object answers the card lacks
     phrases_checked = true;
     local_memory_cache_object_phrases();
@@ -480,7 +490,8 @@ static void run_console_command(const char *line) {
     vTaskDelay(pdMS_TO_TICKS(100));
     esp_restart();
   } else if (!strcmp(line, "requeue")) {  // quarantined backlog frames go back in the upload queue
-    ESP_LOGI(TAG, "[backlog] %d quarantined frames requeued, %d in the queue", local_backlog_requeue(),
+    int n = local_backlog_requeue();
+    ESP_LOGI(TAG, "[backlog] requeueing %d quarantined frames, one every 250 ms; %d in the queue", n,
              local_backlog_count());
   } else if (!strcmp(line, "cache")) {  // fetch the per-object answers the card lacks
     local_memory_cache_object_phrases();
@@ -646,7 +657,7 @@ void loci_app_run(const loci_app_config_t *cfg) {
   if (voice_local_init()) refresh_offline_commands();
   print_status();
 
-  int64_t last_frame_ms = 0, last_backlog_ms = 0, last_probe_ms = 0;
+  int64_t last_frame_ms = 0, last_backlog_ms = 0, last_probe_ms = 0, last_requeue_ms = 0;
   for (;;) {
     drain_console();
     int64_t now_ms = esp_timer_get_time() / 1000;
@@ -687,6 +698,8 @@ void loci_app_run(const loci_app_config_t *cfg) {
 
     bool online = host_reachable();
     host_set_frame_timeout_ms(online ? 8000 : 2500);
+
+    if (now_ms - last_requeue_ms >= 250 && local_backlog_requeue_step()) last_requeue_ms = now_ms;
 
     // Drain the backlog between live frames (one file per pass keeps the live stream smooth).
     if (online && local_backlog_count() > 0 && now_ms - last_backlog_ms >= 150) {

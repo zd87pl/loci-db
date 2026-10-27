@@ -197,22 +197,40 @@ void local_backlog_quarantine(const char *path, const char *why) {
   }
 }
 
+// Requeueing moves one file per call: each rename into a backlog of thousands of files costs FatFs
+// ~0.5 s (it scans the folder for a free 8.3 alias), and moving 490 at once froze the main loop,
+// button included, for 4 minutes on the P4.
+static int s_requeue_left;
+
 int local_backlog_requeue(void) {
   if (!storage_ready() || !s_dir_backlog_bad[0]) return 0;
+  s_requeue_left = count_files(s_dir_backlog_bad);
+  return s_requeue_left;
+}
+
+bool local_backlog_requeue_step(void) {
+  if (s_requeue_left <= 0 || !storage_ready()) return false;
   DIR *d = opendir(s_dir_backlog_bad);
-  if (!d) return 0;
-  int n = 0;
+  struct dirent *e = d ? readdir(d) : NULL;
+  while (e && e->d_name[0] == '.') e = readdir(d);
   char from[112], to[112];
-  struct dirent *e;
-  while ((e = readdir(d)) != NULL) {
-    if (e->d_name[0] == '.') continue;
+  bool moved = false;
+  if (e) {
     snprintf(from, sizeof(from), "%s/%.40s", s_dir_backlog_bad, e->d_name);
     snprintf(to, sizeof(to), "%s/%.40s", s_dir_backlog, e->d_name);
-    if (rename(from, to) == 0) n++;
+    moved = rename(from, to) == 0;
   }
-  closedir(d);
-  s_backlog_count = count_files(s_dir_backlog);
-  return n;
+  if (d) closedir(d);
+  if (moved) {
+    s_backlog_count = s_backlog_count < 0 ? 1 : s_backlog_count + 1;
+    s_requeue_left--;
+  } else {
+    s_requeue_left = 0;  // folder empty (or the rename failed): stop rather than spin
+  }
+  if (s_requeue_left == 0 || (s_requeue_left % 50) == 0)
+    ESP_LOGI(TAG, "backlog: requeue, %d quarantined frames left, %d in the queue", s_requeue_left,
+             local_backlog_count());
+  return true;
 }
 
 uint8_t *local_read_file(const char *path, size_t *len_out) {
@@ -295,23 +313,25 @@ static void save_rev(const char *rev) {
   snprintf(s_cached_rev, sizeof(s_cached_rev), "%s", rev);
 }
 
-void local_memory_refresh(const char *rev) {
-  if (!storage_ready() || !rev || !rev[0] || !strcmp(rev, s_cached_rev)) return;
+bool local_memory_refresh(const char *rev) {
+  if (!storage_ready() || !rev || !rev[0] || !strcmp(rev, s_cached_rev)) return false;
   int64_t now = esp_timer_get_time() / 1000;
-  if (now - s_last_refresh_attempt_ms < 10000) return;  // the host's memory can change every frame
+  if (now - s_last_refresh_attempt_ms < 10000) return false;  // the host's memory can change every frame
   s_last_refresh_attempt_ms = now;
   size_t n1 = 0, n2 = 0;
   char q[96];
   snprintf(q, sizeof(q), "/api/esp32/memory?device=%s", host_device_id());
-  if (s_fetch(q, MEMORY_JSON, &n1) != ESP_OK) return;
+  if (s_fetch(q, MEMORY_JSON, &n1) != ESP_OK) return false;
+  bool fresh = true;  // memory.json is new from here on, even if the spoken summary fails below
   if (audio_speaker_ready()) {  // the spoken summary is of no use to a board without a speaker
     snprintf(q, sizeof(q), "/api/esp32/memory.pcm?device=%s", host_device_id());
-    if (s_fetch(q, MEMORY_PCM, &n2) != ESP_OK) return;
+    if (s_fetch(q, MEMORY_PCM, &n2) != ESP_OK) return fresh;  // rev not saved: retried
   }
   save_rev(rev);
   ESP_LOGI(TAG, "memory cache refreshed (rev %s): %u B json, %.1f s of speech", rev, (unsigned)n1,
            n2 / (2.0f * LOCI_AUDIO_RATE));
   local_memory_cache_object_phrases();
+  return fresh;
 }
 
 // The rev of a memory.json as written by the host or the cloud ({"rev":"<hex>",...}).

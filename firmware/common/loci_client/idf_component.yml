@@ -1,0 +1,5 @@
+## LOCI thin client, board-independent part (host link, microSD memory, offline commands)
+dependencies:
+  idf: ">=5.4"
+  # offline command words on the button (MultiNet7 English, models in the board's "model" partition)
+  espressif/esp-sr: "^2.6"

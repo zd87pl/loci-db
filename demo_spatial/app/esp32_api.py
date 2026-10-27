@@ -39,6 +39,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.requests import ClientDisconnect
 
 from .esp32_auth import Esp32Auth, public_surface_middleware
 from .esp32_source import Esp32Config, Esp32Hub, HostYoloDetector
@@ -59,6 +60,26 @@ class AskRequest(BaseModel):
 class SayRequest(BaseModel):
     text: str = Field(..., min_length=1, description="Text to speak on the board")
     device: str | None = None
+
+
+async def _read_upload(request: Request, what: str) -> bytes:
+    """The board's upload (raw body or a multipart ``file``/``image``/``frame`` field).
+
+    A board that resets or drops off Wi-Fi mid-upload never finishes the body; with the
+    ``esp32_http`` protocol the connection is dropped by TCP keepalive and the read ends in
+    ``ClientDisconnect``. That is routine for a wearable, so it is one log line, not a traceback
+    (nobody is left to receive the 499).
+    """
+    try:
+        if request.headers.get("content-type", "").startswith("multipart/form-data"):
+            form = await request.form()
+            upload = form.get("file") or form.get("image") or form.get("frame")
+            return await upload.read() if upload is not None and hasattr(upload, "read") else b""
+        return await request.body()
+    except ClientDisconnect:
+        client = request.client.host if request.client else "?"
+        logger.info("ESP32 %s upload from %s cut off (board reset or out of range)", what, client)
+        raise HTTPException(status_code=499, detail="client disconnected") from None
 
 
 def _header_int(request: Request, name: str) -> int | None:
@@ -132,13 +153,7 @@ def install_esp32_routes(
         seq: int | None = Query(None, description="Frame counter (or X-Seq header)"),
     ):
         """One JPEG frame from the board; returns labels and whether audio is waiting."""
-        content_type = request.headers.get("content-type", "")
-        if content_type.startswith("multipart/form-data"):
-            form = await request.form()
-            upload = form.get("file") or form.get("image") or form.get("frame")
-            body = await upload.read() if upload is not None and hasattr(upload, "read") else b""
-        else:
-            body = await request.body()
+        body = await _read_upload(request, "frame")
         if not body:
             raise HTTPException(status_code=400, detail="empty frame")
         device_id = _device(request, device)
@@ -328,7 +343,7 @@ def install_esp32_routes(
         speak: bool = True,
     ):
         """One push-to-talk utterance (raw PCM16 mono at ``rate``, or any WAV/MP3/WebM)."""
-        body = await request.body()
+        body = await _read_upload(request, "voice")
         if not body:
             raise HTTPException(status_code=400, detail="empty audio")
         device_id = _device(request, device)

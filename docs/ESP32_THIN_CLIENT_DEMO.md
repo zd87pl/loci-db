@@ -44,11 +44,13 @@ Host modules (all new, nothing in the shared pipeline modified):
 | `demo_spatial/tools/esp32_fake_board.py` | A laptop pretending to be the board (image/webcam → frames, plays answers with `afplay`). |
 | `demo_spatial/run_esp32_demo.sh` | Starts the host on port 8002 with offline-friendly defaults. |
 
-Firmware, two flavours speaking the same protocol:
+Firmware, three projects speaking the same protocol (the two ESP-IDF ones share their main loop,
+host link and microSD memory through `firmware/common/loci_client`):
 
 | Project | Boards | Stack |
 |---|---|---|
 | `firmware/esp32-p4-client/` | **Waveshare ESP32-P4-NANO** (the board on the desk): MIPI-CSI OV5647, ES8311 codec + NS4150B speaker, onboard mic, Wi-Fi via an ESP32-C6 over SDIO | ESP-IDF ≥ 5.4: `esp_video` (ISP + hardware JPEG), `esp_codec_dev`, `esp_wifi_remote`/`esp_hosted`, `esp_http_client` |
+| `firmware/esp32-s3-client/` | **Meshnology W11** (ESP32-S3, OV3660 DVP, PDM mic, microSD, IMU, no speaker) and the XIAO ESP32S3 Sense (same pins) | ESP-IDF ≥ 5.4: `esp32-camera`, I2S PDM-RX, SDSPI, `esp-sr`, `esp-dl` + `coco_detect` (on-board YOLO11n) |
 | `firmware/esp32-cam-client/` | XIAO ESP32S3 Sense, AI-Thinker ESP32-CAM, Freenove ESP32-S3 CAM (DVP OV2640, I2S amplifier, optional PDM mic) | PlatformIO, Arduino-ESP32, `esp32-camera`, legacy I2S driver |
 
 Each README has the pin map, build and flash steps.
@@ -219,7 +221,13 @@ cp main/secrets.h.example main/secrets.h          # fill in Wi-Fi + LOCI_HOST=ht
 . ~/esp/esp-idf/export.sh && idf.py set-target esp32p4 && idf.py build
 idf.py -p /dev/cu.usbmodem5ABA0768111 flash monitor
 
-# 2b. an S3 / classic ESP32 camera board instead (PlatformIO; see firmware/esp32-cam-client/README.md)
+# 2b. an ESP32-S3 camera board with the same loop as the P4 (Meshnology W11, XIAO ESP32S3 Sense;
+#     ESP-IDF, see firmware/esp32-s3-client/README.md): microSD, ESP-SR, on-board detection
+cd firmware/esp32-s3-client
+cp main/secrets.h.example main/secrets.h          # LOCI_DEVICE_ID "meshology"
+. ~/esp/esp-idf/export.sh && idf.py build && idf.py -p /dev/cu.usbmodem2101 flash monitor
+
+# 2c. an S3 / classic ESP32 camera board, minimal sketch (PlatformIO; see firmware/esp32-cam-client/README.md)
 cd firmware/esp32-cam-client
 cp include/secrets.h.example include/secrets.h
 pio run -e xiao_esp32s3_sense -t upload -t monitor
@@ -295,6 +303,22 @@ storage; its live image is polled as single JPEGs so the request can carry the h
 | `LOCI_ESP32_DEPTH` | `none` | `mono` enables a plugged-in monocular depth estimator (low confidence) |
 | `LOCI_ESP32_WB` | `none` (`gray` in the run script) | Gray-world white balance before detection; fixes the P4 camera's blue cast |
 | `LOCI_ESP32_IMGSZ` | 640 | YOLO inference size; 960 for 1280×960 frames |
+| `LOCI_HTTP_KEEPIDLE` / `LOCI_HTTP_KEEPINTVL` / `LOCI_HTTP_KEEPCNT` | 20 / 5 / 3 | TCP keepalive on every board connection: probe after 20 s of silence, every 5 s, drop after 3 unanswered probes |
+
+**Boards that vanish mid-upload.** `run_esp32_demo.sh` starts uvicorn with
+`--http demo_spatial.app.esp32_http:Esp32HttpProtocol` and raises the open-file limit with `ulimit -n`.
+uvicorn by itself only times out a connection between requests. A board that resets or drops off
+Wi-Fi during an upload sends no FIN, so its half-received request stayed open forever. On
+2026-10-26 241 of them used up the launchd job's 256 open files, and the host refused every new
+connection until it was restarted. The protocol turns on TCP keepalive (a rebooted board answers
+the first probe with a reset, and a vanished one is dropped after ~35 s) and gives a connection
+`--timeout-keep-alive` seconds to send its first request. A cut-off upload is logged as one line
+(`… upload … cut off`).
+
+Measured with the W11 leaving 6 dead connections (3 mid-body, 3 without a request) and rebooting:
+plain uvicorn kept all 6 for good, while the ESP32 protocol had closed every one within 20 s. Normal
+streaming through it was unchanged (1.90 fps, 96 ms median POST). The launchd example also sets
+`SoftResourceLimits` → `NumberOfFiles` 4096.
 
 Voice uses the existing `WHISPER_LOCAL`, `WHISPER_LOCAL_MODEL`, `TTS_ENGINE`, `PIPER_MODEL_PATH`,
 `EDGE_TTS_VOICE`.
@@ -346,6 +370,14 @@ Pillow-made JPEGs for the camera, a callable for YOLO, a coroutine for STT, a WA
   dining table and person per frame.
 - ✅ Rebased on `feat/handheld-oak-voice-demo`; the hub feeds `SceneIngestion.process_detections`.
   ⬜ Drop the legacy `_update_consensus` fallback once that branch is on `main`.
+- ✅ Second board (2026-10-26): **Meshnology W11** (ESP32-S3 + OV3660 + PDM mic + microSD, no
+  speaker) on `firmware/esp32-s3-client`, which shares the main loop, host link and microSD memory
+  with the P4 through `firmware/common/loci_client`. On the board: camera, card (the P4's data read
+  as is), ESP-SR (1.6 s per 4 s clip) and ESP-DL YOLO11n-320 detection (1.4 s per frame). With its
+  u.FL antenna it streams 1024×768 frames at 2.0 fps with a 109 ms median POST, after three fixes found
+  on the desk: camera clock at 10 MHz (interference), XGA default (buffer overflow), and dataset
+  saves in small folders (an 18 s SD stall). Comparison and recommendation:
+  `docs/MESHOLOGY_EVALUATION.md`.
 - ⬜ Push-to-talk over WebSocket (streaming STT) instead of one POST per utterance.
 - ⬜ Optional monocular depth plug-in behind `LOCI_ESP32_DEPTH=mono`.
 - ⬜ Pi as host: same script, `LOCI_HOST=http://loci-pi.local:8002` in `secrets.h`.

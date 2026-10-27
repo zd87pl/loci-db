@@ -207,6 +207,47 @@ def test_frame_post_rejects_empty_and_non_jpeg() -> None:
     assert r.status_code == 400 and "JPEG" in r.json()["detail"]
 
 
+def test_frame_upload_cut_off_mid_body_is_a_quiet_499(caplog) -> None:
+    """A board that resets mid-upload ends the body with a disconnect: a log line, no traceback."""
+    import asyncio
+
+    t = _build()
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/esp32/frame",
+        "raw_path": b"/api/esp32/frame",
+        "query_string": b"device=w11",
+        "root_path": "",
+        "headers": [(b"content-type", b"image/jpeg"), (b"content-length", b"50000")],
+        "client": ("192.168.1.50", 50000),
+        "server": ("testserver", 80),
+    }
+    messages = iter(
+        [
+            {"type": "http.request", "body": _jpeg()[:100], "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+    )
+
+    async def receive():
+        return next(messages)
+
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    with caplog.at_level("INFO"):
+        asyncio.run(t.app(scope, receive, send))
+    assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 499
+    assert "cut off" in caplog.text
+    assert t.hub.status()["frames_total"] == 0
+
+
 def test_frame_jpg_and_status() -> None:
     t = _build()
     assert t.client.get("/api/esp32/frame.jpg").status_code == 404

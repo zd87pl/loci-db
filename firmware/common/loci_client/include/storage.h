@@ -6,9 +6,10 @@
 
 #include "esp_err.h"
 
-// microSD on the ESP32-P4-NANO (SDMMC slot 0, 4-bit, powered by on-chip LDO channel 4), mounted at
-// STORAGE_MOUNT with FAT. A card formatted as exFAT (the factory default above 32 GB) cannot be
-// mounted by IDF's FatFs; storage_init reports that so the caller can decide to format.
+// microSD in the board's slot (storage_board_open_card in loci_hw.h: 4-bit SDMMC on the P4-NANO, SPI
+// on the S3 boards), mounted at STORAGE_MOUNT with FAT. A card formatted as exFAT (the factory default
+// above 32 GB) cannot be mounted by IDF's FatFs; storage_init reports that so the caller can decide
+// to format.
 #define STORAGE_MOUNT "/sdcard"
 #define STORAGE_DIR STORAGE_MOUNT "/loci"
 

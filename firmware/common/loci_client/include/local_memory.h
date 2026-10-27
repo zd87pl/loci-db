@@ -11,9 +11,13 @@
 //   /sdcard/loci/memory.json, memory.pcm     the host's remembered objects and a spoken summary, refreshed
 //                                            when the host's memory revision changes; played offline on the button
 //   /sdcard/loci/offline.pcm                 fixed prompt fetched once ("I can't reach the host...")
-//   /sdcard/loci/frames/<ms>.jpg + .json     every Nth live frame with the host's detections: a dataset for
-//                                            training a detector on the user's own objects
+//   /sdcard/loci/dataset/<NNNN>/<ms>.jpg + .json   every Nth live frame with the host's detections, 250 per
+//                                            folder: a dataset for training a detector on the user's own
+//                                            objects (builds before 0.5 wrote them flat into frames/)
 //   /sdcard/loci/voice/<ms>.wav              push-to-talk recordings, for checking the microphone and STT
+//
+// On a board without a speaker (audio_speaker_ready() false) no speech is fetched: the per-object
+// answers are kept as text only (obj_<label>.pcm.txt) and printed instead of played.
 
 void local_memory_init(void);
 
@@ -37,6 +41,8 @@ void local_memory_refresh(const char *rev);
 void local_memory_ensure_prompt(void);
 // Speak what the card holds: memory.pcm if present, else offline.pcm. True if something played.
 bool local_memory_play_offline(void);
+// The same as text, one log line per remembered object (boards without a speaker). True if any.
+bool local_memory_print_summary(void);
 // Per-object spoken answers ("Your cup was last seen in the center..."), fetched from the host as
 // /sdcard/loci/obj_<label>.pcm whenever the cached memory changes; played offline on a recognised
 // "where is my <label>".

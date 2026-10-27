@@ -342,6 +342,6 @@ direct_dependencies:
 - espressif/esp_video
 - espressif/esp_wifi_remote
 - idf
-manifest_hash: f07855030088c0c9e4854fc3b7884c12676e337357069b034a6b7b0c0fe65d6f
+manifest_hash: f43bc60c7c430b83eca0fe3846d30134fc8272983eaa345eafe990f80c4cffea
 target: esp32p4
 version: 3.0.0

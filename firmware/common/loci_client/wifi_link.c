@@ -42,7 +42,7 @@ esp_err_t wifi_link_start(const char *ssid, const char *password) {
   esp_netif_create_default_wifi_sta();
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "esp_wifi_init (is the C6 running the hosted slave?)");
+  ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "esp_wifi_init (on the P4: is the C6 running the hosted slave?)");
   ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, NULL), TAG, "h1");
   ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_wifi_event, NULL), TAG, "h2");
 

@@ -33,8 +33,10 @@ bool local_backlog_oldest(char *path, size_t cap, int64_t *captured_ms);
 void local_backlog_remove(const char *path);
 // Move a backlog file out of the queue into backlog_bad/ (deleted when that fails); `why` is logged.
 void local_backlog_quarantine(const char *path, const char *why);
-// Move everything in backlog_bad/ back into the queue (after the host is fixed); returns how many.
+// Start moving everything in backlog_bad/ back into the queue (after the host is fixed); returns how
+// many. The main loop moves them with local_backlog_requeue_step(), one file per call.
 int local_backlog_requeue(void);
+bool local_backlog_requeue_step(void);  // false when there is nothing (left) to move
 // Read a whole file into a PSRAM buffer (caller frees). Returns NULL on failure.
 uint8_t *local_read_file(const char *path, size_t *len_out);
 
@@ -44,7 +46,8 @@ void local_voice_save(const int16_t *pcm, size_t samples, int64_t ms);
 
 // -- cached memory + offline speech ------------------------------------------------------------
 // Fetch memory.json / memory.pcm from the host when `rev` differs from the cached one (rate limited).
-void local_memory_refresh(const char *rev);
+// True when the card now holds a new memory (time to rebuild the offline commands).
+bool local_memory_refresh(const char *rev);
 // Fetch the fixed offline prompt once.
 void local_memory_ensure_prompt(void);
 // Speak what the card holds: memory.pcm if present, else offline.pcm. True if something played.

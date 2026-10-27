@@ -11,10 +11,14 @@
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "board_p4_nano.h"
 
+#define DMA_BUFFERS 16  // x 20 ms, TX and RX: ~300 ms of push-to-talk pre-roll
+
 static const char *TAG = "audio";
+static int64_t s_busy_until_us;  // see audio_speaker_busy_until_us()
 
 static i2s_chan_handle_t s_tx;
 static i2s_chan_handle_t s_rx;
@@ -25,7 +29,7 @@ esp_err_t audio_init(i2c_master_bus_handle_t i2c_bus, int volume_pct) {
   chan_cfg.auto_clear = true;
   // 16 x 20 ms (default 6 x 15 ms): the RX driver keeps the newest 15 buffers while nobody reads,
   // so push-to-talk starts with the ~300 ms before the loop noticed the button (10 kB per direction)
-  chan_cfg.dma_desc_num = 16;
+  chan_cfg.dma_desc_num = DMA_BUFFERS;
   chan_cfg.dma_frame_num = 320;
   ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &s_tx, &s_rx), TAG, "i2s_new_channel");
 
@@ -98,8 +102,11 @@ bool audio_mic_ready(void) { return s_dev != NULL; }
 esp_err_t audio_play_pcm16(const int16_t *mono, size_t samples) {
   if (!s_dev || samples == 0) return ESP_ERR_INVALID_STATE;
   int rc = esp_codec_dev_write(s_dev, (void *)mono, samples * sizeof(int16_t));
+  s_busy_until_us = esp_timer_get_time() + DMA_BUFFERS * 20000LL;  // what the ring still holds
   return rc == ESP_CODEC_DEV_OK ? ESP_OK : ESP_FAIL;
 }
+
+int64_t audio_speaker_busy_until_us(void) { return s_busy_until_us; }
 
 esp_err_t audio_record_pcm16(int16_t *mono, size_t samples) {
   if (!s_dev || samples == 0) return ESP_ERR_INVALID_STATE;
@@ -108,8 +115,8 @@ esp_err_t audio_record_pcm16(int16_t *mono, size_t samples) {
 }
 
 void audio_flush_mic(void) {
-  static int16_t scratch[320];
-  for (int i = 0; i < 6; i++) audio_record_pcm16(scratch, sizeof(scratch) / sizeof(scratch[0]));
+  static int16_t scratch[320];  // one DMA buffer
+  for (int i = 0; i < DMA_BUFFERS; i++) audio_record_pcm16(scratch, sizeof(scratch) / sizeof(scratch[0]));
 }
 
 void audio_set_volume(int volume_pct) {

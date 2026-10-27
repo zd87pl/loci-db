@@ -29,6 +29,9 @@ esp_err_t audio_play_pcm16(const int16_t *mono, size_t samples);
 esp_err_t audio_record_pcm16(int16_t *mono, size_t samples);
 // Throw away whatever the microphone DMA accumulated while nobody was reading.
 void audio_flush_mic(void);
+// esp_timer time (us) by which the speaker has played everything queued so far (0 without one): the
+// DMA ring makes audio_play_pcm16() return up to ~320 ms before the sound is out.
+int64_t audio_speaker_busy_until_us(void);
 void audio_set_volume(int volume_pct);
 // Short tone as user feedback; boards without a speaker may signal some other way or do nothing.
 void audio_beep(float freq_hz, uint32_t ms);

@@ -46,7 +46,7 @@ npx wrangler dev --port 8787
 python3 scripts/bootstrap.py --url http://127.0.0.1:8787 --admin-token <ADMIN_TOKEN> --space home > ../../.cloud.env
 ```
 
-Then start the demo host (`demo_spatial`) with the `LOCI_CLOUD_*` lines from `.cloud.env` in its environment; it mirrors its memory into the space (`GET /api/cloud/status` on the host shows progress). See `demo_spatial/app/cloud_sync.py`.
+Then start the demo host (`demo_spatial`) with the `LOCI_CLOUD_*` lines from `.cloud.env` in its environment; it mirrors its memory into the space (`GET /api/cloud/status` on the host shows progress). Deletes go through a breaker: a pass that would delete more than 200 sightings or more than half of them, or anything while the local memory is empty, holds its deletes (`delete_breaker: "open"`, `deletes_held`) until you check and release them with `POST /api/cloud/deletes/accept` (`{"confirm": true, "expect": <deletes_held>}` plus the host's `X-Device-Token`). See `demo_spatial/app/cloud_sync.py`.
 
 `DEV_ALLOW_UNPINNED=1` exists only because the local runtime does not implement Durable Object jurisdictions; without it an EU project fails closed. Never set it in production.
 

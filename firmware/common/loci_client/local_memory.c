@@ -22,6 +22,7 @@ static bool play_file(const char *path);
 #define PLAY_CHUNK 2048  // samples per read while playing a cached clip
 
 static char s_dir_backlog[64];
+static char s_dir_backlog_bad[64];
 static char s_dir_frames[64];   // legacy flat dataset folder (read and counted, no longer written)
 static char s_dir_dataset[64];  // dataset/<NNNN>/, DATASET_PER_DIR frames per folder
 static char s_dir_voice[64];
@@ -34,6 +35,7 @@ static int64_t s_last_refresh_attempt_ms = -60000;
 static bool s_prompt_checked;
 
 #define BACKLOG_DIR "backlog"
+#define BACKLOG_BAD_DIR "backlog_bad"
 #define FRAMES_DIR "frames"
 // FatFs makes up a unique 8.3 alias for every long file name, and our names (<ms>.jpg) all share
 // their first digits, so each create scans the whole directory several times. With ~6,600 entries
@@ -81,6 +83,7 @@ static int64_t stamp(int64_t ms) {
 void local_memory_init(void) {
   if (!storage_ready()) return;
   storage_dir(BACKLOG_DIR, s_dir_backlog, sizeof(s_dir_backlog));
+  storage_dir(BACKLOG_BAD_DIR, s_dir_backlog_bad, sizeof(s_dir_backlog_bad));
   storage_dir(FRAMES_DIR, s_dir_frames, sizeof(s_dir_frames));
   storage_dir(DATASET_DIR, s_dir_dataset, sizeof(s_dir_dataset));
   storage_dir(VOICE_DIR, s_dir_voice, sizeof(s_dir_voice));
@@ -150,6 +153,39 @@ bool local_backlog_oldest(char *path, size_t cap, int64_t *captured_ms) {
 
 void local_backlog_remove(const char *path) {
   if (unlink(path) == 0 && s_backlog_count > 0) s_backlog_count--;
+}
+
+void local_backlog_quarantine(const char *path, const char *why) {
+  const char *name = strrchr(path, '/');
+  name = name ? name + 1 : path;
+  char dest[112];
+  snprintf(dest, sizeof(dest), "%s/%.40s", s_dir_backlog_bad, name);
+  unlink(dest);  // FatFs rename does not replace an existing file
+  if (s_dir_backlog_bad[0] && rename(path, dest) == 0) {
+    if (s_backlog_count > 0) s_backlog_count--;
+    ESP_LOGW(TAG, "backlog: %s %s, moved to %s/", name, why, BACKLOG_BAD_DIR);
+  } else {
+    local_backlog_remove(path);
+    ESP_LOGW(TAG, "backlog: %s %s, deleted", name, why);
+  }
+}
+
+int local_backlog_requeue(void) {
+  if (!storage_ready() || !s_dir_backlog_bad[0]) return 0;
+  DIR *d = opendir(s_dir_backlog_bad);
+  if (!d) return 0;
+  int n = 0;
+  char from[112], to[112];
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (e->d_name[0] == '.') continue;
+    snprintf(from, sizeof(from), "%s/%.40s", s_dir_backlog_bad, e->d_name);
+    snprintf(to, sizeof(to), "%s/%.40s", s_dir_backlog, e->d_name);
+    if (rename(from, to) == 0) n++;
+  }
+  closedir(d);
+  s_backlog_count = count_files(s_dir_backlog);
+  return n;
 }
 
 uint8_t *local_read_file(const char *path, size_t *len_out) {

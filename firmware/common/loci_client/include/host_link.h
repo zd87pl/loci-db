@@ -9,6 +9,7 @@
 // HTTP link to the LOCI host (see docs/ESP32_THIN_CLIENT_DEMO.md, section 2).
 
 typedef struct {
+  int http_status;     // status of the post, set on failure too (<= 0: no answer from the host)
   bool dropped;        // host skipped detection (rate limit) but kept the frame
   int audio_pending;   // clips waiting in this device's speaker queue
   int next_ms;         // interval the host would like between frames
@@ -31,6 +32,9 @@ esp_err_t host_post_frame(const uint8_t *jpeg, size_t len, uint32_t seq, host_fr
 // Same, for a frame kept on the card: captured_ms (Unix, 0 = unknown) and the backlog flag go in headers.
 esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int64_t captured_ms, bool backlog,
                              host_frame_result_t *out);
+// True for the statuses with which the host refuses one frame (not a JPEG, too large): retrying that
+// frame cannot help, and the link itself is fine.
+bool host_status_rejects_frame(int status);
 // Unix time in ms derived from the host's replies (0 until the first reply).
 int64_t host_now_ms(void);
 // The raw body of the last frame reply (for the dataset side-car files).

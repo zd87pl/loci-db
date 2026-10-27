@@ -172,6 +172,28 @@ def test_rate_limit_drops_but_keeps_preview() -> None:
     assert ing.frame_count == 1
 
 
+def test_backlog_frames_leave_the_live_stream_alone() -> None:
+    """Card frames drained between live frames must not rate-limit them or replace the preview."""
+    hub = Esp32Hub(_ingestion(), Esp32Config(max_fps=5.0), detector=lambda _b: [_cup()])
+    live1, old, live2 = _jpeg(32, 32), _jpeg(24, 24), _jpeg(16, 16)
+
+    async def go():
+        r1 = await hub.ingest_frame(live1)
+        await asyncio.sleep(0.25)  # one live interval later ...
+        rb = await hub.ingest_frame(old, backlog=True, captured_ms=1)  # ... a card frame goes up
+        r2 = await hub.ingest_frame(live2)  # and the next live frame right after it
+        return r1, rb, r2
+
+    r1, rb, r2 = _run(go())
+    assert not r1.dropped and not rb.dropped and not r2.dropped
+    dev = hub.device()
+    assert dev.frames_processed == 3 and dev.frames_dropped == 0 and dev.backlog_frames == 1
+    assert hub.latest_jpeg() == live2
+    rb_only = Esp32Hub(_ingestion(), Esp32Config(max_fps=5.0), detector=lambda _b: [_cup()])
+    _run(rb_only.ingest_frame(old, backlog=True))
+    assert rb_only.device().last_detections == [] and rb_only.device().fps == 0.0
+
+
 def test_detector_exception_is_counted_not_raised() -> None:
     def boom(_b: bytes) -> list[Detection]:
         raise RuntimeError("cuda fell over")

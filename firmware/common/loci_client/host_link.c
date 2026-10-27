@@ -270,6 +270,10 @@ void host_link_init(const char *base_url, const char *device_id, const char *tok
   if (!s_resp) ESP_LOGE(TAG, "no memory for the reply buffer; host requests will fail");
 }
 
+bool host_status_rejects_frame(int status) {
+  return status == 400 || status == 413 || status == 415 || status == 422;
+}
+
 esp_err_t host_post_frame(const uint8_t *jpeg, size_t len, uint32_t seq, host_frame_result_t *out) {
   return host_post_frame_ex(jpeg, len, seq, 0, false, out);
 }
@@ -302,14 +306,17 @@ esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int6
 
   int status = exchange(c, jpeg, len);
   s_frame_last_ms = esp_timer_get_time() / 1000;
+  memset(out, 0, sizeof(*out));
+  out->http_status = status;
   if (status != 200) {
     esp_http_client_close(c);  // drop the connection; the next frame reconnects
-    s_failures++;
+    // A refused frame says nothing about the link: counting it made one bad backlog file switch the
+    // board to offline mode (a probe every 5 s) and back, over and over.
+    if (!host_status_rejects_frame(status)) s_failures++;
     ESP_LOGW(TAG, "frame #%lu -> HTTP %d %s", (unsigned long)seq, status, status > 0 ? s_resp : "");
     return ESP_FAIL;
   }
   s_failures = 0;
-  memset(out, 0, sizeof(*out));
   out->dropped = json_int(s_resp, "dropped", 0) == 1;
   out->audio_pending = json_int(s_resp, "audio_pending", 0);
   out->next_ms = json_int(s_resp, "next_ms", 0);

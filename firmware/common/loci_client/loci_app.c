@@ -148,7 +148,15 @@ static void capture_to_card(void) {
   camera_release();
 }
 
+// The backlog goes up oldest-first, so a file that can never be accepted would block everything
+// behind it: it is quarantined when it is not a JPEG, when the host refuses it, or after
+// BACKLOG_MAX_TRIES uploads the host answered with an error. Failures without an answer (link
+// down) do not count against the file.
+#define BACKLOG_MAX_TRIES 5
+
 static void upload_one_backlog_frame(void) {
+  static char s_retry_path[96];
+  static int s_retry_count;
   char path[96];
   int64_t captured = 0;
   if (!local_backlog_oldest(path, sizeof(path), &captured)) return;
@@ -158,16 +166,38 @@ static void upload_one_backlog_frame(void) {
     local_backlog_remove(path);  // unreadable: drop it rather than loop on it
     return;
   }
+  if (len < 4 || buf[0] != 0xFF || buf[1] != 0xD8) {  // cut short by a reset, or damaged on the card
+    free(buf);
+    local_backlog_quarantine(path, "is not a JPEG");
+    return;
+  }
   host_frame_result_t r;
   s_seq++;
-  if (host_post_frame_ex(buf, len, s_seq, captured, true, &r) == ESP_OK) {
+  esp_err_t rc = host_post_frame_ex(buf, len, s_seq, captured, true, &r);
+  free(buf);
+  if (rc == ESP_OK) {
     local_backlog_remove(path);
     s_backlog_sent++;
     if ((s_backlog_sent % 10) == 1 || local_backlog_count() == 0)
       ESP_LOGI(TAG, "[backlog] uploaded %lu, %d left -> %s", (unsigned long)s_backlog_sent, local_backlog_count(),
                r.labels[0] ? r.labels : "-");
+    return;
   }
-  free(buf);
+  if (host_status_rejects_frame(r.http_status)) {
+    local_backlog_quarantine(path, "was refused by the host");
+    return;
+  }
+  if (r.http_status <= 0) return;  // no answer: the link, not the file
+  if (strcmp(s_retry_path, path) != 0) {
+    snprintf(s_retry_path, sizeof(s_retry_path), "%s", path);
+    s_retry_count = 0;
+  }
+  if (++s_retry_count >= BACKLOG_MAX_TRIES) {
+    char why[64];
+    snprintf(why, sizeof(why), "failed %d uploads (last HTTP %d)", s_retry_count, r.http_status);
+    local_backlog_quarantine(path, why);
+    s_retry_path[0] = 0;
+  }
 }
 
 static void live_frame(void) {
@@ -242,6 +272,9 @@ static void run_console_command(const char *line) {
     }
   } else if (!strcmp(line, "objects")) {
     local_memory_print();
+  } else if (!strcmp(line, "requeue")) {  // quarantined backlog frames go back in the upload queue
+    ESP_LOGI(TAG, "[backlog] %d quarantined frames requeued, %d in the queue", local_backlog_requeue(),
+             local_backlog_count());
   } else if (!strcmp(line, "cache")) {  // fetch the per-object answers the card lacks
     local_memory_cache_object_phrases();
     refresh_offline_commands();
@@ -313,7 +346,7 @@ static void run_console_command(const char *line) {
   } else if (s_cfg->console_extra && s_cfg->console_extra(line)) {
     // handled by the board
   } else {
-    ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | offline | recog | snap | beep | audio "
+    ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | requeue | offline | recog | snap | beep | audio "
                   "| ask <question> | say <text> | fps <n> | vol <0-100> | host <url>|default | token <value>|clear%s%s",
              s_cfg->console_extra_help ? " | " : "", s_cfg->console_extra_help ? s_cfg->console_extra_help : "");
   }

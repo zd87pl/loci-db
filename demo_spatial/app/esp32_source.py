@@ -506,16 +506,21 @@ class Esp32Hub:
         mono = time.monotonic()
         dev.frames_received += 1
         dev.last_seen_ms = now_ms
-        dev.last_jpeg = jpeg
         dev.device_ms = device_ms
         if rssi is not None:
             dev.rssi = rssi
-        if dev._last_arrival_mono is not None:
-            dt = mono - dev._last_arrival_mono
-            if dt > 0:
-                inst = 1.0 / dt
-                dev.fps = inst if dev.fps == 0.0 else 0.8 * dev.fps + 0.2 * inst
-        dev._last_arrival_mono = mono
+        # The preview, the live fps and (below) the rate limiter and the last detections
+        # describe the live stream. A backlog frame interleaved with it is minutes old: it
+        # must not replace the preview or "what's in front of me", and stamping the rate
+        # limiter with it made the next live frame "rate_limited" while the card drained.
+        if not backlog:
+            dev.last_jpeg = jpeg
+            if dev._last_arrival_mono is not None:
+                dt = mono - dev._last_arrival_mono
+                if dt > 0:
+                    inst = 1.0 / dt
+                    dev.fps = inst if dev.fps == 0.0 else 0.8 * dev.fps + 0.2 * inst
+            dev._last_arrival_mono = mono
         dev.last_seq = dev.last_seq + 1 if seq is None else seq
         self.frames_total += 1
 
@@ -548,7 +553,8 @@ class Esp32Hub:
                 audio_pending=len(dev.audio_queue),
                 next_interval_ms=self.cfg.frame_interval_ms,
             )
-        dev._last_processed_mono = mono
+        if not backlog:
+            dev._last_processed_mono = mono
 
         t0 = time.perf_counter()
         loop = asyncio.get_running_loop()
@@ -571,7 +577,8 @@ class Esp32Hub:
         self._feed(detections, ts)
 
         dev.frames_processed += 1
-        dev.last_detections = detections
+        if not backlog:
+            dev.last_detections = detections
         dev.last_infer_ms = infer_ms
         dev.last_size = jpeg_size(jpeg) or dev.last_size
         if self.cfg.dataset_dir and dev.frames_processed % self.cfg.dataset_every == 0:

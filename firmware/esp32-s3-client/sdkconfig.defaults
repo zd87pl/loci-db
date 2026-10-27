@@ -68,3 +68,7 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
 CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH="../common/certs/extra_roots.pem"
+
+# FatFs file locking: a second open of a file that is already open (two writers of the same
+# obj_*.pcm.part, say) returns FR_LOCKED instead of corrupting the FAT. 10 files open at once.
+CONFIG_FATFS_FS_LOCK=10

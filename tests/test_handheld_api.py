@@ -46,6 +46,9 @@ BASE_ENV: dict[str, str | None] = {
     "WHISPER_LOCAL": "0",
     "OPENAI_API_KEY": None,
     "GOOGLE_API_KEY": None,
+    "LOCI_ESP32_TOKEN": None,
+    "LOCI_ESP32_TOKENS": None,
+    "LOCI_ESP32_TOKEN_FILE": None,
 }
 
 
@@ -513,6 +516,23 @@ def test_memory_survives_a_simulated_restart(tmp_path: Path) -> None:
         assert _query(client2, "where is my cup")["results"] == []
     with booted(data_dir, LOCI_DETECTION_SOURCE="none") as (_main3, client3):
         assert client3.get("/api/handheld/status").json()["restore"]["records"] == 0
+
+
+def test_memory_clear_needs_the_host_token_when_one_is_set(tmp_path: Path) -> None:
+    with booted(tmp_path / "tok", LOCI_ESP32_TOKEN="s3cret") as (_main, client):
+        before = client.get("/api/objects").json()["count"]
+        assert before > 0
+        r = client.post("/api/memory/clear", json={"confirm": True})
+        assert r.status_code == 401
+        r = client.post(
+            "/api/memory/clear", json={"confirm": True}, headers={"X-Device-Token": "wrong"}
+        )
+        assert r.status_code == 401
+        assert client.get("/api/objects").json()["count"] == before
+        r = client.post(
+            "/api/memory/clear", json={"confirm": True}, headers={"X-Device-Token": "s3cret"}
+        )
+        assert r.status_code == 200 and client.get("/api/objects").json()["count"] == 0
 
 
 def test_bad_source_configuration_keeps_the_api_up(tmp_path: Path) -> None:

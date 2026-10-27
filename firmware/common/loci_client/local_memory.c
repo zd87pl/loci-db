@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
 
 #include "loci_config.h"
 #include "loci_hw.h"
@@ -22,10 +23,13 @@ static bool play_file(const char *path);
 #define PLAY_CHUNK 2048  // samples per read while playing a cached clip
 
 static char s_dir_backlog[64];
+static char s_dir_backlog_bad[64];
 static char s_dir_frames[64];   // legacy flat dataset folder (read and counted, no longer written)
 static char s_dir_dataset[64];  // dataset/<NNNN>/, DATASET_PER_DIR frames per folder
 static char s_dir_voice[64];
 static int s_backlog_count = -1;  // -1 = not scanned yet
+static uint32_t s_boot;      // boot counter kept in NVS ("loci"/"boot")
+static uint32_t s_file_seq;  // files named this boot
 static int s_dataset_count;  // legacy + sharded
 static int s_dataset_new;    // frames in dataset/<NNNN>/ (decides the next folder)
 static uint32_t s_live_frames;
@@ -34,6 +38,7 @@ static int64_t s_last_refresh_attempt_ms = -60000;
 static bool s_prompt_checked;
 
 #define BACKLOG_DIR "backlog"
+#define BACKLOG_BAD_DIR "backlog_bad"
 #define FRAMES_DIR "frames"
 // FatFs makes up a unique 8.3 alias for every long file name, and our names (<ms>.jpg) all share
 // their first digits, so each create scans the whole directory several times. With ~6,600 entries
@@ -71,16 +76,41 @@ static bool enough_space(void) {
   return ok;
 }
 
+// Backlog and voice files are named <ms>_<boot>_<seq>: before the clock is known <ms> is the
+// time since boot, which starts again at 0 after every reset, and a plain <ms>.jpg written with
+// "wb" overwrote an unsent frame from an earlier boot. Readers parse the leading <ms> only.
+static void unique_name(char *out, size_t cap, const char *dir, int64_t ms, const char *ext) {
+  snprintf(out, cap, "%s/%lld_%lu_%lu.%s", dir, (long long)ms, (unsigned long)s_boot,
+           (unsigned long)++s_file_seq, ext);
+}
+
+static void count_boot(void) {
+  static bool counted;
+  if (counted) return;
+  counted = true;
+  nvs_handle_t h;
+  if (nvs_open("loci", NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_get_u32(h, "boot", &s_boot);
+  s_boot++;
+  nvs_set_u32(h, "boot", s_boot);
+  nvs_commit(h);
+  nvs_close(h);
+}
+
+uint32_t local_boot_id(void) { return s_boot; }
+
 static int64_t stamp(int64_t ms) {
-  // Unix ms when the host clock is known, else monotonic ms (sorts first, host uses arrival time)
+  // Unix ms when the clock is known, else monotonic ms (sorts first, host uses arrival time)
   if (ms > 0) return ms;
   int64_t now = host_now_ms();
   return now > 0 ? now : esp_timer_get_time() / 1000;
 }
 
 void local_memory_init(void) {
+  count_boot();
   if (!storage_ready()) return;
   storage_dir(BACKLOG_DIR, s_dir_backlog, sizeof(s_dir_backlog));
+  storage_dir(BACKLOG_BAD_DIR, s_dir_backlog_bad, sizeof(s_dir_backlog_bad));
   storage_dir(FRAMES_DIR, s_dir_frames, sizeof(s_dir_frames));
   storage_dir(DATASET_DIR, s_dir_dataset, sizeof(s_dir_dataset));
   storage_dir(VOICE_DIR, s_dir_voice, sizeof(s_dir_voice));
@@ -113,8 +143,8 @@ void local_memory_init(void) {
 
 bool local_backlog_push(const uint8_t *jpeg, size_t len, int64_t captured_ms) {
   if (!storage_ready() || s_backlog_count >= LOCI_BACKLOG_MAX_FILES || !enough_space()) return false;
-  char path[96];
-  snprintf(path, sizeof(path), "%s/%lld.jpg", s_dir_backlog, (long long)stamp(captured_ms));
+  char path[112];
+  unique_name(path, sizeof(path), s_dir_backlog, stamp(captured_ms), "jpg");
   if (storage_write_file(path, jpeg, len) != (int)len) return false;
   s_backlog_count++;
   if ((s_backlog_count % 20) == 1) ESP_LOGI(TAG, "backlog: %d frames on the card", s_backlog_count);
@@ -152,6 +182,39 @@ void local_backlog_remove(const char *path) {
   if (unlink(path) == 0 && s_backlog_count > 0) s_backlog_count--;
 }
 
+void local_backlog_quarantine(const char *path, const char *why) {
+  const char *name = strrchr(path, '/');
+  name = name ? name + 1 : path;
+  char dest[112];
+  snprintf(dest, sizeof(dest), "%s/%.40s", s_dir_backlog_bad, name);
+  unlink(dest);  // FatFs rename does not replace an existing file
+  if (s_dir_backlog_bad[0] && rename(path, dest) == 0) {
+    if (s_backlog_count > 0) s_backlog_count--;
+    ESP_LOGW(TAG, "backlog: %s %s, moved to %s/", name, why, BACKLOG_BAD_DIR);
+  } else {
+    local_backlog_remove(path);
+    ESP_LOGW(TAG, "backlog: %s %s, deleted", name, why);
+  }
+}
+
+int local_backlog_requeue(void) {
+  if (!storage_ready() || !s_dir_backlog_bad[0]) return 0;
+  DIR *d = opendir(s_dir_backlog_bad);
+  if (!d) return 0;
+  int n = 0;
+  char from[112], to[112];
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (e->d_name[0] == '.') continue;
+    snprintf(from, sizeof(from), "%s/%.40s", s_dir_backlog_bad, e->d_name);
+    snprintf(to, sizeof(to), "%s/%.40s", s_dir_backlog, e->d_name);
+    if (rename(from, to) == 0) n++;
+  }
+  closedir(d);
+  s_backlog_count = count_files(s_dir_backlog);
+  return n;
+}
+
 uint8_t *local_read_file(const char *path, size_t *len_out) {
   FILE *f = fopen(path, "rb");
   if (!f) return NULL;
@@ -162,7 +225,8 @@ uint8_t *local_read_file(const char *path, size_t *len_out) {
     fclose(f);
     return NULL;
   }
-  uint8_t *buf = heap_caps_malloc((size_t)n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  // one spare byte: callers search JSON files with strstr, so the buffer is always NUL-terminated
+  uint8_t *buf = heap_caps_malloc((size_t)n + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!buf) {
     fclose(f);
     return NULL;
@@ -173,6 +237,7 @@ uint8_t *local_read_file(const char *path, size_t *len_out) {
     free(buf);
     return NULL;
   }
+  buf[got] = 0;
   *len_out = got;
   return buf;
 }
@@ -199,8 +264,8 @@ int local_dataset_count(void) { return s_dataset_count; }
 
 void local_voice_save(const int16_t *pcm, size_t samples, int64_t ms) {
   if (!storage_ready() || !enough_space()) return;
-  char path[96];
-  snprintf(path, sizeof(path), "%s/%lld.wav", s_dir_voice, (long long)stamp(ms));
+  char path[112];
+  unique_name(path, sizeof(path), s_dir_voice, stamp(ms), "wav");
   FILE *f = fopen(path, "wb");
   if (!f) return;
   uint32_t data_bytes = samples * 2, rate = LOCI_AUDIO_RATE, byte_rate = rate * 2, chunk = 36 + data_bytes, fmt_len = 16;

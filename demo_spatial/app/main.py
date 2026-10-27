@@ -875,10 +875,23 @@ async def handheld_snapshot():
 
 
 @app.post("/api/memory/clear")
-async def memory_clear(req: ConfirmRequest):
-    """Forget everything (points, indices, persisted files). Requires ``{"confirm": true}``."""
+async def memory_clear(req: ConfirmRequest, request: Request):
+    """Forget everything (points, indices, persisted files). Requires ``{"confirm": true}``.
+
+    When the host has a device token (``LOCI_ESP32_TOKEN*``), the request must carry it
+    (``X-Device-Token`` or ``Authorization: Bearer``): the clear deletes the snapshot, its
+    ``.bak`` and the journal, and cloud sync then deletes the cloud copy, so one stray POST
+    from anything on the LAN must not be enough.
+    """
     if not req.confirm:
         raise HTTPException(status_code=400, detail='Send {"confirm": true} to clear the memory')
+    auth = getattr(request.app.state, "esp32_auth", None)
+    if auth is not None and auth.configured and auth.verify(auth.token_from(request)) is None:
+        raise HTTPException(
+            status_code=401,
+            detail="send the host's device token (X-Device-Token) to clear the memory",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     await asyncio.get_running_loop().run_in_executor(None, memory.clear)
     return {"status": "cleared", "observation_count": memory.observation_count}
 

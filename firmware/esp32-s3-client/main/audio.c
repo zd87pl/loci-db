@@ -18,7 +18,9 @@ static int s_last_peak, s_last_mean;
 
 esp_err_t audio_init(void) {
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-  chan_cfg.dma_desc_num = 8;
+  // 16 x 20 ms: the driver keeps the newest 15 buffers while nobody reads, so push-to-talk starts
+  // with the ~300 ms before the loop noticed the button (10 kB of internal DMA RAM)
+  chan_cfg.dma_desc_num = 16;
   chan_cfg.dma_frame_num = 320;  // 20 ms per DMA buffer
   ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, NULL, &s_rx), TAG, "i2s_new_channel");
   i2s_pdm_rx_config_t pdm_cfg = {

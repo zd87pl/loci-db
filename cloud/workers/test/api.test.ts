@@ -1,18 +1,5 @@
-import { exports } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
-
-const BASE = "http://loci.test";
-type Json = Record<string, any>;
-
-async function call(method: string, path: string, opts: { token?: string; body?: unknown } = {}): Promise<{ status: number; body: Json }> {
-  const headers: Record<string, string> = {};
-  if (opts.token) headers.authorization = `Bearer ${opts.token}`;
-  if (opts.body !== undefined) headers["content-type"] = "application/json";
-  const res = await exports.default.fetch(new Request(`${BASE}${path}`, {
-    method, headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-  }));
-  return { status: res.status, body: (await res.json()) as Json };
-}
+import { call, type Json } from "./helpers";
 
 let ref = "";
 let sk = "";

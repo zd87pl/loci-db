@@ -56,3 +56,41 @@ export function hilbertDistance(point: number[], order: number): number {
 export function hilbert3(u: [number, number, number], order: number): number {
   return hilbertDistance(u.map((v) => quantise(v, order)), order);
 }
+
+/**
+ * Index ranges that cover every order-`order` cell of a unit-cube box, as inclusive [lo, hi] pairs.
+ * The top 3p bits of an order-`order` index are the order-p index of the enclosing coarse cell,
+ * so each coarse cell is one contiguous range. Picks the finest p whose merged cover stays within
+ * `maxRanges` ranges (and `maxCells` cells to enumerate); the cover is a superset, so callers still
+ * apply the exact coordinate bounds.
+ */
+export function hilbertRanges3(
+  lo: [number, number, number], hi: [number, number, number], order: number, maxRanges = 24, maxCells = 4096,
+): [number, number][] {
+  const qlo = lo.map((u) => quantise(u, order));
+  const qhi = hi.map((u) => quantise(u, order));
+  let best: [number, number][] = [[0, 2 ** (3 * order) - 1]];
+  for (let p = 1; p <= order; p++) {
+    const shift = order - p;
+    const clo = qlo.map((q) => q >> shift) as [number, number, number];
+    const chi = qhi.map((q) => q >> shift) as [number, number, number];
+    if ((chi[0] - clo[0] + 1) * (chi[1] - clo[1] + 1) * (chi[2] - clo[2] + 1) > maxCells) break;
+    const cells: number[] = [];
+    for (let x = clo[0]; x <= chi[0]; x++) {
+      for (let y = clo[1]; y <= chi[1]; y++) {
+        for (let z = clo[2]; z <= chi[2]; z++) cells.push(hilbertDistance([x, y, z], p));
+      }
+    }
+    cells.sort((a, b) => a - b);
+    const span = 2 ** (3 * shift);
+    const ranges: [number, number][] = [];
+    for (const c of cells) {
+      const last = ranges[ranges.length - 1];
+      if (last && last[1] + 1 === c * span) last[1] = (c + 1) * span - 1;
+      else ranges.push([c * span, (c + 1) * span - 1]);
+    }
+    if (ranges.length > maxRanges) break;
+    best = ranges;
+  }
+  return best;
+}

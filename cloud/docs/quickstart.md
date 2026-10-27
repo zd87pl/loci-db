@@ -1,278 +1,233 @@
-# LOCI Cloud API — Quickstart
+# LOCI Cloud — Quickstart
 
-Five minutes from zero to your first 4D spatiotemporal vector query.
+From zero to inserting and querying 4D world states from Python on LOCI Cloud, the Cloudflare Workers service in [`cloud/workers`](../workers/README.md).
+
+The Python SDK's cloud mode (`LociClient(base_url=..., api_key=...)`) talks to a project's compatibility endpoints, `/insert` and `/query`. Everything lands in the project's `default` space. The v1 API (`/v1/spaces/...`) reads the same data.
 
 ---
 
-## 1. Get an API key
+## 1. Get a project
 
-Beta partners receive a bootstrap admin key out-of-band. To create a regular
-per-project key for your application, use either the CLI or the admin HTTP
-endpoint directly.
+A project is created with the operator's admin token. `scripts/bootstrap.py --sdk` creates one and prints the two values the SDK needs.
 
-### Using the `loci` CLI
+**Locally**, run the Worker in the local Workers runtime (no Cloudflare account needed):
 
 ```bash
-pip install loci-stdb
-
-export LOCI_API_KEY=loci_<your-admin-key>
-export LOCI_BASE_URL=https://api.loci.ai
-
-loci cloud keys create \
-  --email app@example.com \
-  --namespace myappprod \
-  --label "production"
+cd cloud/workers
+npm ci
+printf 'ADMIN_TOKEN=%s\nDEV_ALLOW_UNPINNED=1\n' "$(openssl rand -hex 16)" > .dev.vars
+npm run db:migrate:local
+npx wrangler dev --port 8787
 ```
 
-Output (the raw key is shown **once** — save it immediately):
-
-```
-=== API key created ===
-Key ID    : 5bf1e7d9-...
-Tenant ID : 9a4de8f0-...
-Namespace : myappprod
-Admin     : False
-Prefix    : loci_8fa3c21
-
-RAW KEY (shown only once — store securely):
-  loci_<64 hex chars>
-```
-
-### Listing and revoking keys
+In a second shell, from the repository root:
 
 ```bash
-loci cloud keys list
-loci cloud keys revoke <KEY_ID>
+python3 cloud/workers/scripts/bootstrap.py --url http://127.0.0.1:8787 \
+  --admin-token "$(sed -n 's/^ADMIN_TOKEN=//p' cloud/workers/.dev.vars)" --sdk > .loci-sdk.env
+chmod 600 .loci-sdk.env
 ```
 
-Pass `--json` on any subcommand to get machine-readable output.
+**On the hosted beta** (`https://loci-cloud.zd-66b.workers.dev`), the operator runs the same command with `--url https://loci-cloud.zd-66b.workers.dev` and the production admin token, then hands you the output.
 
-### Using `curl` directly
+`.loci-sdk.env` looks like this:
+
+```
+LOCI_BASE_URL=http://127.0.0.1:8787/p/k3v9x2m1q8ab
+LOCI_API_KEY=loci_sk_k3v9x2m1q8ab_<48 hex>
+# publishable key (read-only queries): loci_pk_k3v9x2m1q8ab_<48 hex>
+```
+
+`LOCI_BASE_URL` is the project URL: `<worker>/p/<ref>`.
+
+The secret key (`loci_sk_…`) can read and write; keep it on servers. The publishable key (`loci_pk_…`) can only read, so it can query but not insert. Never commit either key.
+
+Load the values into your shell:
 
 ```bash
-curl -X POST https://api.loci.ai/admin/keys \
-  -H "Authorization: Bearer $LOCI_ADMIN_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_email": "app@example.com",
-    "namespace": "myappprod",
-    "label": "production"
-  }'
+set -a; . ./.loci-sdk.env; set +a
 ```
 
 ---
 
-## 2. Insert a vector
-
-### curl
+## 2. Insert from Python
 
 ```bash
-curl -X POST https://api.loci.ai/insert \
-  -H "Authorization: Bearer $LOCI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "x": 0.42, "y": 0.17, "z": 0.88,
-    "timestamp_ms": 1713628800000,
-    "vector": [0.1, 0.2, ... 512 dims ...],
-    "scene_id": "scene_001",
-    "scale_level": "patch",
-    "confidence": 0.95,
-    "metadata": {"label": "doorway", "source": "lidar"}
-  }'
-# → {"id": "7f3c8a4b..."}
+pip install -e .        # from the repository root
 ```
 
-`metadata` is optional (defaults to `{}`): an arbitrary JSON object stored with
-the vector and returned verbatim by `/query`. It is capped at **16 KB
-JSON-serialized** — larger payloads are rejected with `422`.
-
-`prev_state_id` / `next_state_id` (optional, max 256 chars each) carry causal
-links. When omitted, the server links the new state to the latest earlier
-state in the same `scene_id`; `/query` returns both links with every result.
-
-### Python SDK — cloud mode
+The SDK must send its own `User-Agent`, because Cloudflare rejects Python's default one with error 1010. This repository's `loci` does; releases before this change do not.
 
 ```python
+import os
+import time
+
 from loci import LociClient, WorldState
 
 client = LociClient(
-    base_url="https://api.loci.ai",
-    api_key="loci_...",  # your API key
-    vector_size=512,
+    base_url=os.environ["LOCI_BASE_URL"],
+    api_key=os.environ["LOCI_API_KEY"],
+    vector_size=4,
 )
 
-state = WorldState(
-    x=0.42,
-    y=0.17,
-    z=0.88,
-    timestamp_ms=1713628800000,
-    vector=[0.1] * 512,
-    scene_id="scene_001",
+now = int(time.time() * 1000)
+door = client.insert(
+    WorldState(
+        x=0.42,
+        y=0.17,
+        z=0.88,  # normalised to [0, 1]
+        timestamp_ms=now - 60_000,
+        vector=[1.0, 0.0, 0.0, 0.0],
+        scene_id="hallway",
+        metadata={"label": "door", "source": "cam0"},
+    )
 )
-point_id = client.insert(state)
+chair = client.insert(
+    WorldState(
+        x=0.10,
+        y=0.50,
+        z=0.20,
+        timestamp_ms=now,
+        vector=[0.6, 0.8, 0.0, 0.0],
+        scene_id="hallway",
+        confidence=0.7,
+    )
+)
 ```
 
-### Python SDK — local mode (unchanged)
+`insert` returns the new state's id (a UUID).
 
-```python
-from loci import LociClient, WorldState
+Rules, the same as the old managed API:
 
-# Existing local-only usage keeps working exactly as before.
-client = LociClient("http://localhost:6333", vector_size=512)
-client.insert(state)
-```
-
-The same `LociClient` class transparently routes to the cloud API when
-`base_url` is set. Omit it, and the client talks to Qdrant directly.
+- **Coordinates** `x`, `y`, `z` and `confidence` are in [0, 1].
+- **`scale_level`** is `patch`, `frame` or `sequence`.
+- **`scene_id`** is 1–256 characters.
+- **`metadata`** is any JSON object up to 16 KB.
+- **Vector dimension.** The first insert into a project fixes it; later vectors of another length get `422`.
+- **Causal links.** Each insert is linked to the latest earlier state in the same `scene_id`, so above `chair.prev_state_id == door`, and `door.next_state_id == chair`.
+- **Labels.** `metadata["label"]` (normalised) becomes the observation's label, which `where`, `ask` and v1 label filters use.
 
 ---
 
-## 3. Query vectors
-
-### curl
-
-```bash
-curl -X POST https://api.loci.ai/query \
-  -H "Authorization: Bearer $LOCI_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "vector": [0.1, 0.2, ...],
-    "x_min": 0.0, "x_max": 1.0,
-    "y_min": 0.0, "y_max": 1.0,
-    "z_min": 0.0, "z_max": 1.0,
-    "time_start_ms": 1713628000000,
-    "time_end_ms":   1713629000000,
-    "min_confidence": 0.8,
-    "limit": 10
-  }'
-```
-
-`min_confidence` (optional, `0.0`–`1.0`) drops results whose stored
-`confidence` is below the threshold before the top-`limit` cut, so a filtered
-query still fills `limit` when enough matches exist.
-
-Each result item includes the stored `metadata`, `scale_level`, `confidence`
-and causal links alongside the coordinates:
-
-```json
-{
-  "results": [
-    {
-      "id": "7f3c8a4b...",
-      "x": 0.42, "y": 0.17, "z": 0.88,
-      "timestamp_ms": 1713628800000,
-      "scene_id": "scene_001",
-      "scale_level": "patch",
-      "confidence": 0.95,
-      "metadata": {"label": "doorway", "source": "lidar"},
-      "prev_state_id": "2b9d0e61...",
-      "next_state_id": null,
-      "vector": [0.1, 0.2, "..."]
-    }
-  ]
-}
-```
-
-Pass `"include_vectors": false` to omit the (large) `vector` field from each
-result.
-
-### Python SDK
+## 3. Query from Python
 
 ```python
-hits = client.query(
-    vector=[0.1] * 512,
-    spatial_bounds={
-        "x_min": 0.0,
-        "x_max": 1.0,
-        "y_min": 0.0,
-        "y_max": 1.0,
-        "z_min": 0.0,
-        "z_max": 1.0,
-    },
-    time_window_ms=(1713628000000, 1713629000000),
-    min_confidence=0.8,
-    limit=10,
-)
+hits = client.query(vector=[1.0, 0.0, 0.0, 0.0], limit=5)
 for s in hits:
-    print(s.id, s.x, s.y, s.z, s.timestamp_ms, s.scene_id)
+    print(s.id, s.x, s.y, s.z, s.timestamp_ms, s.scene_id, s.metadata, s.prev_state_id)
+
+near_door = client.query(
+    vector=[1.0, 0.0, 0.0, 0.0],
+    spatial_bounds={"x_min": 0.3, "x_max": 0.5},  # missing keys default to 0 and 1
+    time_window_ms=(now - 120_000, now),
+    min_confidence=0.8,
+    limit=5,
+)
 ```
 
----
+Results are ranked as the library ranks them:
 
-## 4. Async usage
+1. Cosine similarity picks the top `3 × limit` candidates.
+2. Those are re-ranked by `similarity × exp(-ln 2 × age / 1 h)`.
+
+The shared conformance suite checks that the Worker and `LocalLociClient` return the same ids in the same order.
+
+Bounds and the time window are inclusive. The time window applies only when both ends are given.
+
+Each result is a full `WorldState`: `metadata`, `scale_level`, `confidence`, causal links, and the vector (stored as float32, so `0.6` comes back as `0.6000000238418579`).
+
+Only `insert` and `query` work in cloud mode. Other methods raise `CloudModeUnsupportedError`.
+
+### Async
 
 ```python
 import asyncio
-from loci import AsyncLociClient, WorldState
+import os
+
+from loci import AsyncLociClient
 
 
 async def main():
     async with AsyncLociClient(
-        base_url="https://api.loci.ai",
-        api_key="loci_...",
-        vector_size=512,
+        base_url=os.environ["LOCI_BASE_URL"],
+        api_key=os.environ["LOCI_API_KEY"],
+        vector_size=4,
     ) as client:
-        await client.insert(
-            WorldState(
-                x=0.5,
-                y=0.5,
-                z=0.5,
-                timestamp_ms=1713628800000,
-                vector=[0.0] * 512,
-                scene_id="s",
-            )
-        )
-        hits = await client.query(vector=[0.0] * 512, limit=5)
-        print(hits)
+        print(await client.query(vector=[0.0, 1.0, 0.0, 0.0], limit=5))
 
 
 asyncio.run(main())
 ```
 
-The async client uses `httpx`; install with `pip install httpx` if you don't
-already depend on it.
+The async client uses `httpx` (`pip install httpx`).
 
 ---
 
-## Rate limits
+## 4. The same calls with curl
 
-Each API key has a configurable per-minute request limit (default: 600 rpm)
-stored in the `rate_limit_rpm` column. Exceeding the limit returns **429 Too
-Many Requests** with a ``Retry-After`` header in seconds.
+curl's own `User-Agent` is accepted.
 
-Rate limits apply per **namespace** — one misbehaving integration does not
-affect other keys or tenants.
+```bash
+curl -X POST "$LOCI_BASE_URL/insert" \
+  -H "Authorization: Bearer $LOCI_API_KEY" -H "Content-Type: application/json" \
+  -d '{"x": 0.42, "y": 0.17, "z": 0.88, "timestamp_ms": 1793140000000,
+       "vector": [1, 0, 0, 0], "scene_id": "hallway", "metadata": {"label": "door"}}'
+# → {"id": "0bab12a5-..."}
 
----
-
-## Error reference
-
-| Status | Meaning | Typical cause |
-|-------:|---------|---------------|
-| 200 | OK | Request succeeded |
-| 201 | Created | New API key created |
-| 401 | Unauthorized | Missing or invalid `Authorization` header |
-| 403 | Forbidden | Non-admin key calling `/admin/*` |
-| 404 | Not Found | Key id does not exist (revoke) |
-| 409 | Conflict | Namespace already taken (`POST /admin/keys`) |
-| 413 | Payload Too Large | Request body exceeds `LOCI_MAX_BODY_BYTES` (default 5 MB) |
-| 422 | Unprocessable Entity | Validation error — see `detail` for field paths (e.g. `metadata` over 16 KB) |
-| 429 | Too Many Requests | Rate limit exceeded |
-| 503 | Service Unavailable | `/ready` returned degraded — check upstream health |
-
-All error responses have the shape:
-
-```json
-{ "detail": "<human-readable message or field list>" }
+curl -X POST "$LOCI_BASE_URL/query" \
+  -H "Authorization: Bearer $LOCI_API_KEY" -H "Content-Type: application/json" \
+  -d '{"vector": [1, 0, 0, 0], "x_min": 0.3, "x_max": 0.5, "min_confidence": 0.8,
+       "limit": 5, "include_vectors": false}'
+# → {"results": [{"id": "...", "x": 0.42, ..., "scene_id": "hallway", "scale_level": "patch",
+#                 "confidence": 1, "metadata": {"label": "door"}, "prev_state_id": null,
+#                 "next_state_id": "...", "vector": []}]}
 ```
 
-Every response carries an ``X-Request-Id`` header — include it when filing
-support tickets.
+---
+
+## 5. Beyond the SDK: the v1 API
+
+The `default` space is an ordinary space, so the v1 endpoints in [cloud/workers/README.md](../workers/README.md#api-v1-phase-0) work on it. For example:
+
+**Label filters, newest first:**
+
+```bash
+curl -X POST "$LOCI_BASE_URL/v1/spaces/default/query" \
+  -H "Authorization: Bearer $LOCI_API_KEY" -H "Content-Type: application/json" \
+  -d '{"label": "door", "limit": 5}'
+```
+
+**Where something was last seen:**
+
+```bash
+curl "$LOCI_BASE_URL/v1/spaces/default/where?label=door" -H "Authorization: Bearer $LOCI_API_KEY"
+```
+
+Other spaces, with frames in metres, devices and device tokens, are created through `/v1/spaces` and `/v1/devices` (see `bootstrap.py` without `--sdk`).
 
 ---
 
-## Reference
+## Limits
 
-- [cloud/README.md](../README.md) — architecture overview, env vars, CI/CD
-- [cloud/docs/runbooks/secrets-rotation.md](./runbooks/secrets-rotation.md) — rotating cloud secrets
-- [OpenAPI schema](https://api.loci.ai/openapi.json) — always available, machine-readable
+| What | Limit |
+|---|---|
+| Writes | 120 per minute per key or device |
+| Queries (`/query`, `/v1/.../query`) | 600 per minute per key or device |
+| Vector dimension | 1–1536 |
+| `limit` | 1–1000 |
+| Request body | 512 KB |
+
+## Errors
+
+Errors have the shape `{"detail": "<message>", "code": "<code>"}`.
+
+| Status | Code | Typical cause |
+|-------:|------|---------------|
+| 400 | `bad_json` | Body is not valid JSON |
+| 401 | `unauthenticated` | Missing, malformed or revoked key |
+| 403 | `forbidden` | Key from another project, or a publishable key calling `/insert` |
+| 404 | `not_found` | Unknown project path or space |
+| 405 | `method_not_allowed` | `/insert` and `/query` take `POST` only |
+| 413 | `too_large` | Body over 512 KB |
+| 422 | `invalid` | Validation failed: see `detail`, for example `vector must have 4 dimensions, got 3` |
+| 429 | `rate_limited` | Rate limit exceeded |

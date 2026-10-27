@@ -4,6 +4,7 @@ export interface Env {
   DB: D1Database;
   SPACE: DurableObjectNamespace<SpaceObject>;
   WRITE_LIMITER?: RateLimit;
+  QUERY_LIMITER?: RateLimit;
   USAGE?: AnalyticsEngineDataset;
   ADMIN_TOKEN?: string;
   PROJECT_HOST_SUFFIX?: string;
@@ -60,6 +61,62 @@ export interface Observation {
   metadata: Record<string, unknown>;
   media: string | null;
   rev: number;
+}
+
+/** A validated POST /spaces/:space/query (also the core of the SDK's /query). */
+export interface QuerySpec {
+  /** Inclusive box in the space frame. */
+  region: Extents | null;
+  /** Inclusive event-time bounds, epoch ms. */
+  timeStart: number | null;
+  timeEnd: number | null;
+  labels: string[] | null;
+  room: string | null;
+  minConfidence: number | null;
+  /** Rank by cosine similarity to this vector (decayed by age); without it, newest first. */
+  vector: number[] | null;
+  /** Recency half-life applied to similarity; 0 ranks by similarity alone. */
+  halfLifeMs: number;
+  limit: number;
+  includeEmbedding: boolean;
+}
+
+/** WorldState fields stored for observations written through the SDK compatibility layer. */
+export interface SdkFields {
+  scene_id: string | null;
+  scale_level: string | null;
+  prev_state_id: string | null;
+  next_state_id: string | null;
+}
+
+export interface QueryHit {
+  obs: Observation;
+  sdk: SdkFields;
+  /** Raw cosine similarity and the decayed ranking score; null when not ranked by vector. */
+  similarity: number | null;
+  score: number | null;
+  embedding: number[] | null;
+}
+
+export interface QueryResult {
+  hits: QueryHit[];
+  /** True when a vector query stopped at the scan cap before seeing every matching row. */
+  truncated: boolean;
+}
+
+/** One SDK WorldState as accepted by the compatibility /insert. */
+export interface SdkStateIn {
+  x: number;
+  y: number;
+  z: number;
+  timestamp_ms: number;
+  vector: number[];
+  scene_id: string;
+  scale_level: string;
+  confidence: number;
+  metadata: Record<string, unknown>;
+  prev_state_id: string | null;
+  next_state_id: string | null;
 }
 
 export interface InsertResult {

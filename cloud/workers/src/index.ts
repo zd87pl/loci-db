@@ -15,8 +15,10 @@
  *     GET    spaces/<space>/where?label=&limit=&room=
  *     GET    spaces/<space>/changes?window_s=&room=
  *     GET    spaces/<space>/digest?since_rev=
+ *     POST   spaces/<space>/query                region / time / label / room / confidence / vector filters
  *     POST   spaces/<space>/ask                  {"text": "..."}
  *     GET    spaces/<space>/stats
+ *   /p/<ref>/insert, /p/<ref>/query                Python SDK cloud mode, on the default space (src/compat.ts)
  */
 
 import { authenticate, canRead, canWrite, principalKey, requireSecret } from "./auth";
@@ -24,23 +26,42 @@ import {
   claimDevice, createDevice, createProject, createSpace, getSpace, issueDeviceToken, listDevices, listSpaces,
   recordUsage, revokeDevice, spaceStub,
 } from "./control";
-import type { Env, Principal, SpaceMeta } from "./types";
-import { normLabel, normRoom, validateBatch } from "./validate";
+import { handleCompat } from "./compat";
+import type { Env, Principal, QueryResult, SpaceMeta } from "./types";
+import { normLabel, normRoom, validateBatch, validateQuery } from "./validate";
 import { HttpError, errorResponse, json, readJson, timingSafeEqualStr } from "./util";
 
 export { SpaceObject } from "./space";
 
 const VERSION = "0.1.0";
 
+/** Splits a project URL into its ref and the rest: "v1/<path>" or the SDK's "insert" / "query". */
 function routeProject(url: URL, env: Env): { ref: string; rest: string } | null {
   const suffix = env.PROJECT_HOST_SUFFIX;
+  let ref: string;
+  let path: string;
   if (suffix && url.hostname.endsWith(`.${suffix}`)) {
-    const ref = url.hostname.slice(0, -(suffix.length + 1));
-    const m = url.pathname.match(/^\/v1\/(.*)$/);
-    return m ? { ref, rest: m[1] ?? "" } : null;
+    ref = url.hostname.slice(0, -(suffix.length + 1));
+    path = url.pathname;
+  } else {
+    const m = url.pathname.match(/^\/p\/([a-z0-9]{12})(\/.*)$/);
+    if (!m) return null;
+    ref = m[1] as string;
+    path = m[2] as string;
   }
-  const m = url.pathname.match(/^\/p\/([a-z0-9]{12})\/v1\/(.*)$/);
-  return m ? { ref: m[1] as string, rest: m[2] ?? "" } : null;
+  const m = path.match(/^\/(v1\/.*|insert|query)$/);
+  return m ? { ref, rest: m[1] as string } : null;
+}
+
+function queryResponse(r: QueryResult) {
+  return {
+    results: r.hits.map((h) => ({
+      ...h.obs,
+      ...(h.score === null ? {} : { similarity: h.similarity, score: h.score }),
+      ...(h.embedding === null ? {} : { embedding: h.embedding }),
+    })),
+    truncated: r.truncated,
+  };
 }
 
 function intParam(url: URL, name: string, def: number, min: number, max: number): number {
@@ -76,10 +97,19 @@ async function handleSpace(
   ctx.waitUntil(recordUsage(env, ref, 0));
 
   if (action === "where" && req.method === "GET") {
-    const label = url.searchParams.get("label");
+    const label = normLabel(url.searchParams.get("label") ?? "");
     if (!label) throw new HttpError(422, "label is required", "invalid");
-    const results = await stub.where(normLabel(label), intParam(url, "limit", 5, 1, 100), normRoom(url.searchParams.get("room")));
-    return json({ label: normLabel(label), results });
+    const results = await stub.where(label, intParam(url, "limit", 5, 1, 100), normRoom(url.searchParams.get("room")));
+    return json({ label, results });
+  }
+  if (action === "query" && req.method === "POST") {
+    if (env.QUERY_LIMITER) {
+      const { success } = await env.QUERY_LIMITER.limit({ key: `${ref}:${principalKey(p)}` });
+      if (!success) throw new HttpError(429, "query rate limit exceeded", "rate_limited");
+    }
+    const spec = validateQuery(await readJson(req));
+    const meta: SpaceMeta = { ref, space, frame: row.frame, extents: row.extents };
+    return json(queryResponse(await stub.query(meta, spec)));
   }
   if (action === "changes" && req.method === "GET") {
     const changes = await stub.changes(intParam(url, "window_s", 600, 1, 30 * 86_400), normRoom(url.searchParams.get("room")));
@@ -100,7 +130,8 @@ async function handleSpace(
 }
 
 async function handleProject(req: Request, env: Env, ctx: ExecutionContext, url: URL, ref: string, rest: string): Promise<Response> {
-  const parts = rest.split("/").filter(Boolean);
+  if (rest === "insert" || rest === "query") return handleCompat(req, env, ctx, ref, await authenticate(env, req, ref), rest);
+  const parts = rest.slice("v1/".length).split("/").filter(Boolean);
 
   // Unauthenticated device bootstrap.
   if (req.method === "POST" && parts[0] === "devices" && parts[1] === "claim" && parts.length === 2) {

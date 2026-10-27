@@ -6,6 +6,12 @@ managed HTTP API instead of talking to a local Qdrant directly. Everything
 except the routing target (auth header, payload shape) is identical to the
 local path from the caller's point of view.
 
+On LOCI Cloud (Cloudflare Workers, ``cloud/workers``) ``base_url`` is the
+project URL, ``https://<worker>/p/<ref>``, and ``api_key`` a project key:
+``POST {base_url}/insert`` and ``/query`` act on the project's ``default``
+space.  Requests carry their own ``User-Agent`` because Cloudflare rejects
+Python's default one (error 1010).
+
 Only ``insert`` and ``query`` are supported in cloud mode today (plus the
 legacy ``predict_and_retrieve`` path, which is a plain query under the hood).
 Other methods (``insert_batch``, ``query_scored``, ``get_trajectory``,
@@ -25,6 +31,12 @@ from __future__ import annotations
 from typing import Any
 
 from loci.schema import WorldState
+
+
+def _user_agent() -> str:
+    from loci import __version__
+
+    return f"loci-python/{__version__}"
 
 
 class CloudModeUnsupportedError(NotImplementedError):
@@ -142,6 +154,7 @@ class CloudTransport:
         req = urllib.request.Request(url, data=data, method=method)  # noqa: S310
         req.add_header("Authorization", f"Bearer {self._api_key}")
         req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", _user_agent())
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # nosec B310 — scheme validated above  # noqa: S310
                 parsed: dict[str, Any] = json.loads(resp.read().decode() or "{}")
@@ -198,7 +211,7 @@ class AsyncCloudTransport:
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
                 timeout=self._timeout,
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers={"Authorization": f"Bearer {self._api_key}", "User-Agent": _user_agent()},
             )
         return self._client
 

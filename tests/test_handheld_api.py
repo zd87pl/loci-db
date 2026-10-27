@@ -403,6 +403,43 @@ def test_snapshot_endpoint_and_clear_guard(sim) -> None:
     assert sim.client.get("/api/objects").json()["count"] >= 4
 
 
+def test_cloud_accept_deletes_needs_the_device_token_and_confirm(sim, monkeypatch) -> None:
+    import app.main as main_module  # the route reads the module's _cloud_sync
+
+    class StubSync:
+        def __init__(self) -> None:
+            self.calls: list[int | None] = []
+
+        def accept_deletes(self, expect: int | None = None) -> dict:
+            self.calls.append(expect)
+            if expect not in (None, 7):
+                raise ValueError(f"7 cloud deletes are held, not {expect}")
+            return {"accepted": 7}
+
+    url = "/api/cloud/deletes/accept"
+    ok = {"confirm": True, "expect": 7}
+    token = {"X-Device-Token": "s3cret"}
+    monkeypatch.setattr(main_module, "_cloud_sync", None)
+    assert sim.client.post(url, json=ok, headers=token).status_code == 404
+    stub = StubSync()
+    monkeypatch.setattr(main_module, "_cloud_sync", stub)
+    # patch the mounted Esp32Auth itself: monkeypatch cannot restore attributes on app.state
+    auth = sim.main.app.state.esp32_auth
+    monkeypatch.setattr(auth, "shared", None)
+    monkeypatch.setattr(auth, "device_tokens", {})  # no token on the host
+    assert sim.client.post(url, json=ok, headers=token).status_code == 403
+    monkeypatch.setattr(auth, "shared", "s3cret")
+    assert sim.client.post(url, json=ok).status_code == 401
+    assert sim.client.post(url, json=ok, headers={"X-Device-Token": "nope"}).status_code == 401
+    assert sim.client.post(url, json={"expect": 7}, headers=token).status_code == 400
+    assert stub.calls == []
+    r = sim.client.post(url, json={"confirm": True, "expect": 3}, headers=token)
+    assert r.status_code == 409 and "not 3" in r.json()["detail"]
+    r = sim.client.post(url, json=ok, headers=token)
+    assert r.status_code == 200 and r.json() == {"accepted": 7}
+    assert stub.calls == [3, 7]
+
+
 # ---------------------------------------------------------------------------
 # Separate boots: aged simulation ("moved") and the simulated restart
 # ---------------------------------------------------------------------------

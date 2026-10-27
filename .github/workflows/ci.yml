@@ -49,6 +49,31 @@ jobs:
       - name: Run cloud API tests
         run: pytest cloud/tests/ -v --tb=short
 
+  # LOCI Cloud (Cloudflare Workers, cloud/workers): typecheck + Vitest in the local runtime.
+  cloud-workers:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud/workers
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cloud/workers/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
   typecheck:
     runs-on: ubuntu-latest
     steps:

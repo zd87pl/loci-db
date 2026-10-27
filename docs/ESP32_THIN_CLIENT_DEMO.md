@@ -137,6 +137,10 @@ for the device, then returns:
 Silence (RMS < 0.003), clips under 0.25 s, or an STT failure give `transcription: ""` and the spoken
 hint *"Sorry, I couldn't hear that. Hold the button and ask again."*
 
+`speak=0` (sent by boards without a speaker) skips TTS altogether. The board gives up after 15 s and
+answers from its card; if it has hung up by the time the answer is ready, the host does not queue the
+clip (`audio_queued: false`), so the board never plays a second, late answer.
+
 ### `POST /api/esp32/ask` `{"text": "where is my cup", "device": "esp32", "speak": true}`
 
 Typed question (status page, curl, or the firmware's serial console / button without a mic). Same

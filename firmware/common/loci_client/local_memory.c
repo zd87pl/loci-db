@@ -22,10 +22,12 @@ static bool play_file(const char *path);
 #define PLAY_CHUNK 2048  // samples per read while playing a cached clip
 
 static char s_dir_backlog[64];
-static char s_dir_frames[64];
+static char s_dir_frames[64];   // legacy flat dataset folder (read and counted, no longer written)
+static char s_dir_dataset[64];  // dataset/<NNNN>/, DATASET_PER_DIR frames per folder
 static char s_dir_voice[64];
 static int s_backlog_count = -1;  // -1 = not scanned yet
-static int s_dataset_count;
+static int s_dataset_count;  // legacy + sharded
+static int s_dataset_new;    // frames in dataset/<NNNN>/ (decides the next folder)
 static uint32_t s_live_frames;
 static char s_cached_rev[24];
 static int64_t s_last_refresh_attempt_ms = -60000;
@@ -33,6 +35,12 @@ static bool s_prompt_checked;
 
 #define BACKLOG_DIR "backlog"
 #define FRAMES_DIR "frames"
+// FatFs makes up a unique 8.3 alias for every long file name, and our names (<ms>.jpg) all share
+// their first digits, so each create scans the whole directory several times. With ~6,600 entries
+// in one folder that took ~18 s per saved frame on the W11 (1-bit SPI) and stalled the frame loop;
+// with 250 frames per folder a save (JPEG + side-car) takes about 0.6 s there.
+#define DATASET_DIR "dataset"
+#define DATASET_PER_DIR 250
 #define VOICE_DIR "voice"
 #define MEMORY_JSON STORAGE_DIR "/memory.json"
 #define MEMORY_PCM STORAGE_DIR "/memory.pcm"
@@ -74,9 +82,22 @@ void local_memory_init(void) {
   if (!storage_ready()) return;
   storage_dir(BACKLOG_DIR, s_dir_backlog, sizeof(s_dir_backlog));
   storage_dir(FRAMES_DIR, s_dir_frames, sizeof(s_dir_frames));
+  storage_dir(DATASET_DIR, s_dir_dataset, sizeof(s_dir_dataset));
   storage_dir(VOICE_DIR, s_dir_voice, sizeof(s_dir_voice));
   s_backlog_count = count_files(s_dir_backlog);
-  s_dataset_count = count_files(s_dir_frames) / 2;
+  s_dataset_new = 0;
+  DIR *d = opendir(s_dir_dataset);
+  if (d) {
+    struct dirent *e;
+    char sub[96];
+    while ((e = readdir(d)) != NULL) {
+      if (e->d_name[0] == '.') continue;
+      snprintf(sub, sizeof(sub), "%s/%.24s", s_dir_dataset, e->d_name);
+      s_dataset_new += count_files(sub) / 2;
+    }
+    closedir(d);
+  }
+  s_dataset_count = count_files(s_dir_frames) / 2 + s_dataset_new;
   FILE *f = fopen(MEMORY_REV, "r");
   if (f) {
     if (!fgets(s_cached_rev, sizeof(s_cached_rev), f)) s_cached_rev[0] = 0;
@@ -162,11 +183,15 @@ void local_dataset_maybe_save(const uint8_t *jpeg, size_t len, int64_t ms, const
   if (!storage_ready() || LOCI_SD_KEEP_EVERY <= 0) return;
   if ((++s_live_frames % LOCI_SD_KEEP_EVERY) != 0 || !enough_space()) return;
   long long t = (long long)stamp(ms);
-  char path[96];
-  snprintf(path, sizeof(path), "%s/%lld.jpg", s_dir_frames, t);
+  char dir[80], path[112];
+  snprintf(dir, sizeof(dir), "%s/%04d", s_dir_dataset, s_dataset_new / DATASET_PER_DIR);
+  struct stat st;
+  if ((s_dataset_new % DATASET_PER_DIR) == 0 && stat(dir, &st) != 0) mkdir(dir, 0775);
+  snprintf(path, sizeof(path), "%s/%lld.jpg", dir, t);
   if (storage_write_file(path, jpeg, len) != (int)len) return;
-  snprintf(path, sizeof(path), "%s/%lld.json", s_dir_frames, t);
+  snprintf(path, sizeof(path), "%s/%lld.json", dir, t);
   storage_write_file(path, host_reply_json, strlen(host_reply_json));
+  s_dataset_new++;
   s_dataset_count++;
 }
 

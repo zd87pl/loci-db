@@ -22,6 +22,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "lwip/stats.h"
 
 #include "audio.h"
 #include "board_w11.h"
@@ -195,6 +196,28 @@ static bool console_extra(const char *line) {
     camera_af_report(line[2] != 0);
     return true;
   }
+  if (!strcmp(line, "net")) {  // lwIP error counters and internal-RAM headroom (Wi-Fi TX needs internal RAM)
+#if LWIP_STATS
+    ESP_LOGI(TAG, "[net] tcp xmit %u recv %u drop %u memerr %u err %u | ip xmit %u err %u memerr %u | link xmit %u err %u drop %u",
+             (unsigned)lwip_stats.tcp.xmit, (unsigned)lwip_stats.tcp.recv, (unsigned)lwip_stats.tcp.drop,
+             (unsigned)lwip_stats.tcp.memerr, (unsigned)lwip_stats.tcp.err, (unsigned)lwip_stats.ip.xmit,
+             (unsigned)lwip_stats.ip.err, (unsigned)lwip_stats.ip.memerr, (unsigned)lwip_stats.link.xmit,
+             (unsigned)lwip_stats.link.err, (unsigned)lwip_stats.link.drop);
+#endif
+    ESP_LOGI(TAG, "[net] internal heap %u free, %u min, %u largest block; dma %u", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA));
+    return true;
+  }
+  if (!strncmp(line, "quality ", 8)) {
+    if (camera_set_quality(atoi(line + 8))) {
+      ESP_LOGI(TAG, "[quality] JPEG quality step %d", camera_quality());
+    } else {
+      ESP_LOGW(TAG, "[quality] 4..63, lower is better");
+    }
+    return true;
+  }
   if (!strcmp(line, "mic")) {  // two seconds of microphone level, no recognition
     static int16_t buf[LOCI_AUDIO_RATE / 10];
     int peak_max = 0, mean_sum = 0;
@@ -245,8 +268,9 @@ void app_main(void) {
       .device_id = LOCI_DEVICE_ID,
       .device_token = LOCI_DEVICE_TOKEN,
       .console_extra = console_extra,
-      .console_extra_help = "detect [n] | detect sd [n] | imu | mic | af [now] | res <qvga|vga|svga|xga|hd|sxga|uxga|fhd|qxga>",
+      .console_extra_help =
+          "detect [n] | detect sd [n] | imu | mic | af [now] | quality <4-63> | res <qvga|vga|svga|xga|hd|sxga|uxga>",
   };
-  cfg.camera_ok = camera_init(LOCI_JPEG_QUALITY, LOCI_FRAME_SIZE) == ESP_OK;
+  cfg.camera_ok = camera_init(LOCI_JPEG_QUALITY, LOCI_FRAME_SIZE, LOCI_FRAME_SIZE_MAX) == ESP_OK;
   loci_app_run(&cfg);  // never returns
 }

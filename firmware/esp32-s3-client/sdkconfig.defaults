@@ -36,12 +36,15 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # microSD: larger FatFs stat block size for faster writes (as on the P4)
 CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
 
-# Big TCP windows for the 100-250 kB frame uploads; lwIP mailboxes deeper than the defaults
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+# TCP send buffer within the Wi-Fi driver's 16 static TX buffers (~25 kB); XGA frames are 20-100 kB
+# and still go out in ~110 ms on the LAN (2.0 fps measured). Receive window and lwIP mailboxes larger.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=16
+# counters for the `net` console command
+CONFIG_LWIP_STATS=y
 
 # ESP-SR: MultiNet7 English + WebRTC noise suppression from the "model" flash partition; no wake word
 # (the BOOT button is the trigger). esp-sr adds the model image to `idf.py flash`.

@@ -27,8 +27,11 @@
 #define BOARD_CAM_VSYNC 38
 #define BOARD_CAM_HREF 47
 #define BOARD_CAM_PCLK 13
+// 10 MHz, not the usual 20: at 20 MHz (and the faster pixel clock of XGA) the camera interfered with
+// the Wi-Fi (pings 0.2-8 s, up to 87 % loss at -49 dBm) and with the microSD's SPI lines on the
+// shared expansion board (card init CRC errors). 10 MHz still gives the sensor frames to spare at 2 fps.
 #ifndef BOARD_CAM_XCLK_HZ
-#define BOARD_CAM_XCLK_HZ 20000000
+#define BOARD_CAM_XCLK_HZ 10000000
 #endif
 
 // PDM microphone on the expansion board (I2S0 in PDM RX mode)
@@ -53,7 +56,7 @@
 #define BOARD_SD_CS 21
 #endif
 #ifndef BOARD_SD_FREQ_KHZ
-#define BOARD_SD_FREQ_KHZ 20000
+#define BOARD_SD_FREQ_KHZ 10000  // 20 MHz worked until the camera clock disturbed it; 10 MHz has margin
 #endif
 
 // QMI8658C 6-axis IMU on its own I2C bus (the camera's SCCB uses another port)
@@ -75,9 +78,14 @@
 #ifndef LOCI_JPEG_QUALITY
 #define LOCI_JPEG_QUALITY 12
 #endif
-// FRAMESIZE_* of esp32-camera; UXGA = 1600x1200 (OV3660 maximum: QXGA 2048x1536)
+// FRAMESIZE_* of esp32-camera. XGA (1024x768, 60-100 kB) is all the host's YOLO uses at
+// imgsz 960; UXGA (1600x1200) reached 370 kB in a bright room and overflowed its 384 kB buffer.
 #ifndef LOCI_FRAME_SIZE
-#define LOCI_FRAME_SIZE FRAMESIZE_UXGA
+#define LOCI_FRAME_SIZE FRAMESIZE_XGA
+#endif
+// Largest size `res` may switch to at runtime (the frame buffers are allocated for it)
+#ifndef LOCI_FRAME_SIZE_MAX
+#define LOCI_FRAME_SIZE_MAX FRAMESIZE_UXGA
 #endif
 // PDM microphones are quiet: linear gain after the DC blocker
 #ifndef LOCI_MIC_GAIN

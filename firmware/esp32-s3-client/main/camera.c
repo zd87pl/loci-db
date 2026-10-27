@@ -19,6 +19,8 @@ static camera_fb_t *s_fb;
 static uint32_t s_width, s_height;
 static const char *s_sensor = "none";
 static bool s_af;  // OV5640 autofocus firmware loaded
+static int s_quality;      // current JPEG quality step (0..63, lower is better)
+static int s_fail_streak;  // consecutive captures without a frame
 static const char *s_size_name = "?";
 
 typedef struct {
@@ -32,7 +34,7 @@ static const named_size_t k_sizes[] = {
     {"qxga", FRAMESIZE_QXGA},
 };
 
-esp_err_t camera_init(int jpeg_quality, framesize_t frame_size) {
+esp_err_t camera_init(int jpeg_quality, framesize_t frame_size, framesize_t max_size) {
   camera_config_t cfg = {
       .pin_pwdn = BOARD_CAM_PWDN,
       .pin_reset = BOARD_CAM_RESET,
@@ -54,15 +56,13 @@ esp_err_t camera_init(int jpeg_quality, framesize_t frame_size) {
       .ledc_timer = LEDC_TIMER_0,
       .ledc_channel = LEDC_CHANNEL_0,
       .pixel_format = PIXFORMAT_JPEG,
-      .frame_size = frame_size,
+      .frame_size = max_size,  // the frame buffers are sized for this; `res` can go up to it later
       .jpeg_quality = jpeg_quality,
       .fb_count = 2,
       .fb_location = CAMERA_FB_IN_PSRAM,
       .grab_mode = CAMERA_GRAB_LATEST,
   };
-  for (size_t i = 0; i < sizeof(k_sizes) / sizeof(k_sizes[0]); i++) {
-    if (k_sizes[i].size == frame_size) s_size_name = k_sizes[i].name;
-  }
+  s_quality = jpeg_quality;
   esp_err_t err = esp_camera_init(&cfg);
   ESP_RETURN_ON_ERROR(err, TAG, "esp_camera_init (is the camera seated in the expansion board?)");
   sensor_t *s = esp_camera_sensor_get();
@@ -79,6 +79,9 @@ esp_err_t camera_init(int jpeg_quality, framesize_t frame_size) {
       s_af = af_err == ESP_OK;
       ESP_LOGI(TAG, "autofocus %s", s_af ? "running (continuous)" : esp_err_to_name(af_err));
     }
+  }
+  for (size_t i = 0; i < sizeof(k_sizes) / sizeof(k_sizes[0]); i++) {
+    if (k_sizes[i].size == frame_size) camera_set_frame_size(k_sizes[i].name);
   }
   // Let auto exposure / white balance settle: the first frames come out dark and green.
   int64_t t0 = esp_timer_get_time();
@@ -98,7 +101,19 @@ esp_err_t camera_init(int jpeg_quality, framesize_t frame_size) {
 esp_err_t camera_capture_jpeg(uint8_t **jpeg, size_t *len, uint32_t *width, uint32_t *height) {
   if (s_fb) camera_release();  // a missed release must not leak the buffer
   s_fb = esp_camera_fb_get();
-  if (!s_fb) return ESP_FAIL;
+  if (!s_fb) {
+    // A JPEG larger than the frame buffer is dropped by the driver ("FB-OVF"); in a bright, detailed
+    // scene every frame overflows and the camera looks dead. Compress harder until frames fit.
+    sensor_t *s = esp_camera_sensor_get();
+    if (++s_fail_streak >= 2 && s && s_quality < 40) {
+      s_quality += 4;
+      s->set_quality(s, s_quality);
+      ESP_LOGW(TAG, "no frame twice (JPEG larger than the buffer?): quality step now %d", s_quality);
+      s_fail_streak = 0;
+    }
+    return ESP_FAIL;
+  }
+  s_fail_streak = 0;
   if (s_fb->format != PIXFORMAT_JPEG || s_fb->len < 4) {
     camera_release();
     return ESP_ERR_INVALID_RESPONSE;
@@ -150,6 +165,15 @@ void camera_af_report(bool trigger) {
   ESP_LOGI(TAG, "[af] %s: %s, focused %d busy %d raw 0x%02x (%lld ms)", trigger ? "single shot" : "status",
            esp_err_to_name(err), st.focused, st.busy, st.raw, (esp_timer_get_time() - t0) / 1000);
 }
+
+bool camera_set_quality(int quality) {
+  sensor_t *s = esp_camera_sensor_get();
+  if (!s || quality < 4 || quality > 63 || s->set_quality(s, quality) != 0) return false;
+  s_quality = quality;
+  return true;
+}
+
+int camera_quality(void) { return s_quality; }
 
 uint32_t camera_width(void) { return s_width; }
 uint32_t camera_height(void) { return s_height; }

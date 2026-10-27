@@ -170,11 +170,13 @@ static void frame_client_reset(void) {
 // Send `len` bytes of body, then read the (small) response into s_resp. Returns the HTTP status.
 static int exchange(esp_http_client_handle_t c, const uint8_t *body, size_t len) {
   if (!s_resp) return -1;
+  int64_t t0 = esp_timer_get_time();
   esp_err_t err = esp_http_client_open(c, (int)len);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "open failed: %s", esp_err_to_name(err));
     return -1;
   }
+  int64_t t_open = esp_timer_get_time();
   size_t sent = 0;
   while (sent < len) {
     int n = esp_http_client_write(c, (const char *)body + sent, (int)(len - sent));
@@ -184,12 +186,18 @@ static int exchange(esp_http_client_handle_t c, const uint8_t *body, size_t len)
     }
     sent += (size_t)n;
   }
+  int64_t t_body = esp_timer_get_time();
   if (esp_http_client_fetch_headers(c) < 0) return -1;
   int status = esp_http_client_get_status_code(c);
   int got = esp_http_client_read_response(c, s_resp, RESP_CAP - 1);
   if (got < 0) got = 0;
   s_resp[got] = 0;
   if (got >= RESP_CAP - 1) esp_http_client_flush_response(c, NULL);  // keep the stream in sync
+  int64_t t_end = esp_timer_get_time();
+  if (t_end - t0 > 2000000) {  // where a slow request spent its time
+    ESP_LOGW(TAG, "slow request: open+headers %lld ms, body %lld ms, response %lld ms", (t_open - t0) / 1000,
+             (t_body - t_open) / 1000, (t_end - t_body) / 1000);
+  }
   return status;
 }
 

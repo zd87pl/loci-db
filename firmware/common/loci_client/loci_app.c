@@ -176,9 +176,13 @@ static void live_frame(void) {
   host_frame_result_t r;
   int64_t t0 = esp_timer_get_time();
   esp_err_t rc = host_post_frame(jpeg, len, s_seq, &r);
+  int64_t post_ms = (esp_timer_get_time() - t0) / 1000;
   if (rc == ESP_OK) {
     s_sent++;
+    int64_t t_sd = esp_timer_get_time();
     local_dataset_maybe_save(jpeg, len, host_now_ms(), host_last_reply());
+    int64_t sd_ms = (esp_timer_get_time() - t_sd) / 1000;
+    if (sd_ms > 500) ESP_LOGW(TAG, "[sd] saving the dataset frame took %lld ms", sd_ms);
   } else {
     s_failed++;
     local_backlog_push(jpeg, len, host_now_ms());  // keep it; it goes up when the host is back
@@ -189,7 +193,7 @@ static void live_frame(void) {
   uint32_t own = 1000 / LOCI_FPS;
   s_interval_ms = r.next_ms > (int)own ? (uint32_t)r.next_ms : own;
   ESP_LOGI(TAG, "[frame] #%lu %lux%lu %u B in %lld ms -> %s%s%s", (unsigned long)s_seq, (unsigned long)w,
-           (unsigned long)h, (unsigned)len, (esp_timer_get_time() - t0) / 1000,
+           (unsigned long)h, (unsigned)len, post_ms,
            r.dropped ? "(dropped by host) " : "", r.labels[0] ? r.labels : "-",
            r.audio_pending && audio_speaker_ready() ? "  [audio waiting]" : "");
   static char last_rev[24];

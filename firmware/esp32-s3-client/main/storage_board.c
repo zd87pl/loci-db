@@ -7,6 +7,8 @@
 #include "driver/spi_common.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdmmc_cmd.h"
 
 #include "board_w11.h"
@@ -46,7 +48,14 @@ esp_err_t storage_board_open_card(sdmmc_card_t **card_out) {
     err = ESP_ERR_NO_MEM;
     goto fail;
   }
-  err = sdmmc_card_init(&host, card);  // the card keeps its own copy of `host`
+  // A soft reset of the S3 does not power-cycle the card; one that was mid-write can answer the
+  // first init sequences with garbage (CRC / "send_if_cond" errors). Give it a few tries.
+  for (int attempt = 0; attempt < 4; attempt++) {
+    err = sdmmc_card_init(&host, card);  // the card keeps its own copy of `host`
+    if (err == ESP_OK) break;
+    ESP_LOGW(TAG, "card init attempt %d: %s", attempt + 1, esp_err_to_name(err));
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
   if (err != ESP_OK) {
     free(card);
     goto fail;

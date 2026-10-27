@@ -11,8 +11,9 @@
 //   /sdcard/loci/memory.json, memory.pcm     the host's remembered objects and a spoken summary, refreshed
 //                                            when the host's memory revision changes; played offline on the button
 //   /sdcard/loci/offline.pcm                 fixed prompt fetched once ("I can't reach the host...")
-//   /sdcard/loci/frames/<ms>.jpg + .json     every Nth live frame with the host's detections: a dataset for
-//                                            training a detector on the user's own objects
+//   /sdcard/loci/dataset/<NNNN>/<ms>.jpg + .json   every Nth live frame with the host's detections, 250 per
+//                                            folder: a dataset for training a detector on the user's own
+//                                            objects (builds before 0.5 wrote them flat into frames/)
 //   /sdcard/loci/voice/<ms>.wav              push-to-talk recordings, for checking the microphone and STT
 //
 // On a board without a speaker (audio_speaker_ready() false) no speech is fetched: the per-object

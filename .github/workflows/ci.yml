@@ -29,26 +29,6 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short
 
-  # The cloud API imports the whole loci/ package, so its suite must run on
-  # every change — not only when cloud/ paths change (see cloud-api.yml).
-  cloud-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          pip install -e ".[dev,mcp]"
-          pip install -r cloud/api/requirements.txt
-
-      - name: Run cloud API tests
-        run: pytest cloud/tests/ -v --tb=short
-
   # LOCI Cloud (Cloudflare Workers, cloud/workers): typecheck + Vitest in the local runtime.
   cloud-workers:
     runs-on: ubuntu-latest
@@ -135,16 +115,14 @@ jobs:
       # The audit is only meaningful if the project's actual dependency tree is
       # installed — auditing a bare scanner venv checks nothing.
       - name: Install project dependencies (audit target)
-        run: |
-          pip install -e ".[dev,mcp]"
-          pip install -r cloud/api/requirements.txt
+        run: pip install -e ".[dev,mcp]"
 
       - name: Run bandit (static security analysis)
-        run: bandit -r loci/ cloud/api/ server.py -ll -ii
+        run: bandit -r loci/ server.py -ll -ii
 
       - name: Audit dependencies for known CVEs
         # Environment mode: audits every installed distribution (library + dev
-        # + cloud API deps). --skip-editable excludes the local loci-stdb
+        # deps). --skip-editable excludes the local loci-stdb
         # checkout itself, which has no published metadata to audit.
         run: pip-audit --skip-editable
 

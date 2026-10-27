@@ -6,7 +6,7 @@ The Cloudflare-native managed service described in [docs/CLOUD_PLATFORM_DESIGN.m
 - **Control plane** (D1, `migrations/`, `src/control.ts`): projects, secret and publishable keys, spaces, devices.
 - **Data plane** (`src/space.ts`): one SQLite-backed Durable Object per space with observations, a revision log for device sync, and where / changes / digest / ask.
 
-The older Fly.io service in `cloud/api` stays as reference until v1 covers its features.
+LOCI Cloud runs on Cloudflare only. The earlier Fly.io + Supabase + Qdrant Cloud service (`cloud/api`) was removed on 2026-10-27 (see [`cloud/README.md`](../README.md)).
 
 ## API (v1, Phase 0)
 

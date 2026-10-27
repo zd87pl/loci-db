@@ -65,6 +65,10 @@ loci-db uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `min_confidence` filtering overfetches candidates so filtered queries can still fill the requested `limit`.
 - LRU eviction (`max_cache_size`, default 4096) for `AdaptiveResolution._resolution_cache`.
 
+### Removed
+- The Fly.io managed stack. Removed: `cloud/api` (FastAPI service with Supabase API keys and Qdrant Cloud), the `cloud/edge` proxy Worker, the Supabase migrations, the AWS Terraform scaffold, the `cloud-api.yml` Fly deploy workflow and the `cloud-tests` CI job. LOCI Cloud runs on Cloudflare only (`cloud/workers`).
+- The `loci cloud keys` CLI commands, which managed keys on that service. Cloudflare projects and keys come from `cloud/workers/scripts/bootstrap.py`.
+
 ### Cloud API
 - State metadata now survives the insert → query round-trip.
 - `scale_level`, `confidence` and the causal links (`prev_state_id` / `next_state_id`) round-trip through `/insert` and `/query`.

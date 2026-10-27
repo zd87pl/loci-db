@@ -88,6 +88,11 @@ class Esp32Config:
     depth: str = "none"  # LOCI_ESP32_DEPTH: "none" | "mono" (needs a plugged-in estimator)
     white_balance: str = "none"  # LOCI_ESP32_WB: "none" | "gray" (gray-world before YOLO)
     imgsz: int = 640  # LOCI_ESP32_IMGSZ: YOLO inference size; 960 pays off for 1280x960 frames
+    # LOCI_ESP32_MAX_UPLOAD: 413 above this; a P4 frame is 35-400 kB, 8 s of speech 256 kB
+    max_upload_bytes: int = 1_500_000
+    # LOCI_ESP32_BODY_DEADLINE_S: 408 when an upload body takes longer (a stalled board
+    # otherwise holds its socket until TCP keepalive gives up)
+    body_deadline_s: float = 30.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Esp32Config:
@@ -112,6 +117,8 @@ class Esp32Config:
             depth=(env.get("LOCI_ESP32_DEPTH") or "none").lower(),
             white_balance=(env.get("LOCI_ESP32_WB") or "none").lower(),
             imgsz=max(320, min(1920, _env_int(env, "LOCI_ESP32_IMGSZ", 640))),
+            max_upload_bytes=max(64_000, _env_int(env, "LOCI_ESP32_MAX_UPLOAD", 1_500_000)),
+            body_deadline_s=max(1.0, _env_float(env, "LOCI_ESP32_BODY_DEADLINE_S", 30.0)),
         )
 
     def to_dict(self) -> dict:
@@ -130,6 +137,8 @@ class Esp32Config:
             "depth": self.depth,
             "white_balance": self.white_balance,
             "imgsz": self.imgsz,
+            "max_upload_bytes": self.max_upload_bytes,
+            "body_deadline_s": self.body_deadline_s,
         }
 
     @property

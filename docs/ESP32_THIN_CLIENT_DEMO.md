@@ -104,7 +104,12 @@ Response `200`:
 * `audio_pending` — clips waiting in this device's queue. The board fetches them right after the frame.
 * The firmware parses this with `strstr`, so the keys stay flat and stable.
 
-`400` for an empty body or anything that is not a JPEG (`FF D8` magic).
+`400` for an empty body or anything that is not a JPEG (`FF D8` magic), `413` above
+`LOCI_ESP32_MAX_UPLOAD` and `408` when the body is still arriving after `LOCI_ESP32_BODY_DEADLINE_S`.
+The firmware moves a backlog frame the host refuses (400/413/415/422), or one that failed 5 answered
+uploads, to `/sdcard/loci/backlog_bad/` so it cannot block the queue; the console command `requeue`
+puts those back. A frame sent with `X-Backlog: 1` is stored at its capture time and leaves the live
+state alone: it does not count for the rate limit, the preview, the fps or the last detections.
 
 ### `GET /api/esp32/audio/next?device=<id>&wait=<seconds>`
 
@@ -303,6 +308,8 @@ storage; its live image is polled as single JPEGs so the request can carry the h
 | `LOCI_ESP32_DEPTH` | `none` | `mono` enables a plugged-in monocular depth estimator (low confidence) |
 | `LOCI_ESP32_WB` | `none` (`gray` in the run script) | Gray-world white balance before detection; fixes the P4 camera's blue cast |
 | `LOCI_ESP32_IMGSZ` | 640 | YOLO inference size; 960 for 1280×960 frames |
+| `LOCI_ESP32_MAX_UPLOAD` | 1500000 | Largest frame or voice body in bytes; larger is a 413 (a P4 frame is 35-400 kB, 8 s of speech 256 kB) |
+| `LOCI_ESP32_BODY_DEADLINE_S` | 30 | An upload body still arriving after this is a 408, so a stalled board cannot hold a socket for minutes |
 | `LOCI_HTTP_KEEPIDLE` / `LOCI_HTTP_KEEPINTVL` / `LOCI_HTTP_KEEPCNT` | 20 / 5 / 3 | TCP keepalive on every board connection: probe after 20 s of silence, every 5 s, drop after 3 unanswered probes |
 
 **Boards that vanish mid-upload.** `run_esp32_demo.sh` starts uvicorn with

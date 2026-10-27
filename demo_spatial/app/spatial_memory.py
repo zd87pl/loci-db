@@ -1184,9 +1184,16 @@ class SpatialMemory:
                 logger.exception("restore failed; starting with an empty memory: %s", exc)
                 self._client = loci_bridge.make_client(self._epoch_size_ms, int(self._embedder.dim))
                 self._reset_indices()
-                report = RestoreReport(
-                    0, [], None, 0, "error", detail=f"{type(exc).__name__}: {exc}"
-                )
+                detail = f"{type(exc).__name__}: {exc}"
+                # the empty session below must not snapshot over the files it could not load
+                try:
+                    kept = self._persistence.set_aside(detail)
+                except Exception as aside_exc:
+                    kept = []
+                    logger.exception("could not set the memory files aside: %s", aside_exc)
+                if kept:
+                    detail = f"{detail}; kept {', '.join(kept)}"
+                report = RestoreReport(0, [], None, 0, "error", detail=detail)
             self._restore_report = report
             self.version += 1
             try:

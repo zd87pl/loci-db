@@ -62,24 +62,51 @@ class SayRequest(BaseModel):
     device: str | None = None
 
 
-async def _read_upload(request: Request, what: str) -> bytes:
+async def _read_body(request: Request, what: str, max_bytes: int) -> bytes:
+    too_big = HTTPException(status_code=413, detail=f"{what} larger than {max_bytes} bytes")
+    if request.headers.get("content-type", "").startswith("multipart/form-data"):
+        form = await request.form()
+        upload = form.get("file") or form.get("image") or form.get("frame")
+        body = await upload.read() if upload is not None and hasattr(upload, "read") else b""
+        if len(body) > max_bytes:
+            raise too_big
+        return body
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > max_bytes:  # chunked, or a Content-Length that lied: stop reading here
+            raise too_big
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _read_upload(request: Request, what: str, cfg: Esp32Config) -> bytes:
     """The board's upload (raw body or a multipart ``file``/``image``/``frame`` field).
 
     A board that resets or drops off Wi-Fi mid-upload never finishes the body; with the
     ``esp32_http`` protocol the connection is dropped by TCP keepalive and the read ends in
     ``ClientDisconnect``. That is routine for a wearable, so it is one log line, not a traceback
-    (nobody is left to receive the 499).
+    (nobody is left to receive the 499). A body over ``cfg.max_upload_bytes`` is a 413 and one
+    still arriving after ``cfg.body_deadline_s`` a 408, so a stalled or hostile upload cannot
+    hold a socket and memory for minutes.
     """
+    client = request.client.host if request.client else "?"
+    declared = _header_int(request, "content-length")
+    if declared is not None and declared > cfg.max_upload_bytes:
+        raise HTTPException(
+            status_code=413, detail=f"{what} larger than {cfg.max_upload_bytes} bytes"
+        )
     try:
-        if request.headers.get("content-type", "").startswith("multipart/form-data"):
-            form = await request.form()
-            upload = form.get("file") or form.get("image") or form.get("frame")
-            return await upload.read() if upload is not None and hasattr(upload, "read") else b""
-        return await request.body()
+        return await asyncio.wait_for(
+            _read_body(request, what, cfg.max_upload_bytes), timeout=cfg.body_deadline_s
+        )
     except ClientDisconnect:
-        client = request.client.host if request.client else "?"
         logger.info("ESP32 %s upload from %s cut off (board reset or out of range)", what, client)
         raise HTTPException(status_code=499, detail="client disconnected") from None
+    except TimeoutError:
+        logger.info("ESP32 %s upload from %s took over %.0f s", what, client, cfg.body_deadline_s)
+        raise HTTPException(status_code=408, detail="upload too slow") from None
 
 
 def _header_int(request: Request, name: str) -> int | None:
@@ -153,7 +180,7 @@ def install_esp32_routes(
         seq: int | None = Query(None, description="Frame counter (or X-Seq header)"),
     ):
         """One JPEG frame from the board; returns labels and whether audio is waiting."""
-        body = await _read_upload(request, "frame")
+        body = await _read_upload(request, "frame", cfg)
         if not body:
             raise HTTPException(status_code=400, detail="empty frame")
         device_id = _device(request, device)
@@ -343,7 +370,7 @@ def install_esp32_routes(
         speak: bool = True,
     ):
         """One push-to-talk utterance (raw PCM16 mono at ``rate``, or any WAV/MP3/WebM)."""
-        body = await _read_upload(request, "voice")
+        body = await _read_upload(request, "voice", cfg)
         if not body:
             raise HTTPException(status_code=400, detail="empty audio")
         device_id = _device(request, device)

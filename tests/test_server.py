@@ -4,9 +4,8 @@ Uses httpx + FastAPI TestClient so no real Qdrant instance is needed — the
 LociClient is monkey-patched at the module level before the app is imported.
 
 The root ``server.py`` is loaded by explicit file path under a private module
-name: the cloud test suite (cloud/tests/conftest.py) puts ``cloud/api`` on
-``sys.path`` where another module named ``server`` lives, so a bare
-``import server`` is ambiguous when both suites run in one pytest session.
+name, so it never collides with another module named ``server`` on
+``sys.path``.
 """
 
 from __future__ import annotations

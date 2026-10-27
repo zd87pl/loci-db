@@ -7,7 +7,7 @@ The Cloudflare-native managed service described in [docs/CLOUD_PLATFORM_DESIGN.m
 - **Data plane** (`src/space.ts`): one SQLite-backed Durable Object per space with observations, a revision log for device sync, and where / changes / digest / ask / query.
 - **SDK compatibility** (`src/compat.ts`): the old `/insert` and `/query`, so `LociClient(base_url=..., api_key=...)` works against a project with no client changes beyond the URL.
 
-The compatibility contract comes from the retired Fly.io service, `cloud/api/server.py`. To read it after its removal, run `git show 917cc68:cloud/api/server.py`.
+LOCI Cloud runs on Cloudflare only. The earlier Fly.io + Supabase + Qdrant Cloud service (`cloud/api`) was removed on 2026-10-27 (see [`cloud/README.md`](../README.md)). The SDK compatibility contract comes from its `cloud/api/server.py`; to read it, run `git show 917cc68:cloud/api/server.py`.
 
 ## Quickstart: insert and query from Python
 

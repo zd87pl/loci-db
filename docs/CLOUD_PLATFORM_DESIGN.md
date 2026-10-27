@@ -1,6 +1,6 @@
 # LOCI Cloud on Cloudflare — Platform and Business Design
 
-Status: proposal, 2026-10-26. Replaces the Fly.io + Supabase + Qdrant Cloud plan in `cloud/README.md` for the managed service. The open-source library (`loci/`, `loci-core/`) is unchanged and stays the offline/edge runtime.
+Status: adopted. Proposed 2026-10-26; Cloudflare only was confirmed on 2026-10-27, and the earlier Fly.io + Supabase + Qdrant Cloud stack (`cloud/api`, `cloud/edge`, Supabase migrations, AWS Terraform) was removed from the repo. The open-source library (`loci/`, `loci-core/`) is unchanged and stays the offline/edge runtime.
 
 ## 1. Thesis
 
@@ -203,9 +203,9 @@ With those, a device costs cents per month to serve, and a $2–5 per-device pri
 |---|---|
 | `loci/` Python library | Stays the edge and offline runtime; `LociClient` cloud mode targets v1 |
 | `loci-core` Rust | Compiled to Wasm for Hilbert and cosine inside Workers (feature-gate `rayon`) |
-| `cloud/api` FastAPI service | Retired as the data plane; its validation rules, namespace rules and tests become the API contract |
-| `cloud/edge` Worker | Grows into the router Worker |
-| Supabase migrations | Ported to D1 |
+| `cloud/api` FastAPI service | Removed 2026-10-27; its validation and namespace rules (last in commit `917cc68`) are the reference for the v1 contract |
+| `cloud/edge` Worker | Removed; replaced by the router Worker in `cloud/workers` |
+| Supabase migrations | Removed; the control plane lives in D1 (`cloud/workers/migrations`) |
 
 Risks:
 
@@ -225,7 +225,7 @@ Risks:
 
 ## 10. Decisions needed
 
-1. Confirm Cloudflare-native (Durable Objects + Vectorize) over the Fly/Qdrant stack. This retires Qdrant Cloud and Supabase from the managed path.
+1. Confirm Cloudflare-native (Durable Objects + Vectorize) over the Fly/Qdrant stack. This retires Qdrant Cloud and Supabase from the managed path. **Confirmed 2026-10-27.**
 2. Domain for project endpoints (`loci.cloud` or similar).
 3. Default jurisdiction for the beta: US, EU, or per project from day one.
 4. Whether cloud inference for cheap boards is in the beta or deferred.
@@ -235,7 +235,7 @@ Risks:
 
 | Decision | Default | Revisit when |
 |---|---|---|
-| Stack | Cloudflare-native (Workers, Durable Objects, D1, Vectorize later). Qdrant Cloud and Supabase leave the managed path; `cloud/api` stays as reference and compatibility until v1 covers it | Never for the beta |
+| Stack | Cloudflare-native (Workers, Durable Objects, D1, Vectorize later). Confirmed 2026-10-27: Fly.io, Qdrant Cloud and Supabase are off the managed path, and `cloud/api` was removed | Never for the beta |
 | Domain | No custom domain in Phase 0: `*.workers.dev`, with the project ref as a path segment (`/p/<ref>/v1/...`); a `PROJECT_HOST_SUFFIX` setting switches to `<ref>.<domain>` once a domain is bought | Before the first external design partner |
 | Jurisdiction | Per project from day one; default `us` (no restriction), `eu` selectable at project creation and pinned into the space object ids | First EU customer, or any elder-care pilot |
 | Cloud inference | Deferred; Phase 0 accepts observations only (edge inference on the P4 board, Pi or home host) | Phase 3 add-ons |

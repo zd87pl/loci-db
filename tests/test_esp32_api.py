@@ -8,6 +8,7 @@ SpatialMemory is a MagicMock so the test only covers the ESP32 glue.
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import wave
@@ -248,8 +249,8 @@ def test_frame_upload_cut_off_mid_body_is_a_quiet_499(caplog) -> None:
     assert t.hub.status()["frames_total"] == 0
 
 
-def _raw_frame_post(t, headers: list[tuple[bytes, bytes]], messages) -> list[dict]:
-    """Drive the ASGI app with hand-made body messages (chunked bodies, stalls)."""
+def _raw_post(t, path: str, query: bytes, headers: list, receive) -> list[dict]:
+    """Drive the ASGI app with hand-made body messages (chunked bodies, stalls, disconnects)."""
     import asyncio
 
     scope = {
@@ -258,11 +259,11 @@ def _raw_frame_post(t, headers: list[tuple[bytes, bytes]], messages) -> list[dic
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
-        "path": "/api/esp32/frame",
-        "raw_path": b"/api/esp32/frame",
-        "query_string": b"device=w11",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": query,
         "root_path": "",
-        "headers": [(b"content-type", b"image/jpeg"), *headers],
+        "headers": headers,
         "client": ("192.168.1.50", 50000),
         "server": ("testserver", 80),
     }
@@ -271,8 +272,14 @@ def _raw_frame_post(t, headers: list[tuple[bytes, bytes]], messages) -> list[dic
     async def send(message):
         sent.append(message)
 
-    asyncio.run(t.app(scope, messages, send))
+    asyncio.run(t.app(scope, receive, send))
     return sent
+
+
+def _raw_frame_post(t, headers: list[tuple[bytes, bytes]], messages) -> list[dict]:
+    return _raw_post(
+        t, "/api/esp32/frame", b"device=w11", [(b"content-type", b"image/jpeg"), *headers], messages
+    )
 
 
 def test_frame_upload_size_cap_and_deadline() -> None:
@@ -393,6 +400,52 @@ def test_voice_pcm_roundtrip() -> None:
     )
     assert t.voice.asked == ["where is my cup"]
     assert t.client.get("/api/esp32/audio/next?device=pendant").status_code == 200
+
+
+def test_voice_answer_is_not_queued_for_a_board_that_left() -> None:
+    """The board answers from its card after its timeout; a late clip would be a second answer."""
+    t = _build()
+    pcm = _speech_pcm(1.0)
+    messages = iter(
+        [
+            {"type": "http.request", "body": pcm, "more_body": False},
+            {"type": "http.disconnect"},
+        ]
+    )
+
+    async def receive():
+        return next(messages, {"type": "http.disconnect"})
+
+    scope_headers = [(b"content-type", b"audio/L16; rate=16000"), (b"x-device-id", b"pendant")]
+    sent = _raw_post(t, "/api/esp32/voice", b"rate=16000", scope_headers, receive)
+    assert sent[0]["status"] == 200
+    body = json.loads(b"".join(m.get("body", b"") for m in sent[1:]))
+    assert body["answer"] == "Your cup is on the table." and body["audio_queued"] is False
+    assert t.client.get("/api/esp32/audio/next?device=pendant").status_code == 204
+
+
+def test_bridge_renders_speech_once_and_not_at_all_without_a_speaker() -> None:
+    import asyncio
+
+    calls = {"pipeline_tts": 0, "bridge_tts": 0}
+
+    class Pipeline(FakeVoice):
+        async def handle_text_query(self, text: str, *, synthesize_response: bool = True):
+            if synthesize_response:
+                calls["pipeline_tts"] += 1
+            result = await super().handle_text_query(text)
+            result.answer_audio = _tone_wav() if synthesize_response else b""
+            return result
+
+    async def synth(text: str) -> bytes:
+        calls["bridge_tts"] += 1
+        return _tone_wav()
+
+    bridge = Esp32VoiceBridge(Pipeline(), rate=16000, synthesizer=synth)
+    spoken = asyncio.run(bridge.answer_text("where is my cup"))
+    assert spoken.pcm and calls == {"pipeline_tts": 0, "bridge_tts": 1}
+    silent = asyncio.run(bridge.answer_text("where is my cup", speak=False))
+    assert silent.pcm == b"" and calls == {"pipeline_tts": 0, "bridge_tts": 1}
 
 
 def test_voice_resamples_other_rates_and_accepts_wav() -> None:

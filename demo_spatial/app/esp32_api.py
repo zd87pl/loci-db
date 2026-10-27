@@ -36,6 +36,7 @@ import time
 from collections.abc import Iterable
 from typing import Any
 
+import anyio
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -107,6 +108,20 @@ async def _read_upload(request: Request, what: str, cfg: Esp32Config) -> bytes:
     except TimeoutError:
         logger.info("ESP32 %s upload from %s took over %.0f s", what, client, cfg.body_deadline_s)
         raise HTTPException(status_code=408, detail="upload too slow") from None
+
+
+async def _client_gone(request: Request, wait_s: float = 0.05) -> bool:
+    """True when the board has closed the connection.
+
+    ``request.is_disconnected()`` cannot see this behind ``BaseHTTPMiddleware`` (the public
+    surface middleware): its receive wrapper opens a task group, a checkpoint that the
+    pre-cancelled scope inside ``is_disconnected()`` never gets past. A short timed receive
+    returns the disconnect at once when the client is gone and times out when it is still there.
+    """
+    with anyio.move_on_after(wait_s):
+        message = await request.receive()
+        return message.get("type") == "http.disconnect"
+    return False
 
 
 def _header_int(request: Request, name: str) -> int | None:
@@ -383,14 +398,20 @@ def install_esp32_routes(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"undecodable audio: {e}") from e
         answer = await bridge.answer_pcm(pcm, language=language, speak=speak)
+        audio_queued = bool(answer.pcm)
+        if audio_queued and await _client_gone(request):
+            # the board gave up waiting and answered from its card: a late clip would be a
+            # second answer, played after the first
+            logger.info("ESP32 voice: %s left before the answer; not queueing it", device_id)
+            audio_queued = False
         queued = (
-            hub.queue_audio(answer.pcm, device_id) if answer.pcm else hub.pending_audio(device_id)
+            hub.queue_audio(answer.pcm, device_id) if audio_queued else hub.pending_audio(device_id)
         )
         return {
             **answer.to_dict(),
             "device": device_id,
             "seconds_in": round(pcm16_duration_s(pcm, rate), 2),
-            "audio_queued": bool(answer.pcm),
+            "audio_queued": audio_queued,
             "queue_len": queued,
         }
 

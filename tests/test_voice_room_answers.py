@@ -204,6 +204,65 @@ def test_parse_intent_legacy_shapes_unchanged():
     assert QueryIntent("unknown", "", "").room == ""
 
 
+@pytest.mark.parametrize(
+    ("text", "kind", "obj", "room"),
+    [
+        # list questions, including the board's own "what can you see"
+        ("What objects do you have in your memory?", "list_objects", "", ""),
+        ("what can you see", "list_objects", "", ""),
+        ("what have you seen", "list_objects", "", ""),
+        ("what do you remember", "list_objects", "", ""),
+        ("tell me what you see", "list_objects", "", ""),
+        ("describe the room", "list_objects", "", ""),
+        ("list everything", "list_objects", "", ""),
+        ("what things are in the kitchen", "list_objects", "", "kitchen"),
+        ("what's in your memory", "list_objects", "", ""),
+        # where-is with wake word, fillers, courtesy, embedded questions, time phrases
+        ("is my laptop in the kitchen", "where_is", "laptop", "kitchen"),
+        ("is there a bottle in the living room", "where_is", "bottle", "living_room"),
+        ("can you find the bottle please", "where_is", "bottle", ""),
+        ("hey loci where are my glasses", "where_is", "glasses", ""),
+        ("Hey Loci, um, where's the remote?", "where_is", "remote", ""),
+        ("where did my keys go", "where_is", "keys", ""),
+        ("where'd my keys go", "where_is", "keys", ""),
+        ("do you know where my wallet is", "where_is", "wallet", ""),
+        ("could you tell me where the cup is", "where_is", "cup", ""),
+        ("have you seen my keys anywhere", "where_is", "keys", ""),
+        ("where are my keys right now", "where_is", "keys", ""),
+        ("where did I put my keys yesterday", "where_is", "keys", ""),
+        ("I'm looking for my wallet", "where_is", "wallet", ""),
+        ("where is my cup in your memory", "where_is", "cup", ""),
+        ("where is my phone in the car", "where_is", "phone", ""),
+        ("when was the last time you saw my keys", "history", "keys", ""),
+        ("what changed since this morning", "changes", "", ""),
+        ("has anything moved in the kitchen", "changes", "", "kitchen"),
+        # not object searches: Whisper's silence hallucination, chit-chat, yes/no
+        ("Thank you.", "unknown", "", ""),
+        ("thanks", "unknown", "", ""),
+        ("hey loci", "unknown", "", ""),
+        ("what time is it", "unknown", "", ""),
+        ("how are you", "unknown", "", ""),
+        ("tell me a joke", "unknown", "", ""),
+        ("what's the weather like", "unknown", "", ""),
+        ("is my laptop charged", "unknown", "", ""),
+        ("hello", "unknown", "", ""),
+        # bare object names still work
+        ("glasses?", "where_is", "glasses", ""),
+        ("the water bottle", "where_is", "water bottle", ""),
+    ],
+)
+def test_parse_intent_everyday_phrasings(text, kind, obj, room):
+    intent = parse_intent(text, ROOMS)
+    assert (intent.kind, intent.object_name, intent.room) == (kind, obj, room)
+
+
+def test_parse_intent_rooms_need_a_known_room_or_a_room_word():
+    assert parse_intent("what's in the garage").room == "garage"
+    assert parse_intent("where is my mug in the guest room").room == "guest room"
+    assert parse_intent("what objects do you have in your memory").room == ""
+    assert parse_intent("how long since my keys were seen").kind == "history"
+
+
 def test_match_room_canonicalises():
     assert match_room("Living Room", ROOMS) == "living_room"
     assert match_room("living_room", ROOMS) == "living_room"

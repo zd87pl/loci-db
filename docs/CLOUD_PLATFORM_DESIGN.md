@@ -231,4 +231,14 @@ Risks:
 4. Whether cloud inference for cheap boards is in the beta or deferred.
 5. Plan prices, to validate in the design-partner interviews already planned in the GTM track.
 
+### Defaults adopted for Phase 0 (2026-10-26)
+
+| Decision | Default | Revisit when |
+|---|---|---|
+| Stack | Cloudflare-native (Workers, Durable Objects, D1, Vectorize later). Qdrant Cloud and Supabase leave the managed path; `cloud/api` stays as reference and compatibility until v1 covers it | Never for the beta |
+| Domain | No custom domain in Phase 0: `*.workers.dev`, with the project ref as a path segment (`/p/<ref>/v1/...`); a `PROJECT_HOST_SUFFIX` setting switches to `<ref>.<domain>` once a domain is bought | Before the first external design partner |
+| Jurisdiction | Per project from day one; default `us` (no restriction), `eu` selectable at project creation and pinned into the space object ids | First EU customer, or any elder-care pilot |
+| Cloud inference | Deferred; Phase 0 accepts observations only (edge inference on the P4 board, Pi or home host) | Phase 3 add-ons |
+| Prices | As in section 6, unpublished; Phase 0 meters usage but bills nothing | After 5–10 design-partner interviews |
+
 Sources: [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/), [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), [Durable Objects data location](https://developers.cloudflare.com/durable-objects/reference/data-location/), [Vectorize limits](https://developers.cloudflare.com/vectorize/platform/limits/), [Vectorize metadata filtering](https://developers.cloudflare.com/vectorize/reference/metadata-filtering/), [Containers GA changelog](https://developers.cloudflare.com/changelog/post/2026-04-13-containers-sandbox-ga/), [Containers pricing](https://developers.cloudflare.com/containers/pricing/).

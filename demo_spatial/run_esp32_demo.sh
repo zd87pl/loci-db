@@ -20,6 +20,9 @@
 #   LOCI_DATA_DIR             memory snapshot dir (default ~/.local/share/loci-esp32, separate from the handheld)
 #   LOCI_ESP32_TOKEN_FILE     device token for the online mode (default $LOCI_DATA_DIR/device_token, created once)
 #   LOCI_ESP32_AUTH=auto      token required for requests from outside the LAN (Cloudflare Tunnel); always | off
+#   LOCI_HTTP_KEEPIDLE=20     TCP keepalive: seconds of silence before the host probes a board's connection,
+#   LOCI_HTTP_KEEPINTVL=5     seconds between probes, and
+#   LOCI_HTTP_KEEPCNT=3       unanswered probes before the connection is dropped (see app/esp32_http.py)
 #
 # Online mode: demo_spatial/run_esp32_tunnel.sh puts this host behind a Cloudflare Tunnel (HTTPS).
 
@@ -87,5 +90,12 @@ echo "Online mode:            demo_spatial/run_esp32_tunnel.sh  (Cloudflare Tunn
 echo "YOLO: ${YOLO_MODEL}  STT: faster-whisper ${WHISPER_LOCAL_MODEL}  TTS: ${TTS_ENGINE}"
 echo
 
+# Boards that reset or leave Wi-Fi mid-upload never close their connections. uvicorn alone keeps such
+# sockets open for good (241 of them exhausted launchd's 256 open files on 2026-10-26), so the host
+# runs uvicorn with the ESP32 protocol (TCP keepalive + a timeout for the first request) and a larger
+# open-file allowance as a margin. ulimit can only go up to the hard limit, which launchd leaves open.
+ulimit -n 4096 2>/dev/null || ulimit -n "$(ulimit -H -n)" 2>/dev/null || true
+
 cd "$REPO_ROOT"
-exec "$PYTHON" -m uvicorn demo_spatial.app.main:app --host "${HOST:-0.0.0.0}" --port "$PORT" "$@"
+exec "$PYTHON" -m uvicorn demo_spatial.app.main:app --host "${HOST:-0.0.0.0}" --port "$PORT" \
+  --http demo_spatial.app.esp32_http:Esp32HttpProtocol "$@"

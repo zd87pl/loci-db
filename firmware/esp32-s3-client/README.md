@@ -178,10 +178,12 @@ The shared code checks `audio_speaker_ready()`:
 * **The card is not found after a soft reset.** A reset does not power-cycle the card, so one that
   was mid-write may not answer at first. The firmware retries the init up to four times; unplugging
   USB always clears it.
-* **The host stops accepting connections after many board resets.** Every upload cut off by a reset
-  stays open on the host, because uvicorn has no request-body timeout. Its launchd job allows only
-  256 open files. `launchctl kickstart -k gui/$(id -u)/com.loci.esp32-host` clears it; the lasting
-  fix belongs on the host.
+* **The host stops accepting connections after many board resets.** Hosts started before
+  `demo_spatial/app/esp32_http.py` existed kept every upload cut off by a reset open (uvicorn times
+  out only idle connections between requests), until the launchd job's 256 open files ran out.
+  `run_esp32_demo.sh` now starts uvicorn with that protocol (TCP keepalive, a timeout for the first
+  request) and a higher open-file limit. On an old host, restart it with
+  `launchctl kickstart -k gui/$(id -u)/com.loci.esp32-host`.
 * **Reading the whole flash back is slow.** `esptool read-flash 0 ALL` over the USB-Serial/JTAG
   port runs at about 12 kB/s, so 16 MB takes about 24 minutes. Writing is about 1.3 Mbit/s.
 * **Opening the serial port reboots the board.** Leave DTR and RTS asserted as `idf.py monitor`

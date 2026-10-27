@@ -119,12 +119,15 @@ Problems the desk test found, and what fixed them:
    makes up a unique 8.3 alias for each new name. Nothing was sent meanwhile, and the host closed
    the idle keep-alive connection. New saves go into folders of 250 and take ~0.6 s. This is shared
    code, so the P4 benefits too.
-4. **Host: dead uploads use up its file descriptors.** Each upload cut off by a board reset or a
-   dead link left a connection open on the host. uvicorn has no timeout for a request body that
-   stops arriving. After ~20 resets the host held 241 of them, hit the launchd job's 256-file limit
-   and reset every new connection, including the P4 and the Cloudflare hostname, until it was
-   restarted. A pendant that loses power mid-upload will hit this routinely, so the host needs a
-   body-read timeout and a higher limit. That is a host change, not part of this PR.
+4. **Host: dead uploads used up its file descriptors (fixed on the host).** Each upload cut off by
+   a board reset or a dead link left a connection open on the host. uvicorn times out a connection
+   only between requests, and a vanished board sends no FIN. After ~20 resets the host held 241 of
+   them, hit the launchd job's 256-file limit and reset every new connection, including the P4 and
+   the Cloudflare hostname, until it was restarted. The host now runs uvicorn with
+   `demo_spatial/app/esp32_http.py`, which adds TCP keepalive on every connection and a timeout for
+   the first request, and raises the open-file limit. Reproduced with the W11 leaving 6 dead
+   connections: plain uvicorn kept all 6 for good, while the fixed host had closed them within
+   20 s. Streaming through it was unchanged (1.90 fps, 96 ms median POST).
 
 Backlog frames captured before the board first hears from the host this boot carry only a
 monotonic stamp, so the host files them at arrival time rather than capture time. A per-boot id in
@@ -195,9 +198,9 @@ Sending the same text over a BLE characteristic is the next step.
 * **Antenna and layout.** A pendant needs an antenna that works against the body. The W11's u.FL
   connector lets us choose one; without it the link was unusable. The camera clock interfering with
   Wi-Fi and the SD card on the W11's small expansion board is the layout lesson for our own PCB.
-* **Abrupt power loss is normal for a wearable.** The host must time out uploads that stop
-  mid-body (finding 4 above), and the card must survive resets mid-write: a soft reset left the
-  card unanswering until it was retried, and the firmware now retries.
+* **Abrupt power loss is normal for a wearable.** The host must drop connections from a board
+  that vanished (finding 4, now done with TCP keepalive). The card must survive resets mid-write: a
+  soft reset left it not answering until the init was retried, and the firmware now retries.
 
 ## 6. Not verified on this board yet
 

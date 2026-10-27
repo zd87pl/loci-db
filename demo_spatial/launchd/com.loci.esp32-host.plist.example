@@ -41,6 +41,12 @@
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <!-- launchd's default soft limit is 256 open files; the run script also raises it (ulimit -n) -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>4096</integer>
+  </dict>
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>StandardOutPath</key>

@@ -303,6 +303,22 @@ storage; its live image is polled as single JPEGs so the request can carry the h
 | `LOCI_ESP32_DEPTH` | `none` | `mono` enables a plugged-in monocular depth estimator (low confidence) |
 | `LOCI_ESP32_WB` | `none` (`gray` in the run script) | Gray-world white balance before detection; fixes the P4 camera's blue cast |
 | `LOCI_ESP32_IMGSZ` | 640 | YOLO inference size; 960 for 1280×960 frames |
+| `LOCI_HTTP_KEEPIDLE` / `LOCI_HTTP_KEEPINTVL` / `LOCI_HTTP_KEEPCNT` | 20 / 5 / 3 | TCP keepalive on every board connection: probe after 20 s of silence, every 5 s, drop after 3 unanswered probes |
+
+**Boards that vanish mid-upload.** `run_esp32_demo.sh` starts uvicorn with
+`--http demo_spatial.app.esp32_http:Esp32HttpProtocol` and raises the open-file limit with `ulimit -n`.
+uvicorn by itself only times out a connection between requests. A board that resets or drops off
+Wi-Fi during an upload sends no FIN, so its half-received request stayed open forever. On
+2026-10-26 241 of them used up the launchd job's 256 open files, and the host refused every new
+connection until it was restarted. The protocol turns on TCP keepalive (a rebooted board answers
+the first probe with a reset, and a vanished one is dropped after ~35 s) and gives a connection
+`--timeout-keep-alive` seconds to send its first request. A cut-off upload is logged as one line
+(`… upload … cut off`).
+
+Measured with the W11 leaving 6 dead connections (3 mid-body, 3 without a request) and rebooting:
+plain uvicorn kept all 6 for good, while the ESP32 protocol had closed every one within 20 s. Normal
+streaming through it was unchanged (1.90 fps, 96 ms median POST). The launchd example also sets
+`SoftResourceLimits` → `NumberOfFiles` 4096.
 
 Voice uses the existing `WHISPER_LOCAL`, `WHISPER_LOCAL_MODEL`, `TTS_ENGINE`, `PIPER_MODEL_PATH`,
 `EDGE_TTS_VOICE`.

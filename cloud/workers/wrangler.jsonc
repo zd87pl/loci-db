@@ -12,7 +12,7 @@
       "binding": "DB",
       "database_name": "loci-control",
       // Replace with the id printed by `wrangler d1 create loci-control` before the first deploy.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "646af731-91fc-4483-82f7-ac8a850c756d",
       "migrations_dir": "migrations"
     }
   ],

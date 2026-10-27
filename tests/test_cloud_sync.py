@@ -34,6 +34,7 @@ class FakeCloud:
         self.tokens_issued = 0
         self.valid_tokens: set[str] = {"loci_sk_secret"}
         self.fail_next = 0
+        self.user_agents: set[str] = set()
 
     def handle(
         self, method: str, path: str, auth: str | None, body: dict | None
@@ -90,6 +91,7 @@ def cloud():
         def _go(self, method: str) -> None:
             n = int(self.headers.get("content-length") or 0)
             body = json.loads(self.rfile.read(n)) if n else None
+            fake.user_agents.add(self.headers.get("user-agent") or "")
             status, payload = fake.handle(
                 method, self.path, self.headers.get("authorization"), body
             )
@@ -254,3 +256,9 @@ def test_config_from_env() -> None:
     assert cfg is not None and cfg.interval_s == 2.0
     with pytest.raises(ValueError):
         CloudConfig.from_env({**env, "LOCI_CLOUD_URL": "file:///etc/passwd", "LOCI_CLOUD_KEY": "k"})
+
+
+def test_requests_send_an_explicit_user_agent(cloud) -> None:
+    # Cloudflare's edge rejects the default "Python-urllib/x.y" agent with error 1010.
+    LociCloudClient(secret_cfg(cloud.url)).digest()
+    assert cloud.user_agents and all(ua.startswith("loci-cloud-sync/") for ua in cloud.user_agents)

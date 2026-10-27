@@ -23,6 +23,8 @@ def call(
     target = url.rstrip("/") + path  # scheme checked in main()
     req = urllib.request.Request(target, data=data, method=method)  # noqa: S310
     req.add_header("content-type", "application/json")
+    # Cloudflare blocks the default Python-urllib user agent (error 1010).
+    req.add_header("user-agent", "loci-cloud-bootstrap/0.1")
     if token:
         req.add_header("authorization", f"Bearer {token}")
     try:

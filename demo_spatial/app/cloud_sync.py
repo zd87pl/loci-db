@@ -34,6 +34,8 @@ from typing import Any, Protocol
 logger = logging.getLogger(__name__)
 
 MAX_BATCH = 50
+# Cloudflare blocks the default "Python-urllib" user agent (error 1010), so always send our own.
+USER_AGENT = "loci-cloud-sync/0.1 (+https://github.com/zd87pl/loci-db)"
 MAX_DELETES = 200
 _FRAMES = {"room", "camera", "image", "map", "geo"}
 
@@ -103,6 +105,7 @@ class LociCloudClient:
         url = f"{self.project_url}/{path}"  # scheme checked in CloudConfig.from_env
         req = urllib.request.Request(url, data=data, method=method)  # noqa: S310
         req.add_header("accept", "application/json")
+        req.add_header("user-agent", USER_AGENT)
         if data is not None:
             req.add_header("content-type", "application/json")
         if token:

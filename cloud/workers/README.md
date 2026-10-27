@@ -50,6 +50,12 @@ Then start the demo host (`demo_spatial`) with the `LOCI_CLOUD_*` lines from `.c
 
 `DEV_ALLOW_UNPINNED=1` exists only because the local runtime does not implement Durable Object jurisdictions; without it an EU project fails closed. Never set it in production.
 
+## Production (Phase 0)
+
+Deployed 2026-10-27 to `https://loci-cloud.zd-66b.workers.dev` (D1 `loci-control`, id in `wrangler.jsonc`). The admin token lives outside the repo in `~/.loci/cloud-admin-token` on the operator's machine; project credentials from `bootstrap.py` go to `~/.loci/cloud.env` (mode 600).
+
+Clients must send their own `User-Agent`: Cloudflare's edge rejects the default `Python-urllib/x.y` agent with error 1010 (`cloud_sync.py` and `bootstrap.py` do).
+
 ## Deploy (needs a Cloudflare account)
 
 ```bash

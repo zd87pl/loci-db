@@ -471,7 +471,9 @@ esp_err_t host_post_voice(const uint8_t *pcm, size_t len) {
   // speak=0 on a board without a speaker: the host then skips TTS (an edge-tts round trip)
   snprintf(url, sizeof(url), "%s/api/esp32/voice?device=%s&rate=%d&speak=%d", s_base, s_device, LOCI_AUDIO_RATE,
            audio_speaker_ready() ? 1 : 0);
-  esp_http_client_handle_t c = client_new(url, HTTP_METHOD_POST, 45000);
+  // 15 s covers upload, Whisper and the host's TTS (edge-tts gives up at 10 s); after that the
+  // board answers by itself rather than leaving the user in silence for 45 s
+  esp_http_client_handle_t c = client_new(url, HTTP_METHOD_POST, 15000);
   if (!c) return ESP_ERR_NO_MEM;
   esp_http_client_set_header(c, "Content-Type", "audio/L16; rate=16000");
   esp_http_client_set_header(c, "X-Device-Id", s_device);

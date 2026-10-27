@@ -116,7 +116,8 @@ static void record_and_ask(void) {
   vTaskDelay(pdMS_TO_TICKS(30));  // debounce
   if (!button_down() || !audio_mic_ready() || !s_ptt_buf) return;
   ESP_LOGI(TAG, "[ptt] recording... release the button to ask");
-  audio_flush_mic();
+  // No flush: the I2S DMA ring (~300 ms, see the boards' audio.c) still holds what was said while
+  // the loop was busy with a frame upload, and that is the start of the question ("where ...").
   const size_t chunk = LOCI_AUDIO_RATE / 50;  // 20 ms
   size_t samples = 0;
   int64_t t0 = esp_timer_get_time();
@@ -133,13 +134,15 @@ static void record_and_ask(void) {
     return;
   }
   audio_beep(880.0f, 60);  // "got it"
-  local_voice_save(s_ptt_buf, samples, host_now_ms());
   if (!wifi_link_connected() || !host_reachable()) {
     ESP_LOGW(TAG, "[ptt] host unreachable: recognising on the board, answering from the card");
     answer_offline_clip(s_ptt_buf, samples);
-    return;
+  } else if (host_post_voice((const uint8_t *)s_ptt_buf, samples * sizeof(int16_t)) != ESP_OK) {
+    // a failed upload used to mean silence; the board's own recogniser answers instead
+    ESP_LOGW(TAG, "[ptt] the host did not answer: recognising on the board, answering from the card");
+    answer_offline_clip(s_ptt_buf, samples);
   }
-  host_post_voice((const uint8_t *)s_ptt_buf, samples * sizeof(int16_t));
+  local_voice_save(s_ptt_buf, samples, host_now_ms());  // after the answer: off the critical path
 }
 
 // ---- frames --------------------------------------------------------------------------------

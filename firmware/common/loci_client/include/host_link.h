@@ -35,8 +35,11 @@ esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int6
 // True for the statuses with which the host refuses one frame (not a JPEG, too large): retrying that
 // frame cannot help, and the link itself is fine.
 bool host_status_rejects_frame(int status);
-// Unix time in ms derived from the host's replies (0 until the first reply).
+// Unix time in ms: from the host's replies, else the system clock when it survived a soft reset,
+// else 0 (power-on and no host reply yet).
 int64_t host_now_ms(void);
+// Where host_now_ms() comes from: "host", "kept across reset" or "unknown".
+const char *host_clock_source(void);
 // The raw body of the last frame reply (for the dataset side-car files).
 const char *host_last_reply(void);
 // Device id given to host_link_init (the one the host knows this board by).

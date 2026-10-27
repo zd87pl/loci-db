@@ -10,6 +10,7 @@
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -75,6 +76,8 @@ static void print_status(void) {
            (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 #endif
+  ESP_LOGI(TAG, "boot %lu | clock %s, now %lld", (unsigned long)local_boot_id(), host_clock_source(),
+           (long long)host_now_ms());
   if (si.mounted) {
     ESP_LOGI(TAG, "card: %.1f GB free, backlog %d frames, dataset %d frames | labels: %s", si.free_bytes / 1e9,
              local_backlog_count(), local_dataset_count(), s_last_labels[0] ? s_last_labels : "-");
@@ -272,6 +275,10 @@ static void run_console_command(const char *line) {
     }
   } else if (!strcmp(line, "objects")) {
     local_memory_print();
+  } else if (!strcmp(line, "reboot")) {  // soft reset (the clock survives it, a power cut does not)
+    ESP_LOGW(TAG, "rebooting");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
   } else if (!strcmp(line, "requeue")) {  // quarantined backlog frames go back in the upload queue
     ESP_LOGI(TAG, "[backlog] %d quarantined frames requeued, %d in the queue", local_backlog_requeue(),
              local_backlog_count());
@@ -346,7 +353,7 @@ static void run_console_command(const char *line) {
   } else if (s_cfg->console_extra && s_cfg->console_extra(line)) {
     // handled by the board
   } else {
-    ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | requeue | offline | recog | snap | beep | audio "
+    ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | requeue | reboot | offline | recog | snap | beep | audio "
                   "| ask <question> | say <text> | fps <n> | vol <0-100> | host <url>|default | token <value>|clear%s%s",
              s_cfg->console_extra_help ? " | " : "", s_cfg->console_extra_help ? s_cfg->console_extra_help : "");
   }

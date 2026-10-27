@@ -6,7 +6,7 @@
 
 // What the microSD card is used for (everything is a no-op when the card is not mounted):
 //
-//   /sdcard/loci/backlog/<captured_ms>.jpg   frames captured while the host (or Wi-Fi) was unreachable;
+//   /sdcard/loci/backlog/<ms>_<boot>_<seq>.jpg   frames captured while the host (or Wi-Fi) was unreachable;
 //                                            uploaded oldest-first with X-Backlog/X-Captured-Ms once it is back
 //   /sdcard/loci/backlog_bad/                backlog files the host refused or that are not JPEGs, kept
 //                                            for a look instead of being retried forever
@@ -16,12 +16,14 @@
 //   /sdcard/loci/dataset/<NNNN>/<ms>.jpg + .json   every Nth live frame with the host's detections, 250 per
 //                                            folder: a dataset for training a detector on the user's own
 //                                            objects (builds before 0.5 wrote them flat into frames/)
-//   /sdcard/loci/voice/<ms>.wav              push-to-talk recordings, for checking the microphone and STT
+//   /sdcard/loci/voice/<ms>_<boot>_<seq>.wav   push-to-talk recordings, for checking the microphone and STT
 //
 // On a board without a speaker (audio_speaker_ready() false) no speech is fetched: the per-object
 // answers are kept as text only (obj_<label>.pcm.txt) and printed instead of played.
 
 void local_memory_init(void);
+// Boot counter (NVS), part of every backlog and voice file name.
+uint32_t local_boot_id(void);
 
 // -- store-and-forward -------------------------------------------------------------------------
 bool local_backlog_push(const uint8_t *jpeg, size_t len, int64_t captured_ms);

@@ -11,6 +11,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
 
 #include "loci_config.h"
 #include "loci_hw.h"
@@ -27,6 +28,8 @@ static char s_dir_frames[64];   // legacy flat dataset folder (read and counted,
 static char s_dir_dataset[64];  // dataset/<NNNN>/, DATASET_PER_DIR frames per folder
 static char s_dir_voice[64];
 static int s_backlog_count = -1;  // -1 = not scanned yet
+static uint32_t s_boot;      // boot counter kept in NVS ("loci"/"boot")
+static uint32_t s_file_seq;  // files named this boot
 static int s_dataset_count;  // legacy + sharded
 static int s_dataset_new;    // frames in dataset/<NNNN>/ (decides the next folder)
 static uint32_t s_live_frames;
@@ -73,14 +76,38 @@ static bool enough_space(void) {
   return ok;
 }
 
+// Backlog and voice files are named <ms>_<boot>_<seq>: before the clock is known <ms> is the
+// time since boot, which starts again at 0 after every reset, and a plain <ms>.jpg written with
+// "wb" overwrote an unsent frame from an earlier boot. Readers parse the leading <ms> only.
+static void unique_name(char *out, size_t cap, const char *dir, int64_t ms, const char *ext) {
+  snprintf(out, cap, "%s/%lld_%lu_%lu.%s", dir, (long long)ms, (unsigned long)s_boot,
+           (unsigned long)++s_file_seq, ext);
+}
+
+static void count_boot(void) {
+  static bool counted;
+  if (counted) return;
+  counted = true;
+  nvs_handle_t h;
+  if (nvs_open("loci", NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_get_u32(h, "boot", &s_boot);
+  s_boot++;
+  nvs_set_u32(h, "boot", s_boot);
+  nvs_commit(h);
+  nvs_close(h);
+}
+
+uint32_t local_boot_id(void) { return s_boot; }
+
 static int64_t stamp(int64_t ms) {
-  // Unix ms when the host clock is known, else monotonic ms (sorts first, host uses arrival time)
+  // Unix ms when the clock is known, else monotonic ms (sorts first, host uses arrival time)
   if (ms > 0) return ms;
   int64_t now = host_now_ms();
   return now > 0 ? now : esp_timer_get_time() / 1000;
 }
 
 void local_memory_init(void) {
+  count_boot();
   if (!storage_ready()) return;
   storage_dir(BACKLOG_DIR, s_dir_backlog, sizeof(s_dir_backlog));
   storage_dir(BACKLOG_BAD_DIR, s_dir_backlog_bad, sizeof(s_dir_backlog_bad));
@@ -116,8 +143,8 @@ void local_memory_init(void) {
 
 bool local_backlog_push(const uint8_t *jpeg, size_t len, int64_t captured_ms) {
   if (!storage_ready() || s_backlog_count >= LOCI_BACKLOG_MAX_FILES || !enough_space()) return false;
-  char path[96];
-  snprintf(path, sizeof(path), "%s/%lld.jpg", s_dir_backlog, (long long)stamp(captured_ms));
+  char path[112];
+  unique_name(path, sizeof(path), s_dir_backlog, stamp(captured_ms), "jpg");
   if (storage_write_file(path, jpeg, len) != (int)len) return false;
   s_backlog_count++;
   if ((s_backlog_count % 20) == 1) ESP_LOGI(TAG, "backlog: %d frames on the card", s_backlog_count);
@@ -237,8 +264,8 @@ int local_dataset_count(void) { return s_dataset_count; }
 
 void local_voice_save(const int16_t *pcm, size_t samples, int64_t ms) {
   if (!storage_ready() || !enough_space()) return;
-  char path[96];
-  snprintf(path, sizeof(path), "%s/%lld.wav", s_dir_voice, (long long)stamp(ms));
+  char path[112];
+  unique_name(path, sizeof(path), s_dir_voice, stamp(ms), "wav");
   FILE *f = fopen(path, "wb");
   if (!f) return;
   uint32_t data_bytes = samples * 2, rate = LOCI_AUDIO_RATE, byte_rate = rate * 2, chunk = 36 + data_bytes, fmt_len = 16;

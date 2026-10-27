@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "esp_check.h"
@@ -39,8 +40,27 @@ static int64_t json_int64(const char *body, const char *key) {
   return atoll(p + strlen(needle));
 }
 
+// The host's time is copied into the system clock (settimeofday) on the first reply of a boot.
+// The system clock survives a panic, a watchdog reset or esp_restart() (IDF keeps the boot time
+// in RTC registers), so after a soft reset frames recorded before the host answers still get
+// their real time. A power cut loses it.
+#define UNIX_MS_MIN 1700000000000LL  // Nov 2023: an earlier system clock was never set
+
+static int64_t system_unix_ms(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  int64_t ms = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+  return ms > UNIX_MS_MIN ? ms : 0;
+}
+
 int64_t host_now_ms(void) {
-  return s_clock_synced ? esp_timer_get_time() / 1000 + s_clock_offset_ms : 0;
+  if (s_clock_synced) return esp_timer_get_time() / 1000 + s_clock_offset_ms;
+  return system_unix_ms();
+}
+
+const char *host_clock_source(void) {
+  if (s_clock_synced) return "host";
+  return system_unix_ms() > 0 ? "kept across reset" : "unknown";
 }
 const char *host_last_reply(void) { return s_resp ? s_resp : ""; }
 const char *host_device_id(void) { return s_device; }
@@ -323,8 +343,13 @@ esp_err_t host_post_frame_ex(const uint8_t *jpeg, size_t len, uint32_t seq, int6
   json_array(s_resp, "labels", out->labels, sizeof(out->labels));
   json_string(s_resp, "memory_rev", out->memory_rev, sizeof(out->memory_rev));
   int64_t now = json_int64(s_resp, "now_ms");
-  if (now > 1000000000000LL) {
+  if (now > UNIX_MS_MIN) {
     s_clock_offset_ms = now - esp_timer_get_time() / 1000;
+    int64_t sys = system_unix_ms();
+    if (!s_clock_synced || sys == 0 || llabs(sys - now) > 1000) {
+      struct timeval tv = {.tv_sec = (time_t)(now / 1000), .tv_usec = (suseconds_t)((now % 1000) * 1000)};
+      settimeofday(&tv, NULL);
+    }
     s_clock_synced = true;
   }
   return ESP_OK;

@@ -70,9 +70,9 @@ class FakeModel:
         self.inputs: list[object] = []
         self.kwargs: list[dict] = []
 
-    def transcribe(self, audio, language="en", beam_size=1):
+    def transcribe(self, audio, language="en", beam_size=1, **opts):
         self.inputs.append(audio)
-        self.kwargs.append({"language": language, "beam_size": beam_size})
+        self.kwargs.append({"language": language, "beam_size": beam_size, **opts})
         seg = types.SimpleNamespace(text=" where is my mug ")
         return iter([seg]), None
 
@@ -87,7 +87,8 @@ def test_local_transcription_passes_samples_for_wav_and_bytesio_otherwise(
     stt._local_model = model  # the lazy loader is bypassed: no faster-whisper needed
     assert asyncio.run(stt.transcribe(_wav())) == "where is my mug"
     assert isinstance(model.inputs[0], np.ndarray) and model.inputs[0].dtype == np.float32
-    assert model.kwargs[0] == {"language": "en", "beam_size": 1}
+    assert model.kwargs[0]["language"] == "en" and model.kwargs[0]["beam_size"] == 1
+    assert model.kwargs[0]["vad_filter"] is True and "initial_prompt" in model.kwargs[0]
     monkeypatch.setattr(vp, "ensure_pyav_compat", lambda: False)
     assert asyncio.run(stt.transcribe(WEBM, language="de")) == "where is my mug"
     assert isinstance(model.inputs[1], io.BytesIO) and model.kwargs[1]["language"] == "de"

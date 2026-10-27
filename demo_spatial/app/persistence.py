@@ -14,6 +14,10 @@ Files (all inside ``data_dir``)
 ``memory.journal.jsonl``      ``{"op":"upsert","rec":{...}}`` / ``{"op":"delete","id":"..."}``
                               lines appended since the last snapshot, fsync'd at most once per
                               ``journal_fsync_s``
+``*.corrupt-<ts>.json``        an unparsable snapshot or ``.bak``, moved aside by ``load()``
+``*.failed-<ts>.*``            snapshot, ``.bak`` and journal of a restore that could not insert
+                              them, moved aside by ``set_aside()`` so the empty session that
+                              follows cannot overwrite them; never loaded automatically
 
 Threading
 ---------
@@ -381,6 +385,31 @@ class MemoryPersistence:
             logger.error("corrupt %s %s (%s); quarantined as %s", label, path, exc, target.name)
         except OSError as ren_exc:  # pragma: no cover - permissions
             logger.error("corrupt %s %s (%s); could not quarantine: %s", label, path, exc, ren_exc)
+
+    def set_aside(self, reason: str) -> list[str]:
+        """Rename the snapshot, its ``.bak`` and the journal to ``*.failed-<ts>.*``.
+
+        For a restore that read the files but could not insert them: the session then starts
+        empty, its first snapshot would push the good one to ``.bak`` and truncate the
+        journal, and the next periodic snapshot would overwrite the ``.bak`` as well, so the
+        memory (and through the mirror sync the cloud copy) was gone within about 40 s.
+        Returns the new file names, which nothing loads automatically.
+        """
+        stamp = int(time.time() * 1000)
+        moved: list[str] = []
+        for path in (self.snapshot_path, self.bak_path, self.journal_path):
+            if not path.exists():
+                continue
+            target = path.with_name(f"{path.stem}.failed-{stamp}{path.suffix}")
+            try:
+                os.replace(path, target)
+                moved.append(target.name)
+            except OSError as exc:  # pragma: no cover - permissions
+                self._errors += 1
+                logger.error("could not set %s aside after a failed restore: %s", path.name, exc)
+        if moved:
+            logger.error("restore failed (%s); kept %s for recovery", reason, ", ".join(moved))
+        return moved
 
     def _apply_journal(self, by_id: dict[str, ObservationRecord]) -> tuple[int, int]:
         if not self.journal_path.exists():

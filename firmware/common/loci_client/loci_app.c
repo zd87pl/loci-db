@@ -10,8 +10,10 @@
 #include "driver/gpio.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
@@ -38,6 +40,12 @@ static uint32_t s_interval_ms = 1000 / LOCI_FPS;
 static uint32_t s_seq, s_sent, s_failed, s_backlog_sent;
 
 static char s_last_labels[96];
+// Console lines go through this queue and run in the main loop between frames, so the camera, the
+// HTTP client and its reply buffer, the SD card, the audio path and the speech engine each have one
+// user (the console task only reads lines). Before this, `ask` from the console could overwrite the
+// reply buffer a frame's dataset side-car was about to be written from.
+#define CONSOLE_LINE 200
+static QueueHandle_t s_cmd_queue;
 static int16_t *s_ptt_buf;
 static size_t s_ptt_cap_samples;
 
@@ -68,6 +76,8 @@ static void print_status(void) {
            (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 #endif
+  ESP_LOGI(TAG, "boot %lu | clock %s, now %lld", (unsigned long)local_boot_id(), host_clock_source(),
+           (long long)host_now_ms());
   if (si.mounted) {
     ESP_LOGI(TAG, "card: %.1f GB free, backlog %d frames, dataset %d frames | labels: %s", si.free_bytes / 1e9,
              local_backlog_count(), local_dataset_count(), s_last_labels[0] ? s_last_labels : "-");
@@ -106,7 +116,8 @@ static void record_and_ask(void) {
   vTaskDelay(pdMS_TO_TICKS(30));  // debounce
   if (!button_down() || !audio_mic_ready() || !s_ptt_buf) return;
   ESP_LOGI(TAG, "[ptt] recording... release the button to ask");
-  audio_flush_mic();
+  // No flush: the I2S DMA ring (~300 ms, see the boards' audio.c) still holds what was said while
+  // the loop was busy with a frame upload, and that is the start of the question ("where ...").
   const size_t chunk = LOCI_AUDIO_RATE / 50;  // 20 ms
   size_t samples = 0;
   int64_t t0 = esp_timer_get_time();
@@ -123,13 +134,15 @@ static void record_and_ask(void) {
     return;
   }
   audio_beep(880.0f, 60);  // "got it"
-  local_voice_save(s_ptt_buf, samples, host_now_ms());
   if (!wifi_link_connected() || !host_reachable()) {
     ESP_LOGW(TAG, "[ptt] host unreachable: recognising on the board, answering from the card");
     answer_offline_clip(s_ptt_buf, samples);
-    return;
+  } else if (host_post_voice((const uint8_t *)s_ptt_buf, samples * sizeof(int16_t)) != ESP_OK) {
+    // a failed upload used to mean silence; the board's own recogniser answers instead
+    ESP_LOGW(TAG, "[ptt] the host did not answer: recognising on the board, answering from the card");
+    answer_offline_clip(s_ptt_buf, samples);
   }
-  host_post_voice((const uint8_t *)s_ptt_buf, samples * sizeof(int16_t));
+  local_voice_save(s_ptt_buf, samples, host_now_ms());  // after the answer: off the critical path
 }
 
 // ---- frames --------------------------------------------------------------------------------
@@ -141,7 +154,15 @@ static void capture_to_card(void) {
   camera_release();
 }
 
+// The backlog goes up oldest-first, so a file that can never be accepted would block everything
+// behind it: it is quarantined when it is not a JPEG, when the host refuses it, or after
+// BACKLOG_MAX_TRIES uploads the host answered with an error. Failures without an answer (link
+// down) do not count against the file.
+#define BACKLOG_MAX_TRIES 5
+
 static void upload_one_backlog_frame(void) {
+  static char s_retry_path[96];
+  static int s_retry_count;
   char path[96];
   int64_t captured = 0;
   if (!local_backlog_oldest(path, sizeof(path), &captured)) return;
@@ -151,16 +172,38 @@ static void upload_one_backlog_frame(void) {
     local_backlog_remove(path);  // unreadable: drop it rather than loop on it
     return;
   }
+  if (len < 4 || buf[0] != 0xFF || buf[1] != 0xD8) {  // cut short by a reset, or damaged on the card
+    free(buf);
+    local_backlog_quarantine(path, "is not a JPEG");
+    return;
+  }
   host_frame_result_t r;
   s_seq++;
-  if (host_post_frame_ex(buf, len, s_seq, captured, true, &r) == ESP_OK) {
+  esp_err_t rc = host_post_frame_ex(buf, len, s_seq, captured, true, &r);
+  free(buf);
+  if (rc == ESP_OK) {
     local_backlog_remove(path);
     s_backlog_sent++;
     if ((s_backlog_sent % 10) == 1 || local_backlog_count() == 0)
       ESP_LOGI(TAG, "[backlog] uploaded %lu, %d left -> %s", (unsigned long)s_backlog_sent, local_backlog_count(),
                r.labels[0] ? r.labels : "-");
+    return;
   }
-  free(buf);
+  if (host_status_rejects_frame(r.http_status)) {
+    local_backlog_quarantine(path, "was refused by the host");
+    return;
+  }
+  if (r.http_status <= 0) return;  // no answer: the link, not the file
+  if (strcmp(s_retry_path, path) != 0) {
+    snprintf(s_retry_path, sizeof(s_retry_path), "%s", path);
+    s_retry_count = 0;
+  }
+  if (++s_retry_count >= BACKLOG_MAX_TRIES) {
+    char why[64];
+    snprintf(why, sizeof(why), "failed %d uploads (last HTTP %d)", s_retry_count, r.http_status);
+    local_backlog_quarantine(path, why);
+    s_retry_path[0] = 0;
+  }
 }
 
 static void live_frame(void) {
@@ -212,110 +255,134 @@ static void live_frame(void) {
 }
 
 // ---- serial console ------------------------------------------------------------------------
+// Runs in the main loop (see s_cmd_queue).
+static void run_console_command(const char *line) {
+  if (!strcmp(line, "status")) {
+    print_status();
+  } else if (!strcmp(line, "sd")) {
+    storage_info_t si = storage_info();
+    if (si.mounted) {
+      ESP_LOGI(TAG, "[sd] \"%s\" %.1f GB, %.1f GB free, %d-bit @ %d kHz, dir %s", si.name, si.capacity_bytes / 1e9,
+               si.free_bytes / 1e9, si.bus_width, si.speed_khz, STORAGE_DIR);
+    } else {
+      ESP_LOGW(TAG, "[sd] not mounted%s", si.format_needed ? " (card present but not FAT: needs formatting)" : "");
+    }
+  } else if (!strcmp(line, "sdformat yes")) {  // destructive: formats a non-FAT card as FAT32
+    if (storage_ready()) {
+      ESP_LOGW(TAG, "[sd] already mounted; nothing to format");
+    } else if (storage_init(true) == ESP_OK) {
+      local_memory_init();
+      ESP_LOGI(TAG, "[sd] formatted and mounted");
+    } else {
+      ESP_LOGE(TAG, "[sd] format failed");
+    }
+  } else if (!strcmp(line, "objects")) {
+    local_memory_print();
+  } else if (!strcmp(line, "reboot")) {  // soft reset (the clock survives it, a power cut does not)
+    ESP_LOGW(TAG, "rebooting");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_restart();
+  } else if (!strcmp(line, "requeue")) {  // quarantined backlog frames go back in the upload queue
+    ESP_LOGI(TAG, "[backlog] %d quarantined frames requeued, %d in the queue", local_backlog_requeue(),
+             local_backlog_count());
+  } else if (!strcmp(line, "cache")) {  // fetch the per-object answers the card lacks
+    local_memory_cache_object_phrases();
+    refresh_offline_commands();
+    ESP_LOGI(TAG, "[cache] done");
+  } else if (!strncmp(line, "host ", 5)) {  // runtime host URL, kept in NVS; "host default" restores secrets.h
+    const char *arg = line + 5;
+    while (*arg == ' ') arg++;
+    if (host_link_set_host(!strcmp(arg, "default") ? NULL : arg)) ESP_LOGI(TAG, "host is now %s", host_link_base());
+  } else if (!strncmp(line, "token ", 6)) {  // device token for the host, kept in NVS and never printed
+    const char *arg = line + 6;
+    while (*arg == ' ') arg++;
+    host_link_set_token(!strcmp(arg, "clear") ? NULL : arg);
+    ESP_LOGI(TAG, "device token %s", host_link_has_token() ? "stored" : "cleared");
+  } else if (!strcmp(line, "offline")) {
+    answer_offline();
+  } else if (!strcmp(line, "recog")) {  // self-test: record 4 s from the mic, recognise on the board
+    if (!audio_mic_ready() || !s_ptt_buf) {
+      ESP_LOGW(TAG, "[recog] no microphone");
+    } else {
+      ESP_LOGI(TAG, "[recog] speak now (4 s)...");
+      audio_beep(880.0f, 60);
+      audio_flush_mic();
+      size_t samples = (size_t)LOCI_AUDIO_RATE * 4;
+      if (samples > s_ptt_cap_samples) samples = s_ptt_cap_samples;
+      audio_record_pcm16(s_ptt_buf, samples);
+      int peak = 0;
+      int64_t sum = 0;
+      for (size_t i = 0; i < samples; i++) {
+        int v = s_ptt_buf[i] < 0 ? -s_ptt_buf[i] : s_ptt_buf[i];
+        sum += v;
+        if (v > peak) peak = v;
+      }
+      ESP_LOGI(TAG, "[recog] %.1f s recorded: peak %d, mean level %d (of 32767)", samples / (float)LOCI_AUDIO_RATE,
+               peak, (int)(sum / (int64_t)samples));
+      char label[32] = "";
+      int cmd = voice_local_recognize(s_ptt_buf, samples, label, sizeof(label));
+      ESP_LOGI(TAG, "[recog] result %d %s", cmd, label);
+      if (cmd >= VOICE_CMD_FIRST_OBJECT && label[0] && local_memory_play_object(label)) {
+        ESP_LOGI(TAG, "[recog] answered %s from the card", label);
+      }
+    }
+  } else if (!strcmp(line, "beep")) {
+    audio_beep(660.0f, 150);
+  } else if (!strcmp(line, "snap")) {  // capture + encode one frame without the host (self-test)
+    uint8_t *jpeg = NULL;
+    size_t len = 0;
+    uint32_t w = 0, h = 0;
+    int64_t t0 = esp_timer_get_time();
+    if (s_cfg->camera_ok && camera_capture_jpeg(&jpeg, &len, &w, &h) == ESP_OK) {
+      bool soi = len > 4 && jpeg[0] == 0xFF && jpeg[1] == 0xD8;
+      ESP_LOGI(TAG, "[snap] %lux%lu -> %u B JPEG in %lld ms (SOI %s)", (unsigned long)w, (unsigned long)h,
+               (unsigned)len, (esp_timer_get_time() - t0) / 1000, soi ? "ok" : "MISSING");
+      camera_release();
+    } else {
+      ESP_LOGW(TAG, "[snap] capture failed (camera %s)", s_cfg->camera_ok ? "ok" : "unavailable");
+    }
+  } else if (!strcmp(line, "audio")) {
+    host_fetch_and_play_audio(2);
+  } else if (!strncmp(line, "ask ", 4)) {
+    host_ask(line + 4);
+  } else if (!strncmp(line, "say ", 4)) {
+    host_say(line + 4);
+  } else if (!strncmp(line, "fps ", 4)) {
+    int fps = atoi(line + 4);
+    if (fps > 0 && fps <= 15) s_interval_ms = 1000 / fps;
+    ESP_LOGI(TAG, "interval %lu ms", (unsigned long)s_interval_ms);
+  } else if (!strncmp(line, "vol ", 4)) {
+    audio_set_volume(atoi(line + 4));
+  } else if (s_cfg->console_extra && s_cfg->console_extra(line)) {
+    // handled by the board
+  } else {
+    ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | requeue | reboot | offline | recog | snap | beep | audio "
+                  "| ask <question> | say <text> | fps <n> | vol <0-100> | host <url>|default | token <value>|clear%s%s",
+             s_cfg->console_extra_help ? " | " : "", s_cfg->console_extra_help ? s_cfg->console_extra_help : "");
+  }
+}
+
+// Run whatever the console queued; called from the main loop only.
+static void drain_console(void) {
+  char line[CONSOLE_LINE];
+  while (s_cmd_queue && xQueueReceive(s_cmd_queue, line, 0) == pdTRUE) run_console_command(line);
+}
+
 static void console_task(void *arg) {
-  char line[200];
-  while (fgets(line, sizeof(line), stdin)) {
+  char line[CONSOLE_LINE];
+  for (;;) {
+    if (!fgets(line, sizeof(line), stdin)) {
+      // USB-Serial/JTAG returns EOF while no host is attached (on battery, after an unplug); keep
+      // waiting instead of ending the task, or the console is gone until the next reboot.
+      clearerr(stdin);
+      vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
+    }
     size_t n = strlen(line);
     while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
     if (!n) continue;
-    if (!strcmp(line, "status")) {
-      print_status();
-    } else if (!strcmp(line, "sd")) {
-      storage_info_t si = storage_info();
-      if (si.mounted) {
-        ESP_LOGI(TAG, "[sd] \"%s\" %.1f GB, %.1f GB free, %d-bit @ %d kHz, dir %s", si.name, si.capacity_bytes / 1e9,
-                 si.free_bytes / 1e9, si.bus_width, si.speed_khz, STORAGE_DIR);
-      } else {
-        ESP_LOGW(TAG, "[sd] not mounted%s", si.format_needed ? " (card present but not FAT: needs formatting)" : "");
-      }
-    } else if (!strcmp(line, "sdformat yes")) {  // destructive: formats a non-FAT card as FAT32
-      if (storage_ready()) {
-        ESP_LOGW(TAG, "[sd] already mounted; nothing to format");
-      } else if (storage_init(true) == ESP_OK) {
-        local_memory_init();
-        ESP_LOGI(TAG, "[sd] formatted and mounted");
-      } else {
-        ESP_LOGE(TAG, "[sd] format failed");
-      }
-    } else if (!strcmp(line, "objects")) {
-      local_memory_print();
-    } else if (!strcmp(line, "cache")) {  // fetch the per-object answers the card lacks
-      local_memory_cache_object_phrases();
-      refresh_offline_commands();
-      ESP_LOGI(TAG, "[cache] done");
-    } else if (!strncmp(line, "host ", 5)) {  // runtime host URL, kept in NVS; "host default" restores secrets.h
-      const char *arg = line + 5;
-      while (*arg == ' ') arg++;
-      if (host_link_set_host(!strcmp(arg, "default") ? NULL : arg)) ESP_LOGI(TAG, "host is now %s", host_link_base());
-    } else if (!strncmp(line, "token ", 6)) {  // device token for the host, kept in NVS and never printed
-      const char *arg = line + 6;
-      while (*arg == ' ') arg++;
-      host_link_set_token(!strcmp(arg, "clear") ? NULL : arg);
-      ESP_LOGI(TAG, "device token %s", host_link_has_token() ? "stored" : "cleared");
-    } else if (!strcmp(line, "offline")) {
-      answer_offline();
-    } else if (!strcmp(line, "recog")) {  // self-test: record 4 s from the mic, recognise on the board
-      if (!audio_mic_ready() || !s_ptt_buf) {
-        ESP_LOGW(TAG, "[recog] no microphone");
-      } else {
-        ESP_LOGI(TAG, "[recog] speak now (4 s)...");
-        audio_beep(880.0f, 60);
-        audio_flush_mic();
-        size_t samples = (size_t)LOCI_AUDIO_RATE * 4;
-        if (samples > s_ptt_cap_samples) samples = s_ptt_cap_samples;
-        audio_record_pcm16(s_ptt_buf, samples);
-        int peak = 0;
-        int64_t sum = 0;
-        for (size_t i = 0; i < samples; i++) {
-          int v = s_ptt_buf[i] < 0 ? -s_ptt_buf[i] : s_ptt_buf[i];
-          sum += v;
-          if (v > peak) peak = v;
-        }
-        ESP_LOGI(TAG, "[recog] %.1f s recorded: peak %d, mean level %d (of 32767)", samples / (float)LOCI_AUDIO_RATE,
-                 peak, (int)(sum / (int64_t)samples));
-        char label[32] = "";
-        int cmd = voice_local_recognize(s_ptt_buf, samples, label, sizeof(label));
-        ESP_LOGI(TAG, "[recog] result %d %s", cmd, label);
-        if (cmd >= VOICE_CMD_FIRST_OBJECT && label[0] && local_memory_play_object(label)) {
-          ESP_LOGI(TAG, "[recog] answered %s from the card", label);
-        }
-      }
-    } else if (!strcmp(line, "beep")) {
-      audio_beep(660.0f, 150);
-    } else if (!strcmp(line, "snap")) {  // capture + encode one frame without the host (self-test)
-      uint8_t *jpeg = NULL;
-      size_t len = 0;
-      uint32_t w = 0, h = 0;
-      int64_t t0 = esp_timer_get_time();
-      if (s_cfg->camera_ok && camera_capture_jpeg(&jpeg, &len, &w, &h) == ESP_OK) {
-        bool soi = len > 4 && jpeg[0] == 0xFF && jpeg[1] == 0xD8;
-        ESP_LOGI(TAG, "[snap] %lux%lu -> %u B JPEG in %lld ms (SOI %s)", (unsigned long)w, (unsigned long)h,
-                 (unsigned)len, (esp_timer_get_time() - t0) / 1000, soi ? "ok" : "MISSING");
-        camera_release();
-      } else {
-        ESP_LOGW(TAG, "[snap] capture failed (camera %s)", s_cfg->camera_ok ? "ok" : "unavailable");
-      }
-    } else if (!strcmp(line, "audio")) {
-      host_fetch_and_play_audio(2);
-    } else if (!strncmp(line, "ask ", 4)) {
-      host_ask(line + 4);
-    } else if (!strncmp(line, "say ", 4)) {
-      host_say(line + 4);
-    } else if (!strncmp(line, "fps ", 4)) {
-      int fps = atoi(line + 4);
-      if (fps > 0 && fps <= 15) s_interval_ms = 1000 / fps;
-      ESP_LOGI(TAG, "interval %lu ms", (unsigned long)s_interval_ms);
-    } else if (!strncmp(line, "vol ", 4)) {
-      audio_set_volume(atoi(line + 4));
-    } else if (s_cfg->console_extra && s_cfg->console_extra(line)) {
-      // handled by the board
-    } else {
-      ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | offline | recog | snap | beep | audio "
-                    "| ask <question> | say <text> | fps <n> | vol <0-100> | host <url>|default | token <value>|clear%s%s",
-               s_cfg->console_extra_help ? " | " : "", s_cfg->console_extra_help ? s_cfg->console_extra_help : "");
-    }
+    if (xQueueSend(s_cmd_queue, line, 0) != pdTRUE) ESP_LOGW(TAG, "console busy, dropped: %s", line);
   }
-  vTaskDelete(NULL);
 }
 
 static void console_start(void) {
@@ -328,7 +395,8 @@ static void console_start(void) {
   uart_driver_install(UART_NUM_0, 512, 0, 0, NULL, 0);
   uart_vfs_dev_use_driver(UART_NUM_0);
 #endif
-  xTaskCreate(console_task, "console", 6144, NULL, 3, NULL);
+  s_cmd_queue = xQueueCreate(4, CONSOLE_LINE);
+  xTaskCreate(console_task, "console", 4096, NULL, 3, NULL);
 }
 
 // ---- main ----------------------------------------------------------------------------------
@@ -358,6 +426,7 @@ void loci_app_run(const loci_app_config_t *cfg) {
 
   int64_t last_frame_ms = 0, last_backlog_ms = 0, last_probe_ms = 0;
   for (;;) {
+    drain_console();
     int64_t now_ms = esp_timer_get_time() / 1000;
 
     if (!wifi_link_connected()) {

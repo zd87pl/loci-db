@@ -6,20 +6,24 @@
 
 // What the microSD card is used for (everything is a no-op when the card is not mounted):
 //
-//   /sdcard/loci/backlog/<captured_ms>.jpg   frames captured while the host (or Wi-Fi) was unreachable;
+//   /sdcard/loci/backlog/<ms>_<boot>_<seq>.jpg   frames captured while the host (or Wi-Fi) was unreachable;
 //                                            uploaded oldest-first with X-Backlog/X-Captured-Ms once it is back
+//   /sdcard/loci/backlog_bad/                backlog files the host refused or that are not JPEGs, kept
+//                                            for a look instead of being retried forever
 //   /sdcard/loci/memory.json, memory.pcm     the host's remembered objects and a spoken summary, refreshed
 //                                            when the host's memory revision changes; played offline on the button
 //   /sdcard/loci/offline.pcm                 fixed prompt fetched once ("I can't reach the host...")
 //   /sdcard/loci/dataset/<NNNN>/<ms>.jpg + .json   every Nth live frame with the host's detections, 250 per
 //                                            folder: a dataset for training a detector on the user's own
 //                                            objects (builds before 0.5 wrote them flat into frames/)
-//   /sdcard/loci/voice/<ms>.wav              push-to-talk recordings, for checking the microphone and STT
+//   /sdcard/loci/voice/<ms>_<boot>_<seq>.wav   push-to-talk recordings, for checking the microphone and STT
 //
 // On a board without a speaker (audio_speaker_ready() false) no speech is fetched: the per-object
 // answers are kept as text only (obj_<label>.pcm.txt) and printed instead of played.
 
 void local_memory_init(void);
+// Boot counter (NVS), part of every backlog and voice file name.
+uint32_t local_boot_id(void);
 
 // -- store-and-forward -------------------------------------------------------------------------
 bool local_backlog_push(const uint8_t *jpeg, size_t len, int64_t captured_ms);
@@ -27,6 +31,10 @@ int local_backlog_count(void);
 // Oldest backlog file; returns false when empty. `captured_ms` is parsed from the file name.
 bool local_backlog_oldest(char *path, size_t cap, int64_t *captured_ms);
 void local_backlog_remove(const char *path);
+// Move a backlog file out of the queue into backlog_bad/ (deleted when that fails); `why` is logged.
+void local_backlog_quarantine(const char *path, const char *why);
+// Move everything in backlog_bad/ back into the queue (after the host is fixed); returns how many.
+int local_backlog_requeue(void);
 // Read a whole file into a PSRAM buffer (caller frees). Returns NULL on failure.
 uint8_t *local_read_file(const char *path, size_t *len_out);
 

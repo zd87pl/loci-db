@@ -46,6 +46,9 @@ BASE_ENV: dict[str, str | None] = {
     "WHISPER_LOCAL": "0",
     "OPENAI_API_KEY": None,
     "GOOGLE_API_KEY": None,
+    "LOCI_ESP32_TOKEN": None,
+    "LOCI_ESP32_TOKENS": None,
+    "LOCI_ESP32_TOKEN_FILE": None,
 }
 
 
@@ -403,6 +406,43 @@ def test_snapshot_endpoint_and_clear_guard(sim) -> None:
     assert sim.client.get("/api/objects").json()["count"] >= 4
 
 
+def test_cloud_accept_deletes_needs_the_device_token_and_confirm(sim, monkeypatch) -> None:
+    import app.main as main_module  # the route reads the module's _cloud_sync
+
+    class StubSync:
+        def __init__(self) -> None:
+            self.calls: list[int | None] = []
+
+        def accept_deletes(self, expect: int | None = None) -> dict:
+            self.calls.append(expect)
+            if expect not in (None, 7):
+                raise ValueError(f"7 cloud deletes are held, not {expect}")
+            return {"accepted": 7}
+
+    url = "/api/cloud/deletes/accept"
+    ok = {"confirm": True, "expect": 7}
+    token = {"X-Device-Token": "s3cret"}
+    monkeypatch.setattr(main_module, "_cloud_sync", None)
+    assert sim.client.post(url, json=ok, headers=token).status_code == 404
+    stub = StubSync()
+    monkeypatch.setattr(main_module, "_cloud_sync", stub)
+    # patch the mounted Esp32Auth itself: monkeypatch cannot restore attributes on app.state
+    auth = sim.main.app.state.esp32_auth
+    monkeypatch.setattr(auth, "shared", None)
+    monkeypatch.setattr(auth, "device_tokens", {})  # no token on the host
+    assert sim.client.post(url, json=ok, headers=token).status_code == 403
+    monkeypatch.setattr(auth, "shared", "s3cret")
+    assert sim.client.post(url, json=ok).status_code == 401
+    assert sim.client.post(url, json=ok, headers={"X-Device-Token": "nope"}).status_code == 401
+    assert sim.client.post(url, json={"expect": 7}, headers=token).status_code == 400
+    assert stub.calls == []
+    r = sim.client.post(url, json={"confirm": True, "expect": 3}, headers=token)
+    assert r.status_code == 409 and "not 3" in r.json()["detail"]
+    r = sim.client.post(url, json=ok, headers=token)
+    assert r.status_code == 200 and r.json() == {"accepted": 7}
+    assert stub.calls == [3, 7]
+
+
 # ---------------------------------------------------------------------------
 # Separate boots: aged simulation ("moved") and the simulated restart
 # ---------------------------------------------------------------------------
@@ -476,6 +516,23 @@ def test_memory_survives_a_simulated_restart(tmp_path: Path) -> None:
         assert _query(client2, "where is my cup")["results"] == []
     with booted(data_dir, LOCI_DETECTION_SOURCE="none") as (_main3, client3):
         assert client3.get("/api/handheld/status").json()["restore"]["records"] == 0
+
+
+def test_memory_clear_needs_the_host_token_when_one_is_set(tmp_path: Path) -> None:
+    with booted(tmp_path / "tok", LOCI_ESP32_TOKEN="s3cret") as (_main, client):
+        before = client.get("/api/objects").json()["count"]
+        assert before > 0
+        r = client.post("/api/memory/clear", json={"confirm": True})
+        assert r.status_code == 401
+        r = client.post(
+            "/api/memory/clear", json={"confirm": True}, headers={"X-Device-Token": "wrong"}
+        )
+        assert r.status_code == 401
+        assert client.get("/api/objects").json()["count"] == before
+        r = client.post(
+            "/api/memory/clear", json={"confirm": True}, headers={"X-Device-Token": "s3cret"}
+        )
+        assert r.status_code == 200 and client.get("/api/objects").json()["count"] == 0
 
 
 def test_bad_source_configuration_keeps_the_api_up(tmp_path: Path) -> None:

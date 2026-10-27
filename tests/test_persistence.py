@@ -557,6 +557,46 @@ def test_failed_initial_snapshot_still_starts_the_writer(tmp_path) -> None:
     assert p.running is False
 
 
+def test_failed_restore_keeps_the_files_it_could_not_load(tmp_path, monkeypatch) -> None:
+    mem = _mem(tmp_path)
+    mem.restore()
+    _room_obs(mem, "cup", (1.0, 0.8, 1.0), NOW_MS)
+    _room_obs(mem, "bottle", (-0.6, 0.9, 1.2), NOW_MS + 1000)
+    mem.flush()
+    _room_obs(mem, "laptop", (-0.8, 0.7, 1.0), NOW_MS + 2000)
+    mem.close()  # final snapshot: cup, bottle, laptop
+
+    mem2 = _mem(tmp_path)
+
+    def boom(_records):
+        raise RuntimeError("index build failed")
+
+    monkeypatch.setattr(mem2, "_insert_restored", boom)
+    report = mem2.restore()
+    assert report.source == "error" and "kept memory.snapshot.failed-" in report.detail
+    _room_obs(mem2, "book", (0.0, 0.8, 1.0), NOW_MS + 3000)
+    mem2.flush()
+    mem2.flush()  # a second snapshot would have overwritten the .bak too
+    mem2.close()
+    kept = sorted(f for f in os.listdir(tmp_path) if ".failed-" in f)
+    assert {f.split(".failed-")[0] for f in kept} == {
+        "memory.journal",
+        "memory.snapshot",
+        "memory.snapshot.bak",
+    }
+
+    def labels(name):
+        with open(tmp_path / name, encoding="utf-8") as fh:
+            return sorted(r["label"] for r in json.load(fh)["records"])
+
+    assert labels(next(f for f in kept if f.startswith("memory.snapshot.failed-"))) == [
+        "bottle",
+        "cup",
+        "laptop",
+    ]
+    assert labels(SNAPSHOT_NAME) == ["book"]  # the new session's own memory
+
+
 def test_restore_failure_reports_error_and_keeps_persisting(tmp_path, monkeypatch) -> None:
     p = _persistence(tmp_path)
     mem = SpatialMemory(epoch_size_ms=5000, rooms=RoomMap.default(), persistence=p)

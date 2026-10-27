@@ -45,12 +45,21 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .cloud_sync import CloudSync, start_cloud_sync_from_env
 from .esp32_api import install_esp32_routes
 from .handheld import (
     HandheldConfig,
@@ -128,6 +137,7 @@ voice = VoicePipeline(
 _ws_subscribers: set[WebSocket] = set()
 _restore_report: Any = None
 _voice_loop: VoiceLoopHandle | None = None
+_cloud_sync: CloudSync | None = None
 _push_task: asyncio.Task | None = None
 _started_at_ms = int(time.time() * 1000)
 
@@ -242,6 +252,12 @@ async def lifespan(app: FastAPI):
         runtime.start()
     _push_task = asyncio.create_task(_live_push_loop())
     _voice_loop = _start_voice()
+    global _cloud_sync
+    try:
+        _cloud_sync = start_cloud_sync_from_env(memory, cfg.data_dir if cfg.persist else None)
+    except Exception as exc:
+        _handheld_errors["cloud_sync"] = f"{type(exc).__name__}: {exc}"
+        logger.exception("cloud sync not started: %s", exc)
     logger.info(
         "Spatial Memory Assistant starting — source: %s, rooms: %s, embedder: %s, "
         "restored: %s, VLM: %s, TTS: %s, STT: %s, voice: %s",
@@ -261,6 +277,8 @@ async def lifespan(app: FastAPI):
         _push_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await _push_task
+    if _cloud_sync is not None:
+        _cloud_sync.stop()
     if runtime is not None:
         runtime.stop()
     await ingestion.stop_capture()
@@ -375,6 +393,13 @@ class QueryRequest(BaseModel):
 
 class ConfirmRequest(BaseModel):
     confirm: bool = Field(False, description="Must be true to wipe the memory")
+
+
+class AcceptDeletesRequest(BaseModel):
+    confirm: bool = Field(False, description="Must be true to release the held cloud deletes")
+    expect: int | None = Field(
+        None, ge=0, description="Held count you checked; nothing is released if it changed"
+    )
 
 
 class CaptureStartRequest(BaseModel):
@@ -765,6 +790,45 @@ async def list_rooms():
     }
 
 
+@app.get("/api/cloud/status")
+async def cloud_status():
+    """LOCI Cloud mirror status (LOCI_CLOUD_* env); {"enabled": false} when not configured."""
+    return _cloud_sync.status() if _cloud_sync is not None else {"enabled": False}
+
+
+@app.post("/api/cloud/deletes/accept")
+async def cloud_accept_deletes(req: AcceptDeletesRequest, request: Request):
+    """Release the deletes the cloud-sync breaker holds (``deletes_held`` in the status).
+
+    The next pass then deletes those sightings from the cloud for good, so this needs
+    ``{"confirm": true}`` and the host's device token (``X-Device-Token`` or
+    ``Authorization: Bearer``); a host with no token configured refuses. Send
+    ``"expect": <deletes_held>`` to refuse if more went missing since you checked.
+    """
+    if _cloud_sync is None:
+        raise HTTPException(status_code=404, detail="cloud sync is not configured")
+    auth = getattr(request.app.state, "esp32_auth", None)
+    if auth is None or not auth.configured:
+        raise HTTPException(
+            status_code=403,
+            detail="set LOCI_ESP32_TOKEN on the host to release held cloud deletes",
+        )
+    if auth.verify(auth.token_from(request)) is None:
+        raise HTTPException(
+            status_code=401,
+            detail="send the host's device token (X-Device-Token) to release cloud deletes",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not req.confirm:
+        raise HTTPException(
+            status_code=400, detail='Send {"confirm": true} to release the held cloud deletes'
+        )
+    try:
+        return _cloud_sync.accept_deletes(expect=req.expect)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
 @app.get("/api/handheld/status")
 async def handheld_status():
     """Everything an operator needs: config, runtime/source, memory, restore, voice."""
@@ -811,10 +875,23 @@ async def handheld_snapshot():
 
 
 @app.post("/api/memory/clear")
-async def memory_clear(req: ConfirmRequest):
-    """Forget everything (points, indices, persisted files). Requires ``{"confirm": true}``."""
+async def memory_clear(req: ConfirmRequest, request: Request):
+    """Forget everything (points, indices, persisted files). Requires ``{"confirm": true}``.
+
+    When the host has a device token (``LOCI_ESP32_TOKEN*``), the request must carry it
+    (``X-Device-Token`` or ``Authorization: Bearer``): the clear deletes the snapshot, its
+    ``.bak`` and the journal, and cloud sync then deletes the cloud copy, so one stray POST
+    from anything on the LAN must not be enough.
+    """
     if not req.confirm:
         raise HTTPException(status_code=400, detail='Send {"confirm": true} to clear the memory')
+    auth = getattr(request.app.state, "esp32_auth", None)
+    if auth is not None and auth.configured and auth.verify(auth.token_from(request)) is None:
+        raise HTTPException(
+            status_code=401,
+            detail="send the host's device token (X-Device-Token) to clear the memory",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     await asyncio.get_running_loop().run_in_executor(None, memory.clear)
     return {"status": "cleared", "observation_count": memory.observation_count}
 

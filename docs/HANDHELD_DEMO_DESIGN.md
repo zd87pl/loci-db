@@ -663,7 +663,7 @@ REST additions (existing responses unchanged except where noted as additive):
 | `GET /api/objects/changes/recent` | unchanged | unchanged |
 | `GET /api/handheld/status` | — | `{"config": {...non-secret cfg...}, "runtime": runtime.status()|null, "memory": memory.stats(), "restore": RestoreReport.to_dict()|null, "started_at_ms": int}` |
 | `POST /api/handheld/snapshot` | — | `{"status": "ok", "persistence": persistence.status()}` (calls `memory.flush()`) |
-| `POST /api/memory/clear` | `{"confirm": true}` | `{"status": "cleared"}` (400 without confirm) |
+| `POST /api/memory/clear` | `{"confirm": true}` | `{"status": "cleared"}` (400 without confirm; 401 without `X-Device-Token` when the host has a device token) |
 
 WebSocket `/ws` messages (JSON): existing `{"type":"snapshot","objects":[...],"observation_count":N,"stats":{...}}` every 5 s (+ `"rooms_seen": [...]`, `"anchor": CameraPose.to_dict()|null`); existing `{"type":"detections","detections":[Detection.to_dict()...],"frame_count":N,"observation_count":N}` for browser frames; new pushes from `_live_push_loop` at ≤ `LOCI_WS_PUSH_HZ`: `{"type":"detections","source":"oak"|"sim","timestamp_ms":int,"seq":int,"detections":[{...Detection.to_dict(), "distance_m": float|null}],"frame_count":N,"observation_count":N,"anchor": CameraPose.to_dict()}` when `runtime.seq` changed, and `{"type":"anchor", **CameraPose.to_dict(), "source_state": str}` once per second.
 

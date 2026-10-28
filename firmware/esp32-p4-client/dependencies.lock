@@ -6,7 +6,7 @@ dependencies:
       require: private
       version: '>=5.0'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.7.19~2
   espressif/cmake_utilities:
@@ -19,6 +19,17 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.5.3
+  espressif/coco_detect:
+    component_hash: fbe4cb79573f8f00a383e135f4bbeb4a8c67b391492a538f39eef557b298fb44
+    dependencies:
+    - name: espressif/esp-dl
+      registry_url: https://components.espressif.com
+      require: private
+      version: ~3.3.14
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.4.2
   espressif/dl_fft:
     component_hash: 965be7152132b365061abf5fc5fc7b85e525f73b94a204cdda61cfe9572c0d77
     dependencies:
@@ -178,7 +189,7 @@ dependencies:
     component_hash: e1e7e6991193c41ed6c9fc386702aa7821433319e7aa9c3147cd3236310cd69c
     dependencies: []
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     targets:
     - esp32
@@ -336,12 +347,15 @@ dependencies:
       type: idf
     version: 6.1.0
 direct_dependencies:
+- espressif/cjson
+- espressif/coco_detect
 - espressif/esp-sr
 - espressif/esp_codec_dev
 - espressif/esp_hosted
+- espressif/esp_new_jpeg
 - espressif/esp_video
 - espressif/esp_wifi_remote
 - idf
-manifest_hash: f43bc60c7c430b83eca0fe3846d30134fc8272983eaa345eafe990f80c4cffea
+manifest_hash: 5181e0b5deebe869817905c86618eb2b025372cc2a382c30d92291a7080fe936
 target: esp32p4
 version: 3.0.0

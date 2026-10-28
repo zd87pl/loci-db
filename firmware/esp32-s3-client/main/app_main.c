@@ -267,6 +267,7 @@ void app_main(void) {
       .host_url = LOCI_HOST,
       .device_id = LOCI_DEVICE_ID,
       .device_token = LOCI_DEVICE_TOKEN,
+      .detect = detect_local_boxes,  // cloud mode: the board's own sightings
       .console_extra = console_extra,
       .console_extra_help =
           "detect [n] | detect sd [n] | imu | mic | af [now] | quality <4-63> | res <qvga|vga|svga|xga|hd|sxga|uxga>",

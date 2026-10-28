@@ -77,16 +77,23 @@ export function age(nowMs: number, t: number): string {
   return `${d} day${d === 1 ? "" : "s"} ago`;
 }
 
-/** Where-phrase without time, safe to cache on a device. */
-export function wherePhrase(o: { room: string | null; frame: string; x: number; y: number; z: number }): string {
+/**
+ * Where-phrase without time, safe to cache on a device. Camera-view sightings name the room the
+ * writer was in when it knows it (`metadata.last_room`, sent by the demo host's mirror).
+ */
+export function wherePhrase(o: {
+  room: string | null; frame: string; x: number; y: number; z: number; metadata?: Record<string, unknown> | null;
+}): string {
   if (o.room) return `in the ${roomName(o.room)}`;
+  const last = o.metadata?.last_room;
+  const inRoom = typeof last === "string" && last.trim() ? `, in the ${roomName(last.trim())}` : "";
   if (o.frame === "camera") {
     const side = o.x < -0.3 ? "to the left" : o.x > 0.3 ? "to the right" : "straight ahead";
-    return `about ${o.z.toFixed(1)} metres ${side} of where the camera was`;
+    return `about ${o.z.toFixed(1)} metres ${side} of where the camera was${inRoom}`;
   }
   if (o.frame === "image") {
     const side = o.x < 0.33 ? "on the left" : o.x > 0.67 ? "on the right" : "in the middle";
-    return `${side} of the camera view`;
+    return `${side} of the camera view${inRoom}`;
   }
   return `at ${o.x.toFixed(1)}, ${o.y.toFixed(1)}, ${o.z.toFixed(1)}`;
 }
@@ -95,8 +102,8 @@ export function whereAnswer(spoken: string, label: string, obs: Observation[], n
   const latest = obs[0];
   if (!latest) return `I haven't seen your ${spoken} yet.`;
   const named = spoken === label || singular(spoken) === label ? label : `${spoken} (I track it as a ${label})`;
-  const hedge = latest.confidence < 0.6 ? "I think " : "";
-  let text = `${hedge}Your ${named} was last seen ${wherePhrase(latest)}, ${age(nowMs, latest.t)}.`;
+  const lead = latest.confidence < 0.6 ? "I think your" : "Your";
+  let text = `${lead} ${named} was last seen ${wherePhrase(latest)}, ${age(nowMs, latest.t)}.`;
   const earlierRoom = obs.find((o) => o.room && o.room !== latest.room);
   if (earlierRoom) text += ` Before that it was in the ${roomName(earlierRoom.room)}, ${age(nowMs, earlierRoom.t)}.`;
   return text;

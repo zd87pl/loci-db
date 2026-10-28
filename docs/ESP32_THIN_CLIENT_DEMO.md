@@ -9,6 +9,8 @@ the board's microphone) and hear the answer from the board's speaker.
 
 This is the first step of the IDD-64 form-factor plan: a thin wearable client whose compute lives
 on a host. The same firmware works against a laptop, a Pi or a cloud URL; only `LOCI_HOST` changes.
+This describes `mode host`. In `mode cloud` the boards need no host at all: they detect on the
+board and use LOCI Cloud directly (`docs/ESP32_CLOUD_MODE.md`).
 
 Status legend: ✅ done · 🔧 in progress · ⬜ planned
 

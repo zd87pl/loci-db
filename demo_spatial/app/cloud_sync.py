@@ -4,7 +4,9 @@ The ESP32 host, the handheld runtime and the browser demo all write into one
 ``SpatialMemory``; this module diffs ``memory.export_records()`` against what it has
 already pushed and sends new observations and deletions to
 ``POST /p/<ref>/v1/spaces/<space>/observations`` in batches of 50. Writes carry the
-host record id, so retries and restarts never duplicate data.
+sighting's stable id (``metadata.sighting_id``, kept by ``SpatialMemory`` through merges and
+restores), so retries, merges and restarts never duplicate data; a sighting whose content
+changed (a merge moved it or refreshed its time) is re-sent as an upsert.
 
 Deletes go through a breaker. The cloud hard-deletes what it is told to, so a local memory
 that comes up empty or much smaller (a failed restore, a cleared memory, the wrong data dir)
@@ -32,6 +34,7 @@ Environment (all optional; sync is off unless URL, project and space are set):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -53,6 +56,9 @@ MAX_DELETES = 200
 # Below this many deletes the share rule does not apply, so merges in a small space never
 # trip the breaker (an empty local memory still does).
 BREAKER_MIN_DELETES = 10
+# A cloud that does not answer upserts with "updated" (a Worker older than the upsert
+# support) ignores them; changed sightings then wait this long before the next try.
+UPSERT_RETRY_S = 3600.0
 _FRAMES = {"room", "camera", "image", "map", "geo"}
 
 
@@ -167,10 +173,14 @@ class LociCloudClient:
                 return self._request(method, path, body, self._bearer())
             raise
 
-    def write(self, observations: list[dict], deletes: list[str] | None = None) -> dict:
+    def write(
+        self, observations: list[dict], deletes: list[str] | None = None, *, upsert: bool = False
+    ) -> dict:
         body: dict[str, Any] = {"observations": observations}
         if deletes:
             body["deletes"] = deletes
+        if upsert:
+            body["upsert"] = True
         return self._authed("POST", f"spaces/{self.cfg.space}/observations", body)
 
     def digest(self, since_rev: int = 0) -> dict:
@@ -207,10 +217,10 @@ def record_to_observation(rec: Mapping[str, Any]) -> dict | None:
         frame = "image"
         pos = (float(rec.get("x", 0.0)), float(rec.get("y", 0.0)), float(rec.get("z", 0.0)))
     label = str(rec.get("label") or "").strip()
-    rid = str(rec.get("id") or "")
+    rid = str(meta.get("sighting_id") or rec.get("id") or "")
     if not label or not rid:
         return None
-    kept_keys = ("anchored", "anchor_confidence", "merge_count", "source", "scene_id")
+    kept_keys = ("anchored", "anchor_confidence", "merge_count", "source", "scene_id", "last_room")
     keep = {k: meta[k] for k in kept_keys if k in meta}
     keep.setdefault("scene_id", rec.get("scene_id"))
     obs: dict[str, Any] = {
@@ -227,6 +237,11 @@ def record_to_observation(rec: Mapping[str, Any]) -> dict | None:
     if rec.get("room"):
         obs["room"] = str(rec["room"])[:64]
     return obs
+
+
+def _fingerprint(obs: Mapping[str, Any]) -> str:
+    """Content hash of one observation: a change means the cloud copy is out of date."""
+    return hashlib.sha1(json.dumps(obs, sort_keys=True).encode()).hexdigest()[:16]  # noqa: S324
 
 
 class _Memory(Protocol):
@@ -249,14 +264,19 @@ class CloudSync:
         self.client = client
         self.interval_s = interval_s if interval_s is not None else client.cfg.interval_s
         self.state_path = state_path
-        self._pushed: set[str] = set()
+        # cloud id -> fingerprint of what the cloud holds (None: from a state file written
+        # before fingerprints existed; adopted from the memory on the next pass)
+        self._pushed: dict[str, str | None] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.last_ok_ms: int | None = None
         self.last_error: str | None = None
         self.last_rev: int | None = None
         self.pushed_total = 0
+        self.updated_total = 0
         self.deleted_total = 0
+        self._upsert_retry_at = 0.0  # time.monotonic() before which changed sightings wait
+        self._upsert_problem: str | None = None
         # Delete breaker: open while breaker_reason is set; _held are the gone ids it keeps
         # back, _accepted the ones a human released for the next pass.
         self.breaker_reason: str | None = None
@@ -276,8 +296,12 @@ class CloudSync:
         try:
             data = json.loads(self.state_path.read_text())
             if data.get("key") == self._state_key():
-                self._pushed = set(map(str, data.get("pushed", [])))
-                self._accepted = set(map(str, data.get("accepted", []))) & self._pushed
+                pushed = data.get("pushed") or {}
+                if isinstance(pushed, list):  # before fingerprints: ids only
+                    self._pushed = dict.fromkeys(map(str, pushed))
+                else:
+                    self._pushed = {str(k): (str(v) if v else None) for k, v in pushed.items()}
+                self._accepted = set(map(str, data.get("accepted", []))) & self._pushed.keys()
                 breaker = data.get("breaker") or {}
                 self.breaker_reason = breaker.get("reason") or None
                 self.breaker_since_ms = breaker.get("since_ms")
@@ -294,7 +318,7 @@ class CloudSync:
         )
         state = {
             "key": self._state_key(),
-            "pushed": sorted(self._pushed),
+            "pushed": dict(sorted(self._pushed.items())),
             "breaker": breaker,
             "accepted": sorted(self._accepted),
         }
@@ -320,7 +344,7 @@ class CloudSync:
     def _plan_deletes(self, current: Mapping[str, Any]) -> list[str]:
         """The gone ids this pass may delete; with the breaker open, only accepted ones."""
         with self._lock:
-            gone = self._pushed - current.keys()
+            gone = self._pushed.keys() - current.keys()
             self._accepted &= gone
             pending = gone - self._accepted
             reason = None
@@ -365,17 +389,63 @@ class CloudSync:
         logger.warning("cloud delete breaker: %d held deletes accepted for the next pass", held)
         return {"accepted": held}
 
+    def _send_upserts(
+        self, current: Mapping[str, dict], fps: Mapping[str, str], ids: list[str]
+    ) -> int:
+        """Re-send changed sightings as upserts; returns how many the cloud updated."""
+        updated = 0
+        while ids:
+            batch = [current[i] for i in ids[:MAX_BATCH]]
+            res = self.client.write(batch, upsert=True)
+            self.last_rev = int(res.get("rev", self.last_rev or 0))
+            if "updated" not in res:
+                # An older Worker reads only observations/deletes and counts these as
+                # duplicates: keep the old fingerprints so they go again once it can.
+                self._upsert_retry_at = time.monotonic() + UPSERT_RETRY_S
+                self._upsert_problem = (
+                    f"the cloud does not apply upserts yet; {len(ids)} changed sightings wait"
+                )
+                logger.warning(
+                    "cloud sync: %s (retry in %.0f s)", self._upsert_problem, UPSERT_RETRY_S
+                )
+                return updated
+            conflicts = res.get("conflicts") or 0
+            if conflicts:
+                n = len(conflicts) if isinstance(conflicts, list) else int(conflicts)
+                logger.warning("cloud sync: the cloud refused %d upserts (not ours to update)", n)
+            with self._lock:
+                for o in batch:
+                    self._pushed[o["id"]] = fps[o["id"]]
+                self._save_state()
+            updated += int(res.get("updated") or 0)
+            ids = ids[MAX_BATCH:]
+        self._upsert_problem = None
+        return updated
+
     def sync_once(self) -> dict:
         """One diff-and-push pass. Returns counts; raises CloudError on failure."""
         current: dict[str, dict] = {}
         for rec in self.memory.export_records():
             obs = record_to_observation(rec)
-            if obs is not None:
+            if obs is None:
+                continue
+            seen = current.get(obs["id"])
+            if seen is None or obs["t"] >= seen["t"]:  # one record per sighting; newest wins
                 current[obs["id"]] = obs
+        fps = {i: _fingerprint(o) for i, o in current.items()}
+        with self._lock:
+            # ids from a state file without fingerprints: what the memory holds is what was sent
+            adopted = [i for i, fp in self._pushed.items() if fp is None and i in fps]
+            for i in adopted:
+                self._pushed[i] = fps[i]
+            if adopted:
+                self._save_state()
         new_ids = [i for i in current if i not in self._pushed]
+        changed = [i for i, fp in self._pushed.items() if i in fps and fp != fps[i]]
         gone = self._plan_deletes(current)
         new_ids.sort(key=lambda i: current[i]["t"])
-        sent = deleted = 0
+        changed.sort(key=lambda i: current[i]["t"])
+        sent = deleted = updated = 0
         while new_ids or gone:
             batch = [current[i] for i in new_ids[:MAX_BATCH]]
             dels = gone[:MAX_DELETES]
@@ -383,19 +453,29 @@ class CloudSync:
             self.last_rev = int(res.get("rev", self.last_rev or 0))
             with self._lock:
                 for o in batch:
-                    self._pushed.add(o["id"])
-                self._pushed.difference_update(dels)
+                    self._pushed[o["id"]] = fps[o["id"]]
+                for i in dels:
+                    self._pushed.pop(i, None)
                 self._accepted.difference_update(dels)
                 self._save_state()
             sent += len(batch)
             deleted += len(dels)
             new_ids = new_ids[MAX_BATCH:]
             gone = gone[MAX_DELETES:]
+        if changed and time.monotonic() >= self._upsert_retry_at:
+            updated = self._send_upserts(current, fps, changed)
         self.pushed_total += sent
+        self.updated_total += updated
         self.deleted_total += deleted
         self.last_ok_ms = int(time.time() * 1000)
-        self.last_error = None
-        return {"sent": sent, "deleted": deleted, "held": len(self._held), "rev": self.last_rev}
+        self.last_error = self._upsert_problem
+        return {
+            "sent": sent,
+            "updated": updated,
+            "deleted": deleted,
+            "held": len(self._held),
+            "rev": self.last_rev,
+        }
 
     def _run(self) -> None:
         backoff = self.interval_s
@@ -431,6 +511,7 @@ class CloudSync:
             "auth": "secret_key" if c.secret_key else "device",
             "pushed": len(self._pushed),
             "pushed_total": self.pushed_total,
+            "updated_total": self.updated_total,
             "deleted_total": self.deleted_total,
             "last_rev": self.last_rev,
             "last_ok_ms": self.last_ok_ms,

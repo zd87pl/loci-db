@@ -103,3 +103,10 @@ CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH=y
 # FatFs file locking: a second open of a file that is already open (two writers of the same
 # obj_*.pcm.part, say) returns FR_LOCKED instead of corrupting the FAT. 10 files open at once.
 CONFIG_FATFS_FS_LOCK=10
+
+# On-board detection for cloud mode (firmware/common/loci_detect): ESP-DL COCO YOLO11n at 320x320,
+# int8, P4 variant (~0.3 s per frame), from its own flash partition (`idf.py flash` writes it).
+CONFIG_FLASH_COCO_DETECT_YOLO11N_S8_V1=n
+CONFIG_FLASH_COCO_DETECT_YOLO11N_320_S8_V1=y
+CONFIG_COCO_DETECT_YOLO11N_320_S8_V1=y
+CONFIG_COCO_DETECT_MODEL_IN_FLASH_PARTITION=y

@@ -1,4 +1,4 @@
-// ESP-DL COCO detector on the S3 (see detect_local.h).
+// ESP-DL COCO detector on the board (S3 and P4, see detect_local.h).
 
 #include "detect_local.h"
 
@@ -6,8 +6,13 @@
 #include <string.h>
 
 #include "coco_detect.hpp"
-#include "esp_jpeg_dec.h"
 #include "esp_heap_caps.h"
+#include "sdkconfig.h"
+#if CONFIG_SOC_JPEG_CODEC_SUPPORTED
+#include "dl_image_jpeg.hpp"
+#else
+#include "esp_jpeg_dec.h"
+#endif
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -45,6 +50,18 @@ bool detect_local_init(void) {
   return true;
 }
 
+#if CONFIG_SOC_JPEG_CODEC_SUPPORTED
+// P4: the JPEG codec decodes the frame in hardware, at full size into PSRAM (the detector scales it
+// to 320x320 itself). The software decoder would also bring ~3 kB of .data into internal RAM, which
+// the P4 has none to spare of (its retention-RAM margin, see the P4 README).
+static bool decode_rgb565(const uint8_t *jpeg, size_t len, dl::image::img_t *img) {
+  dl::image::jpeg_img_t j = {.data = (void *)jpeg, .data_len = len};
+  *img = dl::image::hw_decode_jpeg(j, dl::image::DL_IMAGE_PIX_TYPE_RGB565LE, 200);
+  return img->data != nullptr;
+}
+
+static void free_img(dl::image::img_t *img) { heap_caps_free(img->data); }
+#else
 // JPEG -> RGB565, scaled by 1/2, 1/4 or 1/8 until the width is at most 640 (the detector works at
 // 320x320, so more pixels only cost decode time and PSRAM: a 1600x1200 frame becomes 400x300).
 static bool decode_rgb565(const uint8_t *jpeg, size_t len, dl::image::img_t *img) {
@@ -89,6 +106,9 @@ static bool decode_rgb565(const uint8_t *jpeg, size_t len, dl::image::img_t *img
   return true;
 }
 
+static void free_img(dl::image::img_t *img) { jpeg_free_align(img->data); }
+#endif
+
 bool detect_local_run(const uint8_t *jpeg, size_t len, detect_local_result_t *out) {
   memset(out, 0, sizeof(*out));
   if (!detect_local_init()) return false;
@@ -115,6 +135,28 @@ bool detect_local_run(const uint8_t *jpeg, size_t len, detect_local_result_t *ou
     if (n < 0 || (size_t)n >= sizeof(out->labels) - used) break;
     used += (size_t)n;
   }
-  jpeg_free_align(img.data);
+  free_img(&img);
   return true;
+}
+
+int detect_local_boxes(const uint8_t *jpeg, size_t len, loci_detection_t *out, int max) {
+  if (!detect_local_init()) return -1;
+  dl::image::img_t img = {};
+  if (!decode_rgb565(jpeg, len, &img)) return -1;
+  std::list<dl::detect::result_t> &res = s_detect->run(img);
+  const float w = (float)img.width, h = (float)img.height;
+  int n = 0;
+  for (const auto &r : res) {
+    if (n >= max) break;
+    if (r.category < 0 || r.category >= (int)(sizeof(k_coco) / sizeof(k_coco[0])) || r.box.size() < 4) continue;
+    loci_detection_t *d = &out[n++];
+    snprintf(d->label, sizeof(d->label), "%s", k_coco[r.category]);
+    d->score = r.score;
+    d->cx = ((r.box[0] + r.box[2]) / 2.0f) / w;
+    d->cy = ((r.box[1] + r.box[3]) / 2.0f) / h;
+    d->w = (r.box[2] - r.box[0]) / w;
+    d->h = (r.box[3] - r.box[1]) / h;
+  }
+  free_img(&img);
+  return n;
 }

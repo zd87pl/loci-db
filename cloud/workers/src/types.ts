@@ -5,7 +5,12 @@ export interface Env {
   SPACE: DurableObjectNamespace<SpaceObject>;
   WRITE_LIMITER?: RateLimit;
   QUERY_LIMITER?: RateLimit;
+  /** Workers AI calls (TTS, STT) per principal; speech cache hits do not count. */
+  AI_LIMITER?: RateLimit;
+  AI?: Ai;
   USAGE?: AnalyticsEngineDataset;
+  /** Commit deployed, set by the deploy workflow (`--var GIT_SHA:<sha>`); shown on /health. */
+  GIT_SHA?: string;
   ADMIN_TOKEN?: string;
   PROJECT_HOST_SUFFIX?: string;
   DEVICE_TOKEN_TTL_S?: string;
@@ -143,6 +148,10 @@ export interface BatchResult {
 export interface InsertResult {
   accepted: number;
   duplicates: number;
+  /** Known ids rewritten by an upsert. */
+  updated: number;
+  /** Ids an upsert was not allowed to rewrite (another writer's row, a different label or room, an older t). */
+  conflicts: string[];
   deleted: number;
   ids: string[];
   rev: number;

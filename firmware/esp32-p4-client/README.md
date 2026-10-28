@@ -16,6 +16,12 @@ The main loop, the host link, the microSD memory and the offline commands live i
 `../common/loci_client` and are shared with the ESP32-S3 client in `../esp32-s3-client`; the
 interface a board implements is `../common/loci_client/include/loci_hw.h`.
 
+**Cloud mode** (`mode cloud`, after `cloud claim`): no host. The board runs its own detector
+(`../common/loci_detect`, ESP-DL YOLO11n on the P4's hardware JPEG decode), answers locally first
+and uses LOCI Cloud for the rest; see `docs/ESP32_CLOUD_MODE.md`. That added a `coco_det`
+partition and grew the app partition to 6 MB (the `model` partition is now 3.5 MB); NVS keeps its
+offset, so settings survive the reflash.
+
 ## On the desk with the shared code (2026-10-26)
 
 Firmware `0.5.0-p4` (this project plus `../common/loci_client`, the first run of the shared loop on
@@ -153,7 +159,7 @@ which the board fetches from the host's `phrase.pcm` endpoint once per boot and 
 position changes (a `.txt` stamp next to each clip holds the sentence it was made from, so unchanged
 objects are not refetched); anything else falls back to the cached summary.
 
-Models live in the 6 MB `model` partition (`CONFIG_MODEL_IN_FLASH=y`, `CONFIG_SR_MN_EN_MULTINET7_QUANT=y`,
+Models live in the 3.5 MB `model` partition (`CONFIG_MODEL_IN_FLASH=y`, `CONFIG_SR_MN_EN_MULTINET7_QUANT=y`,
 `CONFIG_SR_WN_NONE=y`); `idf.py flash` writes them with the app. The esp-sr component ships a build
 for exactly this silicon (`include/esp32p4_less_v3_idf6`). Console: `recog` records 4 s from the
 microphone, prints the recognised command and plays the cached answer, which makes the feature

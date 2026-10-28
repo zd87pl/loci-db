@@ -418,6 +418,51 @@ def test_journal_overlay_applied_on_restore_after_crash(tmp_path) -> None:
     mem2.close()
 
 
+def _sighting_ids(mem, label) -> list[str | None]:
+    return [r["metadata"].get("sighting_id") for r in mem.export_records() if r["label"] == label]
+
+
+def test_sighting_id_survives_merges_restore_and_journal_replay(tmp_path) -> None:
+    # CLOUD-1: merges and restores re-id the record; the sighting keeps its first id.
+    mem = _mem(tmp_path)
+    mem.restore()
+    first = _room_obs(mem, "cup", (1.0, 0.8, 1.0), NOW_MS)
+    second = _room_obs(mem, "cup", (1.1, 0.8, 1.0), NOW_MS + 500)  # merge
+    assert second != first and _sighting_ids(mem, "cup") == [first]
+    mem.flush()
+    third = _room_obs(mem, "cup", (1.05, 0.8, 1.0), NOW_MS + 1000)  # merge, journal only
+    _wait_journal(mem.persistence, 2)
+    mem.persistence.close(final_snapshot=False)  # "crash": the last merge lives in the journal
+
+    mem2 = _mem(tmp_path)
+    assert mem2.restore().source == "snapshot+journal"
+    (rec,) = [r for r in mem2.export_records() if r["label"] == "cup"]
+    assert rec["id"] not in (first, second, third)
+    assert rec["metadata"]["sighting_id"] == first
+    _room_obs(mem2, "cup", (1.0, 0.8, 1.0), NOW_MS + 1500)  # merge after the restore
+    assert _sighting_ids(mem2, "cup") == [first]
+    assert mem2.where_is("cup")[0].merge_count == 3
+    mem2.close()
+
+
+def test_records_saved_before_sighting_ids_keep_their_old_id(tmp_path) -> None:
+    mem = _mem(tmp_path)
+    mem.restore()
+    old = _room_obs(mem, "bottle", (-0.6, 0.9, 1.2), NOW_MS)
+    mem.close()
+    snap = json.loads((tmp_path / SNAPSHOT_NAME).read_text())
+    for r in snap["records"]:
+        r["metadata"].pop("sighting_id", None)  # as written by a build before sighting ids
+    (tmp_path / SNAPSHOT_NAME).write_text(json.dumps(snap))
+
+    mem2 = _mem(tmp_path)
+    mem2.restore()
+    (rec,) = mem2.export_records()
+    # mirrors already know this sighting by its old record id, so that becomes its id
+    assert rec["id"] != old and rec["metadata"]["sighting_id"] == old
+    mem2.close()
+
+
 def test_begin_session_truncates_journal_before_first_write(tmp_path) -> None:
     mem = _mem(tmp_path)
     mem.restore()

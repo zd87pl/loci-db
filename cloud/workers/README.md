@@ -127,17 +127,54 @@ Path routing on `workers.dev`: `https://<worker>/p/<ref>/v1/...`. Setting `PROJE
 | `GET /spaces` · `POST /spaces` | read: any · create: secret | List or create spaces (`{"space":"home","frame":"room","extents":{"lo":[..],"hi":[..]},"epoch_ms":5000}`) |
 | `POST /devices` · `GET /devices` · `DELETE /devices/<id>` | secret | Provision (returns a one-time claim code, valid 30 min), list, revoke |
 | `POST /devices/claim` | none (claim code) | Exchange the claim code for a device id and device secret, once |
-| `POST /devices/token` | none (device secret) | 1-hour device token (HS256), scoped to the device's spaces |
-| `POST /spaces/<s>/observations` | secret, or device on its spaces | Up to 50 observations and 200 deletes per call; idempotent by `id` or `(device, seq)` |
+| `POST /devices/token` | none (device secret) | 1-hour device token (HS256), scoped to the device's spaces; `expires_at` (Unix s) and `expires_in` (s) |
+| `POST /spaces/<s>/observations` | secret, or device on its spaces | Up to 50 observations and 200 deletes per call; idempotent by `id` or `(device, seq)`; `"upsert": true` rewrites known ids (below) |
 | `GET /spaces/<s>/where?label=&limit=&room=` | any reader | Newest sightings of a label |
 | `GET /spaces/<s>/changes?window_s=&room=` | any reader | New / moved / seen per room and label |
 | `GET /spaces/<s>/digest?since_rev=` | any reader | Latest state per room and label changed since a revision, plus removals, for device caches |
 | `POST /spaces/<s>/query` | any reader | Region, time, label, room, confidence and vector filters (below) |
 | `POST /spaces/<s>/ask` | any reader | `{"text":"where is my mug"}` → spoken-style answer |
 | `GET /spaces/<s>/stats` | any reader | Counts and revision |
-| `POST /p/<ref>/insert` · `/insert_batch` · `/query` · `/trajectory` · `/causal_context` | inserts: secret · the rest: any reader | Python SDK cloud mode on the project's `default` space (below) |
+| `GET /spaces/<s>/board/memory` · `memory.pcm` · `phrase.pcm?text=` · `POST .../board/ask` · `.../board/voice` | any reader | ESP32 boards: cache JSON and spoken answers (below) |
+| `POST /p/<ref>/insert` · `POST /p/<ref>/query` | insert: secret · query: any reader | Python SDK cloud mode on the project's `default` space (below) |
 
 Publishable keys can read and ask but not write. Revoking a device bumps its token epoch, so its tokens stop working within a minute (immediately on the same isolate).
+
+### Upsert
+
+Without the flag, an observation whose `id` is already stored is counted as a duplicate and left alone. With `"upsert": true` the stored row is rewritten in place (position, time, confidence, metadata; the embedding, media and causal links are kept unless the upsert brings new ones), so a sighting that a writer merged or saw again keeps one row and one id. An upsert only applies when:
+
+- the same writer stored the row (the same device, or a secret key for rows written with one);
+- `label` and `room` are unchanged;
+- `t` does not go back.
+
+Ids that fail these checks come back in `conflicts` and are not touched. The reply counts `accepted` (new), `updated`, `duplicates` (unchanged) and `deleted`; an update bumps the revision, so `digest?since_rev=` reports it. The demo host's mirror (`demo_spatial/app/cloud_sync.py`) sends merged sightings this way, under `h_<sighting_id>`.
+
+### Board routes (ESP32)
+
+The ESP32 boards work locally first (on-device detection, MultiNet speech commands, the microSD cache) and then use these routes, in the formats the demo host's `/api/esp32/*` routes use, so the firmware's cache and playback code works against either. A device token (or the secret key) for the space is the credential. Audio is `audio/L16; rate=16000; channels=1`, synthesised by Workers AI (Aura-1, voice `asteria`; transcription by Whisper large-v3-turbo).
+
+| Route | Request | Reply |
+|---|---|---|
+| `GET board/memory` | none | `{"rev","count","objects":[{"label","where","room","last_seen_ms","age_s"}],"summary","now_ms"}`. One object per label (its newest sighting), people left out, at most 12, newest first. `rev` hashes what a board would say, so it changes when a place or a label changes, not on every write. Strings carry no quotes, backslashes or control characters, and the JSON has no spaces: the firmware reads it with `strstr()` |
+| `GET board/memory.pcm` | none | The `summary` spoken (`X-Memory-Rev`) |
+| `GET board/phrase.pcm?text=` | 1–160 characters | That sentence spoken |
+| `POST board/ask` | `{"text":"where is my cup"}` | The answer spoken; `X-Answer` (percent-encoded), `X-Intent`, `X-Label` |
+| `POST board/voice` | raw PCM16, 16 kHz mono, 0.1–10 s | Transcribed, then answered; `X-Transcription` too. `422 not_heard` when nothing was said (Whisper's stock phrases such as "Thank you." count as nothing) |
+
+Spoken sentences are cached per space (200, least recently used dropped), so the same phrase is synthesised once. The Cache API would do nothing on `workers.dev`, so the cache is a table in the space's Durable Object.
+
+Provision a board with `scripts/devices.py`. It prints a one-time claim code and the console line to type on the board:
+
+```bash
+python3 scripts/devices.py --env-file ~/.loci/cloud.env create --name "P4 desk board"
+# device     dev_0123456789abcdef  (P4 desk board, space home)
+# claim code ABCD-EFGH-JKLM  (single use, expires in 30 min)
+# on the board's serial console:
+#   cloud claim https://loci-cloud.<acct>.workers.dev/p/<ref>/v1 home ABCD-EFGH-JKLM
+python3 scripts/devices.py --env-file ~/.loci/cloud.env list
+python3 scripts/devices.py --env-file ~/.loci/cloud.env revoke dev_0123456789abcdef
+```
 
 ### Query
 
@@ -206,9 +243,11 @@ Clients must send their own `User-Agent` (see Production below); the SDK sends `
 ```bash
 cd cloud/workers
 npm ci
-npm test                 # Vitest in the local Workers runtime (Miniflare): Hilbert parity, API, conformance
+npm test                 # Vitest in the local Workers runtime (Miniflare): Hilbert parity, API, conformance, boards
 npm run typecheck
 ```
+
+Tests never call Cloudflare: `vitest.config.ts` turns remote bindings off and `test/board.test.ts` installs a Workers AI stand-in (`setAiForTests`). `wrangler dev` does call Workers AI for the board routes, which bills the account.
 
 Run it and connect the demo host:
 
@@ -227,11 +266,15 @@ For the Python SDK instead, `bootstrap.py --sdk` prints `LOCI_BASE_URL` and `LOC
 
 ## Production (Phase 0)
 
-Deployed 2026-10-27 to `https://loci-cloud.zd-66b.workers.dev` (D1 `loci-control`, id in `wrangler.jsonc`). The admin token lives outside the repo in `~/.loci/cloud-admin-token` on the operator's machine; project credentials from `bootstrap.py` go to `~/.loci/cloud.env` (mode 600).
+Deployed 2026-10-27 to `https://loci-cloud.zd-66b.workers.dev` (D1 `loci-control`, id in `wrangler.jsonc`). `GET /health` reports the deployed commit (`sha`, `dev` for a deploy without one). The admin token lives outside the repo in `~/.loci/cloud-admin-token` on the operator's machine; project credentials from `bootstrap.py` go to `~/.loci/cloud.env` (mode 600).
 
 Clients must send their own `User-Agent`: Cloudflare's edge rejects the default `Python-urllib/x.y` agent with error 1010 (`cloud_sync.py` and `bootstrap.py` do).
 
 ## Deploy (needs a Cloudflare account)
+
+The top level of `wrangler.jsonc` is production (`loci-cloud`); `env.staging` is a second Worker (`loci-cloud-staging`) with its own D1 database, Durable Objects and rate-limit namespaces, for trying board and firmware changes first.
+
+First time, by hand:
 
 ```bash
 npx wrangler login
@@ -239,9 +282,23 @@ npx wrangler d1 create loci-control          # put the printed database_id into 
 npm run db:migrate:remote
 npx wrangler secret put ADMIN_TOKEN
 npm run deploy
+
+# staging
+npx wrangler d1 create loci-control-staging  # replace env.staging's placeholder database_id
+npm run db:migrate:staging
+npx wrangler secret put ADMIN_TOKEN --env staging    # a different token from production's
+npm run deploy:staging
+python3 scripts/bootstrap.py --url https://loci-cloud-staging.<acct>.workers.dev \
+    --admin-token <STAGING_ADMIN_TOKEN> --space home > ~/.loci/cloud-staging.env
+python3 scripts/seed_staging.py --from-env ~/.loci/cloud.env --to-env ~/.loci/cloud-staging.env
 ```
 
-Run `npm run db:migrate:remote` before every deploy that adds a migration. For example, `0002_space_epoch.sql` adds `spaces.epoch_ms`, which the Worker reads on every space request.
+After that, `.github/workflows/cloud-deploy.yml` deploys:
+
+- **staging** on every push to `main` that touches `cloud/workers`, or by hand;
+- **production** only by hand (Actions → Cloud deploy → Run workflow → `production`). It runs in the GitHub environment `production`, so give that environment a required reviewer.
+
+Both run the tests, apply D1 migrations, deploy with `GIT_SHA` set and check `/health`. They need repository secrets `CLOUDFLARE_API_TOKEN` (a token with Workers Scripts: Edit and D1: Edit on the account) and `CLOUDFLARE_ACCOUNT_ID`, and skip with a notice while those are missing. Set the repository variable `CLOUDFLARE_WORKERS_SUBDOMAIN` if the `workers.dev` subdomain is not `zd-66b`.
 
 ## Limits and errors
 
@@ -249,6 +306,8 @@ Run `npm run db:migrate:remote` before every deploy that adds a migration. For e
 |---|---|
 | Writes (`/observations`, `/insert`) | 120 per minute per key or device |
 | Queries (`/query`, `/v1/.../query`) | 600 per minute per key or device |
+| Speech (board TTS and transcription; cache hits are free) | 30 per minute per key or device |
+| Board voice clip | 0.1–10 s of 16 kHz PCM16 (320,000 bytes) |
 | Embedding or vector dimension | 1–1536 |
 | Query `limit` | 1–1000 |
 | Request body | 512 KB |
@@ -264,7 +323,10 @@ Errors have the shape `{"detail": "<message>", "code": "<code>"}`:
 | 405 | `method_not_allowed` | `/insert` and `/query` take `POST` only |
 | 413 | `too_large` | Body or batch too large |
 | 422 | `invalid` | Validation failed, e.g. `vector must have 4 dimensions, got 3` |
-| 429 | `rate_limited` | Rate limit exceeded |
+| 422 | `not_heard` | `board/voice`: the clip held no words |
+| 429 | `rate_limited` | Rate limit exceeded; `Retry-After: 60` |
+| 502 | `upstream` | Workers AI returned no audio |
+| 503 | `unavailable` | Speech is not configured on the deployment |
 
 ## Hilbert parity
 

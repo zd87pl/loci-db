@@ -185,7 +185,8 @@ export async function issueDeviceToken(env: Env, ref: string, body: Record<strin
   const exp = Math.floor(Date.now() / 1000) + ttl;
   const token = await signJwt({ sub: row.id, ref, ep: row.token_epoch, exp }, project.token_secret);
   await env.DB.prepare("UPDATE devices SET last_seen_at = ? WHERE id = ?").bind(Date.now(), row.id).run();
-  return { token, expires_at: exp, spaces: JSON.parse(row.spaces) as string[] };
+  // expires_in lets a device without a set clock schedule its refresh.
+  return { token, expires_at: exp, expires_in: ttl, spaces: JSON.parse(row.spaces) as string[] };
 }
 
 export async function listDevices(env: Env, ref: string) {

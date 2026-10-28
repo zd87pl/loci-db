@@ -18,7 +18,8 @@ export function json(body: unknown, status = 200, headers: HeadersInit = {}): Re
 }
 
 export function errorResponse(e: HttpError): Response {
-  return json({ detail: e.detail, code: e.code }, e.status);
+  // The rate limiters count per 60 s window.
+  return json({ detail: e.detail, code: e.code }, e.status, e.status === 429 ? { "retry-after": "60" } : {});
 }
 
 const enc = new TextEncoder();

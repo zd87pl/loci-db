@@ -18,11 +18,12 @@
  *     POST   spaces/<space>/query                region / time / label / room / confidence / vector filters
  *     POST   spaces/<space>/ask                  {"text": "..."}
  *     GET    spaces/<space>/stats
- *   /p/<ref>/{insert,insert_batch,query,trajectory,causal_context}
- *                                                  Python SDK cloud mode, on the default space (src/compat.ts)
+ *     *      spaces/<space>/board/...            ESP32 boards: cache JSON, spoken answers (src/board.ts)
+ *   /p/<ref>/insert, /p/<ref>/query                Python SDK cloud mode, on the default space (src/compat.ts)
  */
 
 import { authenticate, canRead, canWrite, principalKey, requireSecret } from "./auth";
+import { handleBoard } from "./board";
 import {
   claimDevice, createDevice, createProject, createSpace, getSpace, issueDeviceToken, listDevices, listSpaces,
   recordUsage, revokeDevice, spaceStub,
@@ -87,12 +88,14 @@ async function handleSpace(
       const { success } = await env.WRITE_LIMITER.limit({ key: `${ref}:${principalKey(p)}` });
       if (!success) throw new HttpError(429, "write rate limit exceeded", "rate_limited");
     }
-    const { observations, deletes } = validateBatch(await readJson(req), Date.now());
-    const meta: SpaceMeta = { ref, space, frame: row.frame, extents: row.extents, epoch_ms: row.epoch_ms };
-    const result = await stub.insertBatch(meta, observations, deletes, p.kind === "device" ? p.deviceId : null);
-    ctx.waitUntil(recordUsage(env, ref, result.accepted));
-    env.USAGE?.writeDataPoint({ indexes: [ref], blobs: ["write", space], doubles: [result.accepted, result.deleted] });
-    return json(result, result.accepted > 0 || result.deleted > 0 ? 201 : 200);
+    const { observations, deletes, upsert } = validateBatch(await readJson(req), Date.now());
+    const meta: SpaceMeta = { ref, space, frame: row.frame, extents: row.extents };
+    const result = await stub.insertBatch(meta, observations, deletes, p.kind === "device" ? p.deviceId : null, upsert);
+    ctx.waitUntil(recordUsage(env, ref, result.accepted + result.updated));
+    env.USAGE?.writeDataPoint({
+      indexes: [ref], blobs: ["write", space], doubles: [result.accepted, result.deleted, result.updated],
+    });
+    return json(result, result.accepted > 0 || result.deleted > 0 || result.updated > 0 ? 201 : 200);
   }
 
   if (!canRead(p, space)) throw new HttpError(403, "not allowed to read this space", "forbidden");
@@ -160,6 +163,10 @@ async function handleProject(req: Request, env: Env, ctx: ExecutionContext, url:
   if (parts[0] === "spaces" && parts.length === 3) {
     return handleSpace(req, env, ctx, url, ref, p, parts[1] as string, parts[2] as string);
   }
+  if (parts[0] === "spaces" && parts.length === 4 && parts[2] === "board") {
+    ctx.waitUntil(recordUsage(env, ref, 0));
+    return handleBoard(req, env, url, ref, p, parts[1] as string, parts[3] as string);
+  }
   if (parts[0] === "devices" && parts.length === 1) {
     requireSecret(p);
     if (req.method === "GET") return json({ devices: await listDevices(env, ref) });
@@ -177,7 +184,7 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     try {
-      if (url.pathname === "/health") return json({ status: "ok", version: VERSION });
+      if (url.pathname === "/health") return json({ status: "ok", version: VERSION, sha: env.GIT_SHA || "dev" });
 
       if (url.pathname === "/admin/projects" && req.method === "POST") {
         const token = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");

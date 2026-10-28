@@ -32,5 +32,6 @@
 #define LOCI_OFFLINE_FPS 1  // capture rate to the card while the host is unreachable
 #endif
 #ifndef OFFLINE_PROMPT_URL
-#define OFFLINE_PROMPT_URL "I%20can%27t%20reach%20the%20host%20right%20now.%20Hold%20the%20button%20again%20when%20we%20are%20back%20online."
+// Neutral wording: in cloud mode there is no host to name
+#define OFFLINE_PROMPT_URL "I%27m%20offline%20right%20now.%20Hold%20the%20button%20again%20when%20we%20are%20back%20online."
 #endif

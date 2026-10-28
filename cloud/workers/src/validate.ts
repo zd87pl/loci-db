@@ -69,18 +69,23 @@ export function validateObservation(o: unknown, i: number, nowMs: number): Obser
   };
 }
 
-export function validateBatch(body: unknown, nowMs: number): { observations: ObservationIn[]; deletes: string[] } {
+export function validateBatch(
+  body: unknown,
+  nowMs: number,
+): { observations: ObservationIn[]; deletes: string[]; upsert: boolean } {
   if (typeof body !== "object" || body === null) bad("body must be an object");
   const b = body as Record<string, unknown>;
   const obs = b.observations ?? [];
   const dels = b.deletes ?? [];
+  const upsert = b.upsert ?? false;
   if (!Array.isArray(obs)) bad("observations must be an array");
   if (!Array.isArray(dels)) bad("deletes must be an array");
+  if (typeof upsert !== "boolean") bad("upsert must be true or false");
   if (obs.length > MAX_BATCH) throw new HttpError(413, `at most ${MAX_BATCH} observations per request`, "too_large");
   if (dels.length > MAX_DELETES) throw new HttpError(413, `at most ${MAX_DELETES} deletes per request`, "too_large");
   if (obs.length === 0 && dels.length === 0) bad("nothing to write");
   for (const d of dels) if (typeof d !== "string" || !ID_RE.test(d)) bad("deletes must be observation ids");
-  return { observations: obs.map((o, i) => validateObservation(o, i, nowMs)), deletes: dels as string[] };
+  return { observations: obs.map((o, i) => validateObservation(o, i, nowMs)), deletes: dels as string[], upsert };
 }
 
 export function validateExtents(v: unknown, frame: Frame): Extents {

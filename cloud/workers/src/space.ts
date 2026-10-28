@@ -20,6 +20,8 @@ const MAX_VECTOR_SCAN = 20_000;
 /** Same over-fetch and decay clamp as loci's query_scored and temporal.decay. */
 const OVERFETCH = 3;
 const MIN_DECAY_EXPONENT = -700;
+/** Spoken sentences kept per space, least recently used dropped first. */
+const TTS_CACHE_ENTRIES = 200;
 
 type Row = Record<string, SqlStorageValue>;
 
@@ -111,6 +113,7 @@ export class SpaceObject extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS obs_rev ON obs(rev);
       CREATE TABLE IF NOT EXISTS tombstones (id TEXT PRIMARY KEY, label TEXT NOT NULL, room TEXT, rev INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS tombstones_rev ON tombstones(rev);
+      CREATE TABLE IF NOT EXISTS tts_cache (k TEXT PRIMARY KEY, pcm BLOB NOT NULL, used INTEGER NOT NULL);
     `);
     this.migrate();
   }
@@ -159,12 +162,21 @@ export class SpaceObject extends DurableObject<Env> {
     this.sql.exec("INSERT INTO meta (k, v) VALUES ('space', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", JSON.stringify(meta));
   }
 
-  insertBatch(meta: SpaceMeta, observations: ObservationIn[], deletes: string[], deviceId: string | null): InsertResult {
+  /**
+   * Deletes first, then inserts that ignore known ids. With `upsert`, a known id is rewritten in
+   * place (a merged or moved sighting keeps its id) when the same writer owns it, label and room
+   * match and `t` does not go back; anything else is reported in `conflicts` and left alone.
+   */
+  insertBatch(
+    meta: SpaceMeta, observations: ObservationIn[], deletes: string[], deviceId: string | null, upsert = false,
+  ): InsertResult {
     if (!this.getMeta()) this.configure(meta);
     const rev = this.rev() + 1;
     const ids: string[] = [];
+    const conflicts: string[] = [];
     let accepted = 0;
     let duplicates = 0;
+    let updated = 0;
     let deleted = 0;
     const { lo, hi } = meta.extents;
     this.ctx.storage.transactionSync(() => {
@@ -180,19 +192,49 @@ export class SpaceObject extends DurableObject<Env> {
         ids.push(id);
         const frame = o.frame ?? meta.frame;
         const emb = o.embedding ? quantiseEmbedding(o.embedding) : null;
+        const metaJson = o.metadata ? JSON.stringify(o.metadata) : null;
+        const old = upsert ? this.sql.exec("SELECT * FROM obs WHERE id = ?", id).toArray()[0] : undefined;
+        if (old) {
+          const room = o.room ?? null;
+          if ((old.device_id ?? null) !== deviceId || old.label !== o.label || (old.room ?? null) !== room || o.t < Number(old.t)) {
+            conflicts.push(id);
+            continue;
+          }
+          const confidence = o.confidence ?? 1;
+          const same = old.frame === frame && Number(old.x) === o.x && Number(old.y) === o.y && Number(old.z) === o.z
+            && Number(old.t) === o.t && Number(old.confidence) === confidence && (old.meta ?? null) === (metaJson ?? old.meta ?? null)
+            && !emb && (o.media === undefined || old.media === o.media);
+          if (same) {
+            duplicates++;
+            continue;
+          }
+          // emb / media / scene / causal links are kept unless the upsert brings new ones.
+          this.sql.exec(
+            `UPDATE obs SET frame = ?, x = ?, y = ?, z = ?, h8 = ?, t = ?, confidence = ?,
+               emb = COALESCE(?, emb), emb_scale = CASE WHEN ? IS NULL THEN emb_scale ELSE ? END,
+               emb_model = COALESCE(?, emb_model), meta = COALESCE(?, meta), media = COALESCE(?, media), rev = ?
+             WHERE id = ?`,
+            frame, o.x, o.y, o.z, hilbert3(vec3InUnit([o.x, o.y, o.z], lo, hi), HILBERT_ORDER), o.t, confidence,
+            emb?.blob ?? null, emb?.blob ?? null, emb?.scale ?? null, emb ? (o.embedding_model ?? null) : null,
+            metaJson, o.media ?? null, rev, id,
+          );
+          updated++;
+          continue;
+        }
         const cur = this.sql.exec(
           `INSERT OR IGNORE INTO obs (id, device_id, label, frame, room, x, y, z, h8, t, confidence, emb, emb_scale, emb_model, meta, media, rev)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           id, deviceId, o.label, frame, o.room ?? null, o.x, o.y, o.z, hilbert3(vec3InUnit([o.x, o.y, o.z], lo, hi), HILBERT_ORDER), o.t,
           o.confidence ?? 1, emb?.blob ?? null, emb?.scale ?? null, o.embedding_model ?? null,
-          o.metadata ? JSON.stringify(o.metadata) : null, o.media ?? null, rev,
+          metaJson, o.media ?? null, rev,
         );
         if (cur.rowsWritten > 0) accepted++;
         else duplicates++;
       }
-      if (accepted > 0 || deleted > 0) this.setRev(rev);
+      if (accepted > 0 || deleted > 0 || updated > 0) this.setRev(rev);
     });
-    return { accepted, duplicates, deleted, ids, rev: accepted > 0 || deleted > 0 ? rev : rev - 1 };
+    const wrote = accepted > 0 || deleted > 0 || updated > 0;
+    return { accepted, duplicates, updated, conflicts, deleted, ids, rev: wrote ? rev : rev - 1 };
   }
 
   where(label: string, limit: number, room: string | null = null): Observation[] {
@@ -204,6 +246,34 @@ export class SpaceObject extends DurableObject<Env> {
 
   labels(): string[] {
     return this.sql.exec("SELECT DISTINCT label FROM obs WHERE label <> ''").toArray().map((r) => String(r.label));
+  }
+
+  /** Newest sighting per label (any room), newest first, without people: what a board caches. */
+  newestPerLabel(limit: number): Observation[] {
+    const rows = this.sql.exec(
+      `SELECT o.* FROM obs o JOIN (SELECT label, MAX(t) AS mt FROM obs WHERE label NOT IN ('', 'person') GROUP BY label) g
+         ON o.label = g.label AND o.t = g.mt
+       ORDER BY o.t DESC, o.id LIMIT ?`,
+      limit,
+    );
+    const seen = new Set<string>();
+    return rows.toArray().map(rowToObs).filter((o) => !seen.has(o.label) && Boolean(seen.add(o.label)));
+  }
+
+  /** Spoken sentences already synthesised for this space (TTS costs per character). */
+  ttsGet(key: string): Uint8Array | null {
+    const r = this.sql.exec("SELECT pcm FROM tts_cache WHERE k = ?", key).toArray()[0];
+    if (!r) return null;
+    this.sql.exec("UPDATE tts_cache SET used = ? WHERE k = ?", Date.now(), key);
+    return new Uint8Array(r.pcm as ArrayBuffer);
+  }
+
+  ttsPut(key: string, pcm: Uint8Array, keep = TTS_CACHE_ENTRIES): void {
+    this.sql.exec(
+      "INSERT INTO tts_cache (k, pcm, used) VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET pcm = excluded.pcm, used = excluded.used",
+      key, pcm, Date.now(),
+    );
+    this.sql.exec("DELETE FROM tts_cache WHERE k NOT IN (SELECT k FROM tts_cache ORDER BY used DESC LIMIT ?)", keep);
   }
 
   /** Latest observation per (room, label), newest first. */

@@ -6,7 +6,7 @@ dependencies:
       require: private
       version: '>=5.0'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.7.19~2
   espressif/coco_detect:
@@ -134,11 +134,12 @@ dependencies:
       type: idf
     version: 6.1.0
 direct_dependencies:
+- espressif/cjson
 - espressif/coco_detect
 - espressif/esp-sr
 - espressif/esp32-camera
 - espressif/esp_new_jpeg
 - idf
-manifest_hash: e60f1cddf4a3dc8ae24ca7a09bbf0f09e06aa7bda30090f855be6e4f65be5e97
+manifest_hash: f86129f00b97cdccbc91f8d967697ec9aeb101d9b02fa1844884b862f1fe5d57
 target: esp32s3
 version: 3.0.0

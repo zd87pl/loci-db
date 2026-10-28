@@ -3,3 +3,5 @@ dependencies:
   idf: ">=5.4"
   # offline command words on the button (MultiNet7 English, models in the board's "model" partition)
   espressif/esp-sr: "^2.6"
+  # JSON replies of LOCI Cloud (cloud_link.c); the host link keeps its flat strstr() reader
+  espressif/cjson: "^1.7.19"

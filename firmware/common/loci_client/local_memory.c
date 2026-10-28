@@ -34,6 +34,7 @@ static int s_dataset_count;  // legacy + sharded
 static int s_dataset_new;    // frames in dataset/<NNNN>/ (decides the next folder)
 static uint32_t s_live_frames;
 static char s_cached_rev[24];
+static local_fetch_fn s_fetch = host_fetch_file;  // or cloud_link_fetch_file (cloud mode)
 static int64_t s_last_refresh_attempt_ms = -60000;
 static bool s_prompt_checked;
 
@@ -51,7 +52,6 @@ static bool s_prompt_checked;
 #define MEMORY_PCM STORAGE_DIR "/memory.pcm"
 #define MEMORY_REV STORAGE_DIR "/memory.rev"
 #define OFFLINE_PCM STORAGE_DIR "/offline.pcm"
-#define OFFLINE_PROMPT "I can't reach the host right now."
 
 static int count_files(const char *dir) {
   DIR *d = opendir(dir);
@@ -288,6 +288,8 @@ void local_voice_save(const int16_t *pcm, size_t samples, int64_t ms) {
 
 // -- cached memory + offline speech ---------------------------------------------------------------
 
+void local_memory_set_source(local_fetch_fn fetch) { s_fetch = fetch ? fetch : host_fetch_file; }
+
 static void save_rev(const char *rev) {
   storage_write_file(MEMORY_REV, rev, strlen(rev));
   snprintf(s_cached_rev, sizeof(s_cached_rev), "%s", rev);
@@ -301,15 +303,56 @@ void local_memory_refresh(const char *rev) {
   size_t n1 = 0, n2 = 0;
   char q[96];
   snprintf(q, sizeof(q), "/api/esp32/memory?device=%s", host_device_id());
-  if (host_fetch_file(q, MEMORY_JSON, &n1) != ESP_OK) return;
+  if (s_fetch(q, MEMORY_JSON, &n1) != ESP_OK) return;
   if (audio_speaker_ready()) {  // the spoken summary is of no use to a board without a speaker
     snprintf(q, sizeof(q), "/api/esp32/memory.pcm?device=%s", host_device_id());
-    if (host_fetch_file(q, MEMORY_PCM, &n2) != ESP_OK) return;
+    if (s_fetch(q, MEMORY_PCM, &n2) != ESP_OK) return;
   }
   save_rev(rev);
   ESP_LOGI(TAG, "memory cache refreshed (rev %s): %u B json, %.1f s of speech", rev, (unsigned)n1,
            n2 / (2.0f * LOCI_AUDIO_RATE));
   local_memory_cache_object_phrases();
+}
+
+// The rev of a memory.json as written by the host or the cloud ({"rev":"<hex>",...}).
+static bool json_rev(const char *path, char *rev, size_t cap) {
+  size_t n = 0;
+  uint8_t *json = local_read_file(path, &n);
+  rev[0] = 0;
+  if (!json) return false;
+  const char *p = strstr((const char *)json, "\"rev\":\"");
+  if (p) {
+    p += 7;
+    const char *e = strchr(p, '"');
+    size_t len = e ? (size_t)(e - p) : 0;
+    if (len >= cap) len = cap - 1;
+    memcpy(rev, p, len);
+    rev[len] = 0;
+  }
+  free(json);
+  return rev[0] != 0;
+}
+
+bool local_memory_poll(void) {
+  if (!storage_ready()) return false;
+  char q[96], rev[24];
+  size_t n1 = 0, n2 = 0;
+  snprintf(q, sizeof(q), "/api/esp32/memory?device=%s", host_device_id());
+  if (s_fetch(q, MEMORY_JSON ".new", &n1) != ESP_OK) return false;
+  if (!json_rev(MEMORY_JSON ".new", rev, sizeof(rev)) || !strcmp(rev, s_cached_rev)) {
+    unlink(MEMORY_JSON ".new");  // nothing a board would say differently
+    return false;
+  }
+  unlink(MEMORY_JSON);
+  if (rename(MEMORY_JSON ".new", MEMORY_JSON) != 0) return false;
+  if (audio_speaker_ready()) {
+    snprintf(q, sizeof(q), "/api/esp32/memory.pcm?device=%s", host_device_id());
+    if (s_fetch(q, MEMORY_PCM, &n2) != ESP_OK) n2 = 0;  // the JSON alone still answers per object
+  }
+  save_rev(rev);
+  ESP_LOGI(TAG, "memory cache refreshed (rev %s): %u B json, %.1f s of speech", rev, (unsigned)n1,
+           n2 / (2.0f * LOCI_AUDIO_RATE));
+  return true;
 }
 
 // -- per-object spoken answers (for the offline "where is my X") ---------------------------------
@@ -396,11 +439,14 @@ static bool object_where(const char *label, char *where, size_t cap) {
   return ok;
 }
 
-void local_memory_cache_object_phrases(void) {
-  if (!storage_ready()) return;
+void local_memory_cache_object_phrases(void) { local_memory_cache_some_phrases(12); }
+
+int local_memory_cache_some_phrases(int max) {
+  if (!storage_ready()) return 0;
   char labels[12][32];
   int n = local_memory_labels(labels, 12);
-  for (int i = 0; i < n; i++) {
+  int fetched = 0;
+  for (int i = 0; i < n && fetched < max; i++) {
     char name[40], path[96], where[96] = "", text[200], enc[400], q[460];
     safe_name(labels[i], name, sizeof(name));
     snprintf(path, sizeof(path), "%s/obj_%.39s.pcm", STORAGE_DIR, name);
@@ -428,11 +474,13 @@ void local_memory_cache_object_phrases(void) {
     url_encode(text, enc, sizeof(enc));
     snprintf(q, sizeof(q), "/api/esp32/phrase.pcm?text=%.399s", enc);
     size_t bytes = 0;
-    if (host_fetch_file(q, path, &bytes) == ESP_OK) {
+    fetched++;
+    if (s_fetch(q, path, &bytes) == ESP_OK) {
       storage_write_file(stamp_path, text, strlen(text));
       ESP_LOGI(TAG, "cached answer for \"%s\" (%.1f s)", labels[i], bytes / (2.0f * LOCI_AUDIO_RATE));
     }
   }
+  return fetched;
 }
 
 // The answer as text: the stamp file written next to each clip. On a board without a speaker this
@@ -468,7 +516,7 @@ void local_memory_ensure_prompt(void) {
     return;
   }
   size_t n = 0;
-  if (host_fetch_file("/api/esp32/phrase.pcm?text=" OFFLINE_PROMPT_URL, OFFLINE_PCM, &n) == ESP_OK) {
+  if (s_fetch("/api/esp32/phrase.pcm?text=" OFFLINE_PROMPT_URL, OFFLINE_PCM, &n) == ESP_OK) {
     s_prompt_checked = true;
     ESP_LOGI(TAG, "offline prompt cached (%.1f s)", n / (2.0f * LOCI_AUDIO_RATE));
   }

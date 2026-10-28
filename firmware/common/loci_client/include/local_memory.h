@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "esp_err.h"
+
 // What the microSD card is used for (everything is a no-op when the card is not mounted):
 //
 //   /sdcard/loci/backlog/<ms>_<boot>_<seq>.jpg   frames captured while the host (or Wi-Fi) was unreachable;
@@ -12,7 +14,7 @@
 //                                            for a look instead of being retried forever
 //   /sdcard/loci/memory.json, memory.pcm     the host's remembered objects and a spoken summary, refreshed
 //                                            when the host's memory revision changes; played offline on the button
-//   /sdcard/loci/offline.pcm                 fixed prompt fetched once ("I can't reach the host...")
+//   /sdcard/loci/offline.pcm                 fixed prompt fetched once ("I'm offline right now...")
 //   /sdcard/loci/dataset/<NNNN>/<ms>.jpg + .json   every Nth live frame with the host's detections, 250 per
 //                                            folder: a dataset for training a detector on the user's own
 //                                            objects (builds before 0.5 wrote them flat into frames/)
@@ -43,8 +45,18 @@ void local_dataset_maybe_save(const uint8_t *jpeg, size_t len, int64_t ms, const
 void local_voice_save(const int16_t *pcm, size_t samples, int64_t ms);
 
 // -- cached memory + offline speech ------------------------------------------------------------
+// Where the cache files come from: the host (host_fetch_file, the default) or LOCI Cloud
+// (cloud_link_fetch_file), which serves the same /api/esp32/<route> names under board/.
+typedef esp_err_t (*local_fetch_fn)(const char *path_and_query, const char *dest_path, size_t *bytes_out);
+void local_memory_set_source(local_fetch_fn fetch);
 // Fetch memory.json / memory.pcm from the host when `rev` differs from the cached one (rate limited).
 void local_memory_refresh(const char *rev);
+// Cloud mode (no frame replies carry a rev): fetch memory.json, and when its rev differs from the
+// cached one, the spoken summary too. True when the cache changed (then fetch the phrases).
+bool local_memory_poll(void);
+// Fetch up to `max` per-object answers the card lacks (or that changed); returns how many it fetched,
+// 0 when all are up to date. Lets the main loop spread the fetches and keep the button live.
+int local_memory_cache_some_phrases(int max);
 // Fetch the fixed offline prompt once.
 void local_memory_ensure_prompt(void);
 // Speak what the card holds: memory.pcm if present, else offline.pcm. True if something played.

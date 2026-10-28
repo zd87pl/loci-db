@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
     "db:migrate:local": "wrangler d1 migrations apply loci-control --local",
     "db:migrate:remote": "wrangler d1 migrations apply loci-control --remote",
+    "db:migrate:staging": "wrangler d1 migrations apply loci-control-staging --remote --env staging",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

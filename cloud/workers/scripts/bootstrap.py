@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""Create a LOCI Cloud project, a space and a claimed device; print LOCI_CLOUD_* env lines.
+"""Create a LOCI Cloud project and print env lines for it.
+
+Device mode (default) also creates a space and a claimed device, and prints the
+LOCI_CLOUD_* lines the demo host reads:
 
     python3 cloud/workers/scripts/bootstrap.py --url http://127.0.0.1:8787 \
         --admin-token "$ADMIN_TOKEN" --space home --device "ESP32 pendant" > .cloud.env
+
+SDK mode prints LOCI_BASE_URL and LOCI_API_KEY for the Python SDK's cloud mode,
+LociClient(base_url=..., api_key=...); its first insert creates the "default" space:
+
+    python3 cloud/workers/scripts/bootstrap.py --url http://127.0.0.1:8787 \
+        --admin-token "$ADMIN_TOKEN" --sdk > .loci-sdk.env
 
 Secrets are printed to stdout only; keep that file private (chmod 600) and never commit it.
 """
@@ -44,6 +53,11 @@ def main() -> None:
     ap.add_argument("--jurisdiction", choices=["us", "eu"], default="us")
     ap.add_argument("--space", default="home")
     ap.add_argument("--device", default="ESP32 assistant")
+    ap.add_argument(
+        "--sdk",
+        action="store_true",
+        help="print LOCI_BASE_URL and LOCI_API_KEY for the Python SDK (no space or device)",
+    )
     a = ap.parse_args()
     if not a.url.startswith(("http://", "https://")):
         sys.exit("--url must be http(s)")
@@ -51,6 +65,12 @@ def main() -> None:
     body = {"name": a.name, "jurisdiction": a.jurisdiction}
     proj = call(a.url, "POST", "/admin/projects", a.admin_token, body)
     ref, sk = proj["ref"], proj["secret_key"]
+    sdk_url = f"{a.url.rstrip('/')}/p/{ref}"
+    if a.sdk:
+        print(f"LOCI_BASE_URL={sdk_url}")
+        print(f"LOCI_API_KEY={sk}")
+        print(f"# publishable key (read-only queries): {proj['publishable_key']}")
+        return
     base = f"/p/{ref}/v1"
     space = {"space": a.space, "name": a.space.title(), "frame": "room"}
     call(a.url, "POST", f"{base}/spaces", sk, space)
@@ -62,6 +82,7 @@ def main() -> None:
     print(f"LOCI_CLOUD_DEVICE_ID={claimed['device_id']}")
     print(f"LOCI_CLOUD_DEVICE_SECRET={claimed['device_secret']}")
     print(f"# secret key (server use only): LOCI_CLOUD_KEY={sk}")
+    print(f"# Python SDK base_url (with the secret key): {sdk_url}")
     print(f"# publishable key (apps, read-only): {proj['publishable_key']}")
 
 

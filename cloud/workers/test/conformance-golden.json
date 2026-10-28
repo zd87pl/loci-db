@@ -1,0 +1,49 @@
+{
+  "about": [
+    "Golden queries run through the local library and the SDK over HTTP (tests/test_cloud_conformance.py)",
+    "and through the Worker (cloud/workers/test/conformance.test.ts). States are inserted in order;",
+    "dt_ms and window_dt_ms are offsets from the test's clock. Queries with labels run only on the v1",
+    "/query (the SDK has no label filter); the library side runs them on the subset with those",
+    "metadata labels. Regenerate expect/links: LOCI_REGEN_GOLDEN=1 pytest tests/test_cloud_conformance.py"
+  ],
+  "vector_size": 4,
+  "states": [
+    {"key": "a", "dt_ms": -10800000, "x": 0.1, "y": 0.1, "z": 0.1, "vector": [1, 0, 0, 0], "scene_id": "kitchen", "confidence": 0.95, "metadata": {"label": "cup", "source": "cam0", "bbox": [1, 2, 3, 4]}},
+    {"key": "b", "dt_ms": -600000, "x": 0.55, "y": 0.45, "z": 0.35, "vector": [0.9, 0.1, 0, 0], "scene_id": "kitchen", "confidence": 0.8, "metadata": {"label": "cup"}, "prev_state_id": "ext-b"},
+    {"key": "c", "dt_ms": -60000, "x": 0.25, "y": 0.75, "z": 0.25, "vector": [0.6, 0.8, 0, 0], "scene_id": "hall", "scale_level": "frame", "confidence": 0.6, "metadata": {"label": "keys"}},
+    {"key": "d", "dt_ms": -30000, "x": 0.9, "y": 0.9, "z": 0.9, "vector": [0, 1, 0, 0], "scene_id": "hall", "confidence": 0.99, "metadata": {"label": "keys"}},
+    {"key": "e", "dt_ms": -7200000, "x": 0.75, "y": 0.25, "z": 0.5, "vector": [0.7, 0, 0.7, 0.1], "scene_id": "kitchen", "confidence": 0.7, "metadata": {"label": "mug"}},
+    {"key": "f", "dt_ms": -21600000, "x": 0.5, "y": 0.5, "z": 1.0, "vector": [0.8, 0.2, 0.2, 0], "scene_id": "garden", "confidence": 0.5},
+    {"key": "g", "dt_ms": -300000, "x": 0.0, "y": 0.0, "z": 0.0, "vector": [-1, 0, 0, 0], "scene_id": "garden", "scale_level": "sequence", "confidence": 1.0, "metadata": {"label": "plant"}},
+    {"key": "h", "dt_ms": -2700000, "x": 0.4, "y": 0.6, "z": 0.5, "vector": [0.95, 0, 0.05, 0.3], "scene_id": "hall", "confidence": 0.9, "metadata": {"label": "cup"}, "prev_state_id": "ext-prev", "next_state_id": "ext-next"}
+  ],
+  "queries": [
+    {"name": "nearest_decayed", "vector": [1, 0, 0, 0], "limit": 3, "expect": ["b", "c", "h"]},
+    {"name": "all_ranked", "vector": [1, 0, 0, 0], "limit": 10, "expect": ["b", "c", "h", "e", "a", "f", "d", "g"]},
+    {"name": "region_overfetch_limit1", "vector": [1, 0, 0, 0], "bounds": {"x_min": 0.0, "x_max": 0.5}, "limit": 1, "expect": ["h"]},
+    {"name": "region_limit3", "vector": [1, 0, 0, 0], "bounds": {"x_min": 0.0, "x_max": 0.5}, "limit": 3, "expect": ["c", "h", "a"]},
+    {"name": "region_box", "vector": [1, 0, 0, 0], "bounds": {"x_min": 0.3, "x_max": 0.6, "y_min": 0.4, "y_max": 0.7, "z_min": 0.3, "z_max": 0.6}, "limit": 10, "expect": ["b", "h"]},
+    {"name": "time_window_inclusive", "vector": [1, 0, 0, 0], "window_dt_ms": [-10800000, -2700000], "limit": 10, "expect": ["h", "e", "a"]},
+    {"name": "min_confidence_inclusive", "vector": [1, 0, 0, 0], "min_confidence": 0.9, "limit": 10, "expect": ["h", "a", "d", "g"]},
+    {"name": "combined", "vector": [1, 0, 0, 0], "bounds": {"x_min": 0.0, "x_max": 0.5}, "window_dt_ms": [-21600000, -60000], "min_confidence": 0.55, "limit": 2, "expect": ["c", "h"]},
+    {"name": "other_direction", "vector": [0, 1, 0, 0], "limit": 3, "expect": ["d", "c", "b"]},
+    {"name": "empty_region", "vector": [1, 0, 0, 0], "bounds": {"x_min": 0.95, "x_max": 1.0, "y_min": 0.0, "y_max": 0.05}, "limit": 5, "expect": []},
+    {"name": "label_cup", "vector": [1, 0, 0, 0], "labels": ["cup"], "limit": 10, "expect": ["b", "h", "a"]},
+    {"name": "labels_with_region", "vector": [1, 0, 0, 0], "labels": ["keys", "mug"], "bounds": {"x_min": 0.2, "x_max": 1.0}, "limit": 10, "expect": ["c", "e", "d"]}
+  ],
+  "links": {
+    "a": {"prev": null, "next": "e"},
+    "b": {"prev": "a", "next": null},
+    "c": {"prev": null, "next": "d"},
+    "d": {"prev": "c", "next": null},
+    "e": {"prev": "a", "next": null},
+    "f": {"prev": null, "next": "g"},
+    "g": {"prev": "f", "next": null},
+    "h": {"prev": "ext-prev", "next": "ext-next"}
+  },
+  "wire": {
+    "insert_keys": ["confidence", "metadata", "next_state_id", "prev_state_id", "scale_level", "scene_id", "timestamp_ms", "vector", "x", "y", "z"],
+    "query_keys": ["include_vectors", "limit", "min_confidence", "overlap_factor", "time_end_ms", "time_start_ms", "vector", "x_max", "x_min", "y_max", "y_min", "z_max", "z_min"],
+    "result_keys": ["confidence", "id", "metadata", "next_state_id", "prev_state_id", "scale_level", "scene_id", "timestamp_ms", "vector", "x", "y", "z"]
+  }
+}

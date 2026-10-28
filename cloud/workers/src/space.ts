@@ -1,16 +1,25 @@
 /**
  * SpaceObject: one SQLite-backed Durable Object per space (a home, a map, a survey area).
  * Holds the observations, a revision log for device delta sync, and answers
- * where / changes / digest / ask with strong per-space consistency.
+ * where / changes / digest / ask / query with strong per-space consistency.
  */
 
 import { DurableObject } from "cloudflare:workers";
 import { age, changesAnswer, listAnswer, parseIntent, resolveLabel, wherePhrase, whereAnswer } from "./ask";
-import { hilbert3 } from "./hilbert";
-import type { Change, Digest, Env, Frame, InsertResult, Observation, ObservationIn, SpaceMeta } from "./types";
+import { hilbert3, hilbertRanges3 } from "./hilbert";
+import type {
+  Change, Digest, Env, Frame, InsertResult, Observation, ObservationIn, QueryHit, QueryResult, QuerySpec, SdkFields,
+  SdkStateIn, SpaceMeta,
+} from "./types";
 
 const HILBERT_ORDER = 8;
 const MOVED_THRESHOLD_M = 0.5;
+const SCHEMA_VERSION = 2;
+/** Vector queries score at most this many matching rows, newest first. */
+const MAX_VECTOR_SCAN = 20_000;
+/** Same over-fetch and decay clamp as loci's query_scored and temporal.decay. */
+const OVERFETCH = 3;
+const MIN_DECAY_EXPONENT = -700;
 
 type Row = Record<string, SqlStorageValue>;
 
@@ -20,6 +29,38 @@ function quantiseEmbedding(v: number[]): { blob: ArrayBuffer; scale: number } {
   const q = new Int8Array(v.length);
   for (let i = 0; i < v.length; i++) q[i] = Math.max(-127, Math.min(127, Math.round((v[i] ?? 0) / scale)));
   return { blob: q.buffer, scale };
+}
+
+/** `emb` holds int8 values times `emb_scale`, or float32 values when `emb_scale` is NULL (SDK vectors, kept exact). */
+function decodeEmbedding(blob: ArrayBuffer, scale: number | null): number[] {
+  return scale === null ? Array.from(new Float32Array(blob)) : Array.from(new Int8Array(blob), (v) => v * scale);
+}
+
+function norm(v: number[]): number {
+  let s = 0;
+  for (const x of v) s += x * x;
+  return Math.sqrt(s);
+}
+
+/** Cosine similarity as loci's memory backend computes it: 0 for a zero query, zero-norm rows count as norm 1. */
+function cosine(q: number[], qNorm: number, v: number[]): number {
+  if (qNorm === 0) return 0;
+  let dot = 0;
+  for (let i = 0; i < q.length; i++) dot += (q[i] as number) * (v[i] as number);
+  return dot / ((norm(v) || 1) * qNorm);
+}
+
+function vec3InUnit(v: [number, number, number], lo: [number, number, number], hi: [number, number, number]) {
+  return v.map((x, k) => (x - lo[k]!) / (hi[k]! - lo[k]!)) as [number, number, number];
+}
+
+function rowToSdk(r: Row): SdkFields {
+  return {
+    scene_id: (r.scene as string | null) ?? null,
+    scale_level: (r.scale as string | null) ?? null,
+    prev_state_id: (r.prev_id as string | null) ?? null,
+    next_state_id: (r.next_id as string | null) ?? null,
+  };
 }
 
 function rowToObs(r: Row): Observation {
@@ -71,6 +112,26 @@ export class SpaceObject extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS tombstones (id TEXT PRIMARY KEY, label TEXT NOT NULL, room TEXT, rev INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS tombstones_rev ON tombstones(rev);
     `);
+    this.migrate();
+  }
+
+  /** Additive schema changes for objects created by earlier versions. */
+  private migrate(): void {
+    const r = this.sql.exec("SELECT v FROM meta WHERE k = 'schema'").toArray()[0];
+    if ((r ? Number(r.v) : 1) >= SCHEMA_VERSION) return;
+    this.ctx.storage.transactionSync(() => {
+      // v2: WorldState fields for the SDK compatibility layer, and a Hilbert index for region queries.
+      // Observations without a label (SDK states whose metadata has none) are stored with label ''.
+      this.sql.exec(`
+        ALTER TABLE obs ADD COLUMN scene TEXT;
+        ALTER TABLE obs ADD COLUMN scale TEXT;
+        ALTER TABLE obs ADD COLUMN prev_id TEXT;
+        ALTER TABLE obs ADD COLUMN next_id TEXT;
+        CREATE INDEX IF NOT EXISTS obs_scene_t ON obs(scene, t);
+        CREATE INDEX IF NOT EXISTS obs_h8 ON obs(h8);
+      `);
+      this.sql.exec("INSERT INTO meta (k, v) VALUES ('schema', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", String(SCHEMA_VERSION));
+    });
   }
 
   private getMeta(): SpaceMeta | null {
@@ -81,6 +142,16 @@ export class SpaceObject extends DurableObject<Env> {
   private rev(): number {
     const r = this.sql.exec("SELECT v FROM meta WHERE k = 'rev'").toArray()[0];
     return r ? Number(r.v) : 0;
+  }
+
+  private setRev(rev: number): void {
+    this.sql.exec("INSERT INTO meta (k, v) VALUES ('rev', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", String(rev));
+  }
+
+  /** Vector dimension fixed by the first SDK insert into this space, or null. */
+  private sdkDim(): number | null {
+    const r = this.sql.exec("SELECT v FROM meta WHERE k = 'sdk_dim'").toArray()[0];
+    return r ? Number(r.v) : null;
   }
 
   /** Store (or update) the space's frame and extents. Idempotent. */
@@ -108,21 +179,18 @@ export class SpaceObject extends DurableObject<Env> {
         const id = o.id ?? (deviceId && o.seq !== undefined ? `d_${deviceId}_${o.seq}` : crypto.randomUUID());
         ids.push(id);
         const frame = o.frame ?? meta.frame;
-        const unit = [o.x, o.y, o.z].map((v, k) => (v - lo[k]!) / (hi[k]! - lo[k]!)) as [number, number, number];
         const emb = o.embedding ? quantiseEmbedding(o.embedding) : null;
         const cur = this.sql.exec(
           `INSERT OR IGNORE INTO obs (id, device_id, label, frame, room, x, y, z, h8, t, confidence, emb, emb_scale, emb_model, meta, media, rev)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          id, deviceId, o.label, frame, o.room ?? null, o.x, o.y, o.z, hilbert3(unit, HILBERT_ORDER), o.t,
+          id, deviceId, o.label, frame, o.room ?? null, o.x, o.y, o.z, hilbert3(vec3InUnit([o.x, o.y, o.z], lo, hi), HILBERT_ORDER), o.t,
           o.confidence ?? 1, emb?.blob ?? null, emb?.scale ?? null, o.embedding_model ?? null,
           o.metadata ? JSON.stringify(o.metadata) : null, o.media ?? null, rev,
         );
         if (cur.rowsWritten > 0) accepted++;
         else duplicates++;
       }
-      if (accepted > 0 || deleted > 0) {
-        this.sql.exec("INSERT INTO meta (k, v) VALUES ('rev', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", String(rev));
-      }
+      if (accepted > 0 || deleted > 0) this.setRev(rev);
     });
     return { accepted, duplicates, deleted, ids, rev: accepted > 0 || deleted > 0 ? rev : rev - 1 };
   }
@@ -135,12 +203,12 @@ export class SpaceObject extends DurableObject<Env> {
   }
 
   labels(): string[] {
-    return this.sql.exec("SELECT DISTINCT label FROM obs").toArray().map((r) => String(r.label));
+    return this.sql.exec("SELECT DISTINCT label FROM obs WHERE label <> ''").toArray().map((r) => String(r.label));
   }
 
   /** Latest observation per (room, label), newest first. */
   latest(room: string | null = null, limit = 200): Observation[] {
-    const q = `SELECT o.* FROM obs o JOIN (SELECT label, room, MAX(t) AS mt FROM obs GROUP BY label, room) g
+    const q = `SELECT o.* FROM obs o JOIN (SELECT label, room, MAX(t) AS mt FROM obs WHERE label <> '' GROUP BY label, room) g
                ON o.label = g.label AND o.room IS g.room AND o.t = g.mt
                ${room ? "WHERE o.room = ?" : ""} ORDER BY o.t DESC LIMIT ?`;
     const rows = room ? this.sql.exec(q, room, limit) : this.sql.exec(q, limit);
@@ -199,7 +267,7 @@ export class SpaceObject extends DurableObject<Env> {
     const removed = full
       ? []
       : this.sql
-          .exec("SELECT DISTINCT label, room FROM tombstones WHERE rev > ?", sinceRev)
+          .exec("SELECT DISTINCT label, room FROM tombstones WHERE rev > ? AND label <> ''", sinceRev)
           .toArray()
           .map((r) => ({ label: String(r.label), room: (r.room as string | null) ?? null }))
           .filter((r) => !present.has(`${r.room}|${r.label}`));
@@ -211,6 +279,106 @@ export class SpaceObject extends DurableObject<Env> {
       })),
       removed,
     };
+  }
+
+  /**
+   * Region / time / label / room / confidence filters, then either newest first or, with a vector,
+   * the library's ranking: top limit x OVERFETCH by cosine, re-ranked by similarity x exp(-ln2 age / half-life).
+   */
+  query(meta: SpaceMeta, spec: QuerySpec, nowMs: number = Date.now()): QueryResult {
+    const where: string[] = [];
+    const args: SqlStorageValue[] = [];
+    const cond = (sql: string, ...values: SqlStorageValue[]) => {
+      where.push(sql);
+      args.push(...values);
+    };
+    if (spec.region) {
+      // Hilbert cell ranges narrow the scan through obs_h8; the exact bounds decide membership.
+      const { lo, hi } = meta.extents;
+      const ranges = hilbertRanges3(vec3InUnit(spec.region.lo, lo, hi), vec3InUnit(spec.region.hi, lo, hi), HILBERT_ORDER);
+      cond(`(${ranges.map(() => "h8 BETWEEN ? AND ?").join(" OR ")})`, ...ranges.flat());
+      const [rlo, rhi] = [spec.region.lo, spec.region.hi];
+      cond("x BETWEEN ? AND ? AND y BETWEEN ? AND ? AND z BETWEEN ? AND ?", rlo[0], rhi[0], rlo[1], rhi[1], rlo[2], rhi[2]);
+    }
+    if (spec.timeStart !== null) cond("t >= ?", spec.timeStart);
+    if (spec.timeEnd !== null) cond("t <= ?", spec.timeEnd);
+    if (spec.labels) cond(`label IN (${spec.labels.map(() => "?").join(", ")})`, ...spec.labels);
+    if (spec.room) cond("room = ?", spec.room);
+    if (spec.minConfidence !== null) cond("confidence >= ?", spec.minConfidence);
+    if (spec.vector) cond("emb IS NOT NULL");
+    const filter = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const hit = (r: Row, similarity: number | null, score: number | null): QueryHit => ({
+      obs: rowToObs(r),
+      sdk: rowToSdk(r),
+      similarity,
+      score,
+      embedding: spec.includeEmbedding && r.emb ? decodeEmbedding(r.emb as ArrayBuffer, r.emb_scale as number | null) : null,
+    });
+
+    if (!spec.vector) {
+      const rows = this.sql.exec(`SELECT * FROM obs ${filter} ORDER BY t DESC, id LIMIT ?`, ...args, spec.limit).toArray();
+      return { hits: rows.map((r) => hit(r, null, null)), truncated: false };
+    }
+
+    const q = spec.vector;
+    const qNorm = norm(q);
+    const scored: { id: string; t: number; similarity: number; score: number }[] = [];
+    let seen = 0;
+    const cursor = this.sql.exec(`SELECT id, t, emb, emb_scale FROM obs ${filter} ORDER BY t DESC, id LIMIT ?`, ...args, MAX_VECTOR_SCAN + 1);
+    for (const r of cursor) {
+      if (++seen > MAX_VECTOR_SCAN) break;
+      const v = decodeEmbedding(r.emb as ArrayBuffer, r.emb_scale as number | null);
+      if (v.length === q.length) scored.push({ id: String(r.id), t: Number(r.t), similarity: cosine(q, qNorm, v), score: 0 });
+    }
+    const bySimilarity = (a: (typeof scored)[number], b: (typeof scored)[number]) =>
+      b.similarity - a.similarity || b.t - a.t || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    scored.sort(bySimilarity);
+    const lambda = spec.halfLifeMs > 0 ? Math.LN2 / spec.halfLifeMs : 0;
+    const top = scored.slice(0, spec.limit * OVERFETCH);
+    for (const c of top) c.score = c.similarity * Math.exp(Math.max(-lambda * Math.max(0, nowMs - c.t), MIN_DECAY_EXPONENT));
+    top.sort((a, b) => b.score - a.score || bySimilarity(a, b));
+    return {
+      hits: top.slice(0, spec.limit).map((c) => hit(this.sql.exec("SELECT * FROM obs WHERE id = ?", c.id).one(), c.similarity, c.score)),
+      truncated: seen > MAX_VECTOR_SCAN,
+    };
+  }
+
+  /** SDK /query: the space's SDK vector dimension, once set, is enforced like the old server's vector_size. */
+  sdkQuery(meta: SpaceMeta, spec: QuerySpec): QueryResult | { error: string } {
+    const dim = this.sdkDim();
+    const n = spec.vector?.length ?? 0;
+    if (dim !== null && n !== dim) return { error: `vector must have ${dim} dimensions, got ${n}` };
+    return this.query(meta, spec);
+  }
+
+  /**
+   * SDK /insert: one WorldState, stored with an exact float32 vector. Links it after the latest earlier
+   * state of the same scene (that state's next_state_id becomes this id), as LociClient.insert does.
+   */
+  insertState(meta: SpaceMeta, s: SdkStateIn, label: string, deviceId: string | null): { id: string; rev: number } | { error: string } {
+    if (!this.getMeta()) this.configure(meta);
+    const dim = this.sdkDim();
+    if (dim !== null && s.vector.length !== dim) return { error: `vector must have ${dim} dimensions, got ${s.vector.length}` };
+    const id = crypto.randomUUID();
+    const rev = this.rev() + 1;
+    const { lo, hi } = meta.extents;
+    this.ctx.storage.transactionSync(() => {
+      const pred = this.sql
+        .exec("SELECT id FROM obs WHERE scene = ? AND t < ? ORDER BY t DESC, rowid DESC LIMIT 1", s.scene_id, s.timestamp_ms)
+        .toArray()[0];
+      if (pred) this.sql.exec("UPDATE obs SET next_id = ? WHERE id = ?", id, pred.id);
+      this.sql.exec(
+        `INSERT INTO obs (id, device_id, label, frame, room, x, y, z, h8, t, confidence, emb, emb_scale, emb_model, meta, media, rev,
+                          scene, scale, prev_id, next_id)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?)`,
+        id, deviceId, label, meta.frame, s.x, s.y, s.z, hilbert3(vec3InUnit([s.x, s.y, s.z], lo, hi), HILBERT_ORDER), s.timestamp_ms,
+        s.confidence, new Float32Array(s.vector).buffer, Object.keys(s.metadata).length ? JSON.stringify(s.metadata) : null, rev,
+        s.scene_id, s.scale_level, pred ? String(pred.id) : s.prev_state_id, s.next_state_id,
+      );
+      if (dim === null) this.sql.exec("INSERT INTO meta (k, v) VALUES ('sdk_dim', ?)", String(s.vector.length));
+      this.setRev(rev);
+    });
+    return { id, rev };
   }
 
   ask(text: string, nowMs: number = Date.now()): { answer: string; intent: string; label: string | null; results: Observation[] } {
@@ -237,7 +405,7 @@ export class SpaceObject extends DurableObject<Env> {
   }
 
   stats(): { observations: number; labels: number; rev: number; newest: number | null; newest_age: string | null } {
-    const r = this.sql.exec("SELECT COUNT(*) AS n, COUNT(DISTINCT label) AS l, MAX(t) AS m FROM obs").toArray()[0];
+    const r = this.sql.exec("SELECT COUNT(*) AS n, COUNT(DISTINCT NULLIF(label, '')) AS l, MAX(t) AS m FROM obs").toArray()[0];
     const newest = r?.m === null || r?.m === undefined ? null : Number(r.m);
     return {
       observations: Number(r?.n ?? 0),

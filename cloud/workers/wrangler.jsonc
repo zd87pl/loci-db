@@ -23,9 +23,10 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SpaceObject"] }],
 
-  // Per-principal write throttle (Workers rate-limiting binding).
+  // Per-principal write and query throttles (Workers rate-limiting binding).
   "ratelimits": [
-    { "name": "WRITE_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } }
+    { "name": "WRITE_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } },
+    { "name": "QUERY_LIMITER", "namespace_id": "1002", "simple": { "limit": 600, "period": 60 } }
   ],
 
   "vars": {

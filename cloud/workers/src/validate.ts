@@ -1,18 +1,21 @@
-import { FRAMES, type Extents, type Frame, type ObservationIn } from "./types";
+import { FRAMES, type Extents, type Frame, type ObservationIn, type QuerySpec } from "./types";
 import { HttpError } from "./util";
 
 export const MAX_BATCH = 50;
 export const MAX_DELETES = 200;
 const MAX_METADATA_BYTES = 4096;
-const MAX_EMBED_DIM = 1536;
+export const MAX_EMBED_DIM = 1536;
+export const MAX_QUERY_LIMIT = 1000;
+const MAX_QUERY_LABELS = 16;
+const MAX_HALF_LIFE_S = 365 * 86_400;
 const ID_RE = /^[A-Za-z0-9_.:-]{1,96}$/;
 const DAY_MS = 86_400_000;
 
-function bad(msg: string): never {
+export function bad(msg: string): never {
   throw new HttpError(422, msg, "invalid");
 }
 
-function finite(v: unknown, name: string): number {
+export function finite(v: unknown, name: string): number {
   if (typeof v !== "number" || !Number.isFinite(v)) bad(`${name} must be a finite number`);
   return v;
 }
@@ -39,13 +42,7 @@ export function validateObservation(o: unknown, i: number, nowMs: number): Obser
   if (!Number.isInteger(t) || t < 0 || t > nowMs + DAY_MS) bad(`${at}.t must be epoch milliseconds, not in the future`);
   const confidence = r.confidence === undefined ? 1 : finite(r.confidence, `${at}.confidence`);
   if (confidence < 0 || confidence > 1) bad(`${at}.confidence must be in [0, 1]`);
-  let embedding: number[] | undefined;
-  if (r.embedding !== undefined) {
-    if (!Array.isArray(r.embedding) || r.embedding.length === 0 || r.embedding.length > MAX_EMBED_DIM) {
-      bad(`${at}.embedding must have 1-${MAX_EMBED_DIM} numbers`);
-    }
-    embedding = r.embedding.map((v, k) => finite(v, `${at}.embedding[${k}]`));
-  }
+  const embedding = r.embedding === undefined ? undefined : validateVector(r.embedding, `${at}.embedding`);
   if (r.metadata !== undefined) {
     if (typeof r.metadata !== "object" || r.metadata === null || Array.isArray(r.metadata)) bad(`${at}.metadata must be an object`);
     if (JSON.stringify(r.metadata).length > MAX_METADATA_BYTES) bad(`${at}.metadata exceeds ${MAX_METADATA_BYTES} bytes`);
@@ -93,12 +90,88 @@ export function validateExtents(v: unknown, frame: Frame): Extents {
     return { lo: [-10, -1, -10], hi: [10, 4, 10] };
   }
   const e = v as { lo?: unknown; hi?: unknown };
-  const triple = (a: unknown, n: string): [number, number, number] => {
-    if (!Array.isArray(a) || a.length !== 3) bad(`extents.${n} must be [x, y, z]`);
-    return a.map((x, k) => finite(x, `extents.${n}[${k}]`)) as [number, number, number];
-  };
-  const lo = triple(e.lo, "lo");
-  const hi = triple(e.hi, "hi");
+  const lo = triple(e.lo, "extents.lo");
+  const hi = triple(e.hi, "extents.hi");
   if (lo.some((l, k) => l >= (hi[k] as number))) bad("extents.lo must be below extents.hi on every axis");
   return { lo, hi };
+}
+
+function triple(a: unknown, name: string): [number, number, number] {
+  if (!Array.isArray(a) || a.length !== 3) bad(`${name} must be [x, y, z]`);
+  return a.map((x, k) => finite(x, `${name}[${k}]`)) as [number, number, number];
+}
+
+export function validateVector(v: unknown, name: string): number[] {
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_EMBED_DIM) bad(`${name} must have 1-${MAX_EMBED_DIM} numbers`);
+  return v.map((x, k) => finite(x, `${name}[${k}]`));
+}
+
+function epochMs(v: unknown, name: string): number {
+  if (!Number.isSafeInteger(v) || (v as number) < 0) bad(`${name} must be epoch milliseconds`);
+  return v as number;
+}
+
+/** POST /spaces/:space/query. Region and time bounds are inclusive, as in the library. */
+export function validateQuery(body: unknown): QuerySpec {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) bad("body must be an object");
+  const b = body as Record<string, unknown>;
+
+  let region: Extents | null = null;
+  if (b.region !== undefined && b.region !== null) {
+    const r = b.region as { lo?: unknown; hi?: unknown };
+    const lo = triple(r.lo, "region.lo");
+    const hi = triple(r.hi, "region.hi");
+    if (lo.some((l, k) => l > (hi[k] as number))) bad("region.lo must not exceed region.hi on any axis");
+    region = { lo, hi };
+  }
+
+  let timeStart: number | null = null;
+  let timeEnd: number | null = null;
+  if (b.time !== undefined && b.time !== null) {
+    if (typeof b.time !== "object" || Array.isArray(b.time)) bad("time must be {start, end}");
+    const t = b.time as { start?: unknown; end?: unknown };
+    timeStart = t.start === undefined || t.start === null ? null : epochMs(t.start, "time.start");
+    timeEnd = t.end === undefined || t.end === null ? null : epochMs(t.end, "time.end");
+    if (timeStart !== null && timeEnd !== null && timeStart > timeEnd) bad("time.start must be <= time.end");
+  }
+
+  if (b.label !== undefined && b.labels !== undefined) bad("send label or labels, not both");
+  const rawLabels = b.labels ?? (b.label === undefined ? undefined : [b.label]);
+  let labels: string[] | null = null;
+  if (rawLabels !== undefined) {
+    if (!Array.isArray(rawLabels) || rawLabels.length === 0 || rawLabels.length > MAX_QUERY_LABELS) {
+      bad(`labels must have 1-${MAX_QUERY_LABELS} entries`);
+    }
+    labels = rawLabels.map((l, i) => {
+      if (typeof l !== "string" || !normLabel(l) || l.length > 64) bad(`labels[${i}] must be 1-64 characters`);
+      return normLabel(l);
+    });
+  }
+
+  let minConfidence: number | null = null;
+  if (b.min_confidence !== undefined && b.min_confidence !== null) {
+    minConfidence = finite(b.min_confidence, "min_confidence");
+    if (minConfidence < 0 || minConfidence > 1) bad("min_confidence must be in [0, 1]");
+  }
+
+  const halfLifeS = b.half_life_s === undefined ? 3600 : finite(b.half_life_s, "half_life_s");
+  if (halfLifeS < 0 || halfLifeS > MAX_HALF_LIFE_S) bad(`half_life_s must be in [0, ${MAX_HALF_LIFE_S}]`);
+  const limit = b.limit === undefined ? 10 : b.limit;
+  if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > MAX_QUERY_LIMIT) {
+    bad(`limit must be an integer in [1, ${MAX_QUERY_LIMIT}]`);
+  }
+  if (b.include_embedding !== undefined && typeof b.include_embedding !== "boolean") bad("include_embedding must be a boolean");
+
+  return {
+    region,
+    timeStart,
+    timeEnd,
+    labels,
+    room: normRoom(b.room),
+    minConfidence,
+    vector: b.vector === undefined || b.vector === null ? null : validateVector(b.vector, "vector"),
+    halfLifeMs: halfLifeS * 1000,
+    limit: limit as number,
+    includeEmbedding: b.include_embedding === true,
+  };
 }

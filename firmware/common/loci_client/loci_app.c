@@ -1,5 +1,6 @@
 // The LOCI thin client loop shared by the board projects (see loci_app.h).
-// Everything heavy runs on the host; this file is the loop that moves pixels and sound.
+// `mode host`: everything heavy runs on the host; this file is the loop that moves pixels and sound.
+// `mode cloud`: no host; the board answers locally first and uses LOCI Cloud for the rest.
 
 #include "loci_app.h"
 
@@ -12,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -25,6 +27,7 @@
 #include "driver/uart_vfs.h"
 #endif
 
+#include "cloud_link.h"
 #include "host_link.h"
 #include "local_memory.h"
 #include "loci_config.h"
@@ -48,6 +51,39 @@ static char s_last_labels[96];
 static QueueHandle_t s_cmd_queue;
 static int16_t *s_ptt_buf;
 static size_t s_ptt_cap_samples;
+
+// `mode cloud` (see loci_app.h), kept in NVS ("loci"/"mode"); without a stored choice, cloud once claimed.
+static bool s_cloud_mode;
+#ifndef LOCI_DETECT_INTERVAL_MS
+#define LOCI_DETECT_INTERVAL_MS 2000  // one on-board detection pass (and camera frame) this often
+#endif
+#define CLOUD_POLL_MS (10 * 60 * 1000)   // refresh the card cache from the cloud at least this often,
+#define CLOUD_POLL_AFTER_WRITE_MS 60000  // and a minute after the board's own sightings changed it
+
+static void set_mode(bool cloud, bool persist) {
+  s_cloud_mode = cloud;
+  local_memory_set_source(cloud ? cloud_link_fetch_file : host_fetch_file);
+  if (persist) {
+    nvs_handle_t h;
+    if (nvs_open("loci", NVS_READWRITE, &h) == ESP_OK) {
+      nvs_set_str(h, "mode", cloud ? "cloud" : "host");
+      nvs_commit(h);
+      nvs_close(h);
+    }
+  }
+  ESP_LOGI(TAG, "mode %s", cloud ? "cloud: local first, then LOCI Cloud" : "host");
+}
+
+static void load_mode(void) {
+  char mode[8] = "";
+  nvs_handle_t h;
+  if (nvs_open("loci", NVS_READONLY, &h) == ESP_OK) {
+    size_t len = sizeof(mode);
+    if (nvs_get_str(h, "mode", mode, &len) != ESP_OK) mode[0] = 0;
+    nvs_close(h);
+  }
+  set_mode(!strcmp(mode, "cloud") || (!mode[0] && cloud_link_configured()), false);
+}
 
 static bool button_down(void) {
   return s_cfg->button_gpio >= 0 && gpio_get_level(s_cfg->button_gpio) == 0;
@@ -78,6 +114,9 @@ static void print_status(void) {
 #endif
   ESP_LOGI(TAG, "boot %lu | clock %s, now %lld", (unsigned long)local_boot_id(), host_clock_source(),
            (long long)host_now_ms());
+  ESP_LOGI(TAG, "mode %s | on-board detector %s | sightings tracked %d, card queue %u B", s_cloud_mode ? "cloud" : "host",
+           s_cfg->detect ? "yes" : "no", sightings_tracked(), (unsigned)sightings_queue_bytes());
+  if (s_cloud_mode || cloud_link_configured()) cloud_link_print_status();
   if (si.mounted) {
     ESP_LOGI(TAG, "card: %.1f GB free, backlog %d frames, dataset %d frames | labels: %s", si.free_bytes / 1e9,
              local_backlog_count(), local_dataset_count(), s_last_labels[0] ? s_last_labels : "-");
@@ -101,6 +140,62 @@ static void answer_offline_clip(const int16_t *pcm, size_t samples) {
     if (local_memory_play_object(label)) return;  // "Your cup was last seen ..."
   }
   answer_offline();  // the cached summary (or the fixed prompt)
+}
+
+// Typed "where is my cup?" in cloud mode: answered from the card when it holds that object.
+static bool answer_text_locally(const char *text) {
+  static const char *prefixes[] = {"where is my ", "where are my ", "where's my ", "where is the ", "where are the ",
+                                   "find my ", "where is "};
+  char q[96];
+  size_t n = 0;
+  for (size_t i = 0; text[i] && n + 1 < sizeof(q); i++) {
+    char c = text[i];
+    if (c == '?' || c == '.' || c == '!') continue;
+    q[n++] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+  }
+  while (n && q[n - 1] == ' ') n--;
+  q[n] = 0;
+  for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+    size_t len = strlen(prefixes[i]);
+    if (strncmp(q, prefixes[i], len) != 0 || !q[len]) continue;
+    char *noun = q + len;
+    if (local_memory_play_object(noun)) return true;
+    size_t m = strlen(noun);
+    if (m > 3 && noun[m - 1] == 's') {  // "where are my keys" -> key
+      noun[m - 1] = 0;
+      if (local_memory_play_object(noun)) return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+// A typed question: the host in host mode; in cloud mode the card first, then the cloud.
+static void ask_text(const char *text) {
+  if (!s_cloud_mode) {
+    host_ask(text);
+    return;
+  }
+  if (answer_text_locally(text)) return;
+  if (cloud_link_ask(text) != ESP_OK) ESP_LOGW(TAG, "no answer from the cloud (cloud status for details)");
+}
+
+// Cloud mode: the board's own recogniser first; what it cannot answer from the card goes to the cloud,
+// and when the cloud cannot answer either, the card's summary.
+static void answer_cloud_clip(const int16_t *pcm, size_t samples) {
+  char label[32] = "";
+  int cmd = voice_local_ready() ? voice_local_recognize(pcm, samples, label, sizeof(label)) : VOICE_CMD_NONE;
+  if (cmd >= VOICE_CMD_FIRST_OBJECT && label[0] && local_memory_play_object(label)) return;
+  if (cloud_link_usable()) {
+    esp_err_t rc = cmd == VOICE_CMD_WHAT_DO_YOU_SEE ? cloud_link_ask("what do you see")
+                                                     : cloud_link_voice((const uint8_t *)pcm, samples * sizeof(int16_t));
+    if (rc == ESP_OK) return;
+    if (rc == ESP_ERR_NOT_FOUND) {  // the cloud heard no words: a short low tone, as for a too-short press
+      audio_beep(220.0f, 120);
+      return;
+    }
+  }
+  answer_offline();
 }
 
 // Keep the recogniser's object list in step with the cached memory.
@@ -134,7 +229,9 @@ static void record_and_ask(void) {
     return;
   }
   audio_beep(880.0f, 60);  // "got it"
-  if (!wifi_link_connected() || !host_reachable()) {
+  if (s_cloud_mode) {
+    answer_cloud_clip(s_ptt_buf, samples);
+  } else if (!wifi_link_connected() || !host_reachable()) {
     ESP_LOGW(TAG, "[ptt] host unreachable: recognising on the board, answering from the card");
     answer_offline_clip(s_ptt_buf, samples);
   } else if (host_post_voice((const uint8_t *)s_ptt_buf, samples * sizeof(int16_t)) != ESP_OK) {
@@ -254,6 +351,104 @@ static void live_frame(void) {
   if (r.audio_pending) host_fetch_and_play_audio(0);
 }
 
+// ---- cloud mode ----------------------------------------------------------------------------
+// One camera frame through the board's detector into the sightings; every Nth frame also goes to
+// the card's dataset with the detections as its side-car.
+static void detect_pass(void) {
+  static loci_detection_t *dets;  // PSRAM: internal RAM is kept for the system
+  if (!dets) dets = heap_caps_calloc(16, sizeof(*dets), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  uint8_t *jpeg = NULL;
+  size_t len = 0;
+  if (!dets || camera_capture_jpeg(&jpeg, &len, NULL, NULL) != ESP_OK) return;
+  int n = s_cfg->detect ? s_cfg->detect(jpeg, len, dets, 16) : -1;
+  char sidecar[512];
+  size_t used = (size_t)snprintf(sidecar, sizeof(sidecar), "{\"source\":\"board\",\"detections\":[");
+  s_last_labels[0] = 0;
+  for (int i = 0; i < n; i++) {
+    int w = snprintf(sidecar + used, sizeof(sidecar) - used, "%s{\"label\":\"%s\",\"score\":%.2f,\"cx\":%.3f,\"cy\":%.3f}",
+                     i ? "," : "", dets[i].label, (double)dets[i].score, (double)dets[i].cx, (double)dets[i].cy);
+    if (w < 0 || used + (size_t)w >= sizeof(sidecar) - 4) break;
+    used += (size_t)w;
+    size_t l = strlen(s_last_labels);
+    snprintf(s_last_labels + l, sizeof(s_last_labels) - l, "%s%s", l ? "," : "", dets[i].label);
+  }
+  snprintf(sidecar + used, sizeof(sidecar) - used, "]}");
+  if (n > 0) sightings_add(dets, n);
+  local_dataset_maybe_save(jpeg, len, cloud_link_now_ms(), sidecar);
+  camera_release();
+  if (n > 0) ESP_LOGI(TAG, "[detect] %s", s_last_labels);
+}
+
+// One pass of the cloud-mode loop: the button, the board's detector, its sightings and the card cache.
+static void cloud_pass(int64_t now_ms) {
+  static int64_t last_det_ms = -LOCI_DETECT_INTERVAL_MS, last_flush_ms, last_poll_ms = -CLOUD_POLL_MS, changed_ms;
+  static bool phrases_pending = true;  // once per boot: fill in per-object answers the card lacks
+  if (button_down()) {
+    if (audio_mic_ready()) {
+      record_and_ask();
+    } else {
+      while (button_down()) vTaskDelay(pdMS_TO_TICKS(10));
+      ask_text("what do you see");
+    }
+    return;
+  }
+  if (s_cfg->camera_ok && now_ms - last_det_ms >= LOCI_DETECT_INTERVAL_MS) {
+    last_det_ms = now_ms;
+    detect_pass();
+  }
+  if (now_ms - last_flush_ms >= 5000) {
+    last_flush_ms = now_ms;
+    if (sightings_flush() > 0) changed_ms = now_ms;
+  }
+  bool due = now_ms - last_poll_ms >= CLOUD_POLL_MS ||
+             (changed_ms > last_poll_ms && now_ms - last_poll_ms >= CLOUD_POLL_AFTER_WRITE_MS);
+  if (due && storage_ready() && cloud_link_usable()) {
+    last_poll_ms = now_ms;
+    if (local_memory_poll()) {
+      phrases_pending = true;
+      refresh_offline_commands();
+    }
+    local_memory_ensure_prompt();
+  }
+  // one phrase per pass, so a press of the button is never kept waiting behind a dozen downloads
+  if (phrases_pending && storage_ready() && cloud_link_usable() && local_memory_cache_some_phrases(1) == 0)
+    phrases_pending = false;
+  if (wifi_link_connected()) {
+    vTaskDelay(pdMS_TO_TICKS(5));
+  } else {
+    wifi_link_wait(100);
+  }
+}
+
+static void cloud_command(const char *args) {
+  while (*args == ' ') args++;
+  if (!strncmp(args, "claim ", 6)) {
+    char url[160], space[64], code[40];
+    if (sscanf(args + 6, "%159s %63s %39s", url, space, code) != 3) {
+      ESP_LOGW(TAG, "usage: cloud claim <project_url> <space> <CODE>  (from cloud/workers/scripts/devices.py create)");
+    } else if (cloud_link_claim(url, space, code) == ESP_OK) {
+      set_mode(true, true);
+    }
+  } else if (!args[0] || !strcmp(args, "status")) {
+    cloud_link_print_status();
+  } else if (!strncmp(args, "ask ", 4)) {
+    if (cloud_link_ask(args + 4) != ESP_OK) ESP_LOGW(TAG, "[cloud] no answer");
+  } else if (!strcmp(args, "cache")) {  // refresh the card cache from the cloud now, whatever the mode
+    local_memory_set_source(cloud_link_fetch_file);
+    bool changed = local_memory_poll();
+    int fetched = local_memory_cache_some_phrases(12);
+    local_memory_ensure_prompt();
+    local_memory_set_source(s_cloud_mode ? cloud_link_fetch_file : host_fetch_file);
+    refresh_offline_commands();
+    ESP_LOGI(TAG, "[cloud] cache %s, %d phrases fetched", changed ? "refreshed" : "unchanged", fetched);
+  } else if (!strcmp(args, "forget")) {
+    cloud_link_forget();
+    set_mode(false, true);
+  } else {
+    ESP_LOGI(TAG, "cloud claim <project_url> <space> <CODE> | cloud status | cloud ask <question> | cloud cache | cloud forget");
+  }
+}
+
 // ---- serial console ------------------------------------------------------------------------
 // Runs in the main loop (see s_cmd_queue).
 static void run_console_command(const char *line) {
@@ -289,6 +484,22 @@ static void run_console_command(const char *line) {
     local_memory_cache_object_phrases();
     refresh_offline_commands();
     ESP_LOGI(TAG, "[cache] done");
+  } else if (!strcmp(line, "cloud") || !strncmp(line, "cloud ", 6)) {
+    cloud_command(line + 5);
+  } else if (!strncmp(line, "location ", 9)) {  // the room this board is in, sent with its sightings
+    const char *arg = line + 9;
+    while (*arg == ' ') arg++;
+    cloud_link_set_room(!strcmp(arg, "clear") ? NULL : arg);
+  } else if (!strncmp(line, "mode ", 5)) {
+    const char *arg = line + 5;
+    while (*arg == ' ') arg++;
+    if (!strcmp(arg, "host")) {
+      set_mode(false, true);
+    } else if (!strcmp(arg, "cloud") && cloud_link_configured()) {
+      set_mode(true, true);
+    } else {
+      ESP_LOGW(TAG, "mode cloud|host (cloud needs `cloud claim` first)");
+    }
   } else if (!strncmp(line, "host ", 5)) {  // runtime host URL, kept in NVS; "host default" restores secrets.h
     const char *arg = line + 5;
     while (*arg == ' ') arg++;
@@ -344,7 +555,7 @@ static void run_console_command(const char *line) {
   } else if (!strcmp(line, "audio")) {
     host_fetch_and_play_audio(2);
   } else if (!strncmp(line, "ask ", 4)) {
-    host_ask(line + 4);
+    ask_text(line + 4);
   } else if (!strncmp(line, "say ", 4)) {
     host_say(line + 4);
   } else if (!strncmp(line, "fps ", 4)) {
@@ -357,7 +568,8 @@ static void run_console_command(const char *line) {
     // handled by the board
   } else {
     ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | requeue | reboot | offline | recog | snap | beep | audio "
-                  "| ask <question> | say <text> | fps <n> | vol <0-100> | host <url>|default | token <value>|clear%s%s",
+                  "| ask <question> | say <text> | fps <n> | vol <0-100> | host <url>|default | token <value>|clear "
+                  "| mode cloud|host | location <room>|clear | cloud claim|status|ask|cache|forget%s%s",
              s_cfg->console_extra_help ? " | " : "", s_cfg->console_extra_help ? s_cfg->console_extra_help : "");
   }
 }
@@ -381,7 +593,9 @@ static void console_task(void *arg) {
     size_t n = strlen(line);
     while (n && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = 0;
     if (!n) continue;
-    if (xQueueSend(s_cmd_queue, line, 0) != pdTRUE) ESP_LOGW(TAG, "console busy, dropped: %s", line);
+    // only the command word: the line may hold a token or a claim code
+    if (xQueueSend(s_cmd_queue, line, 0) != pdTRUE)
+      ESP_LOGW(TAG, "console busy, dropped a \"%.*s\" line", (int)strcspn(line, " "), line);
   }
 }
 
@@ -413,11 +627,15 @@ void loci_app_run(const loci_app_config_t *cfg) {
   s_ptt_buf = heap_caps_malloc(s_ptt_cap_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
   host_link_init(cfg->host_url, cfg->device_id, cfg->device_token);
+  cloud_link_init(cfg->fw_version);
+  sightings_init();
+  load_mode();
   console_start();
 
   if (wifi_link_start(cfg->wifi_ssid, cfg->wifi_pass) == ESP_OK && wifi_link_wait(20000)) {
     audio_beep(783.99f, 120);  // third beep: online
   }
+  cloud_link_start_clock();  // real time stamps without a host (cloud mode sightings, file names)
   // After the Wi-Fi link: on the P4, ESP-Hosted has set up the SDMMC controller the card shares
   storage_init(LOCI_SD_FORMAT_IF_NEEDED != 0);
   local_memory_init();
@@ -428,6 +646,11 @@ void loci_app_run(const loci_app_config_t *cfg) {
   for (;;) {
     drain_console();
     int64_t now_ms = esp_timer_get_time() / 1000;
+
+    if (s_cloud_mode) {
+      cloud_pass(now_ms);
+      continue;
+    }
 
     if (!wifi_link_connected()) {
       // No network: keep remembering to the card at a slow rate, answer the button from the cache.

@@ -98,8 +98,10 @@ asserted (the scratchpad `serial_cmd.py` helper does that).
 ## On-board detection (`detect`)
 
 The firmware carries ESP-DL's COCO detector (YOLO11n, 320×320, int8; `coco_detect` component,
-model in the 4 MB `coco_det` partition that `idf.py flash` writes). It is a measuring tool for now:
-the frame loop still uploads JPEGs and the host still decides what is remembered.
+model in the 4 MB `coco_det` partition that `idf.py flash` writes). In `mode host` it is a
+measuring tool: the frame loop uploads JPEGs and the host decides what is remembered. In
+`mode cloud` (`docs/ESP32_CLOUD_MODE.md`) its detections are the board's own sightings in LOCI
+Cloud. The code is shared with the P4 in `../common/loci_detect`.
 
 * `detect [n]` runs it on `n` live frames. Each frame is decoded at reduced size (JPEG → RGB565,
   scaled by ½, ¼ or ⅛ until it is at most 640 px wide) and the labels are printed with the timing.

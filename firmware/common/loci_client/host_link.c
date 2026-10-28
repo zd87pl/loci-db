@@ -60,7 +60,7 @@ int64_t host_now_ms(void) {
 
 const char *host_clock_source(void) {
   if (s_clock_synced) return "host";
-  return system_unix_ms() > 0 ? "kept across reset" : "unknown";
+  return system_unix_ms() > 0 ? "system (SNTP, or kept across reset)" : "unknown";
 }
 const char *host_last_reply(void) { return s_resp ? s_resp : ""; }
 const char *host_device_id(void) { return s_device; }

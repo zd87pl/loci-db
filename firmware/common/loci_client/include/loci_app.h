@@ -1,6 +1,10 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "sightings.h"
 
 // The thin client's main loop, shared by every board project. The board's app_main() brings up its
 // camera and audio path (loci_hw.h), configures the button GPIO and then calls loci_app_run(), which
@@ -11,6 +15,10 @@
 //   mic + button ──► POST /api/esp32/voice (push-to-talk); offline: ESP-SR command + answer from the card
 //   microSD ── frames kept while offline and uploaded later at their capture time, a cached copy of the
 //              host's memory for offline answers, and a dataset of frames + detections
+//
+// That is `mode host`. In `mode cloud` (the default once the board is claimed, see cloud_link.h) there
+// is no host: the board works locally first (its own detector, MultiNet commands, the card cache) and
+// then uses LOCI Cloud for its sightings, free-form spoken questions and the cache's content.
 //
 // Serial console (115200 on UART0, or the USB-Serial/JTAG port): type `help` for the commands.
 
@@ -25,6 +33,9 @@ typedef struct {
   const char *host_url;
   const char *device_id;
   const char *device_token;
+  // Optional on-board detector (cloud mode): detections in one JPEG frame, up to `max`, boxes
+  // normalised to the frame; returns the count, or -1 when it cannot run.
+  int (*detect)(const uint8_t *jpeg, size_t len, loci_detection_t *out, int max);
   // Optional board-specific console commands: return true when the line was handled.
   bool (*console_extra)(const char *line);
   const char *console_extra_help;  // appended to the help line, e.g. "imu | led <0|1>"

@@ -1,6 +1,9 @@
 # Name,   Type, SubType, Offset,  Size, Flags
+# 16 MB flash. The app is 6 MB: ESP-DL with the detector's full operator set makes it ~4.4 MB.
+# model = ESP-SR MultiNet (srmodels.bin, ~2.8 MB); coco_det = the ESP-DL COCO detector (~3 MB).
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 0x400000,
+factory,  app,  factory, 0x10000, 0x600000,
 storage,  data, spiffs,  ,        0x100000,
-model,    data, ,        ,        0x600000,
+model,    data, ,        ,        0x380000,
+coco_det, data, ,        ,        0x400000,

@@ -4,7 +4,3 @@ dependencies:
   idf: ">=5.4"
   # DVP camera driver (OV5640 / OV3660 / OV2640 with on-sensor JPEG)
   espressif/esp32-camera: "^2.1.8"
-  # on-board COCO detector (YOLO11n 320x320 int8 for the S3, model in the "coco_det" partition)
-  espressif/coco_detect: "~0.4.2"
-  # JPEG decoder with downscaling for the detector's input (also used by esp-dl)
-  espressif/esp_new_jpeg: "^1"

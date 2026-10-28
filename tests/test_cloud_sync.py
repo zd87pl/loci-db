@@ -21,12 +21,21 @@ from app.cloud_sync import (  # noqa: E402
     LociCloudClient,
     record_to_observation,
 )
+from app.persistence import MemoryPersistence  # noqa: E402
+from app.room_anchor import RoomMap  # noqa: E402
+from app.spatial_memory import SpatialMemory  # noqa: E402
 
 REF = "abcdefghij12"
 
 
 class FakeCloud:
-    """Records writes; issues device tokens; can be told to fail or expire tokens."""
+    """Records writes; issues device tokens; can be told to fail or expire tokens.
+
+    Writes follow the Worker: deletes first, then inserts that ignore known ids, or with
+    ``"upsert": true`` updates of known ids when label and room match and ``t`` does not
+    go back (the Worker's guard). ``supports_upsert = False`` plays an older Worker,
+    which ignores the flag and has no ``updated`` / ``conflicts`` in its reply.
+    """
 
     def __init__(self) -> None:
         self.observations: dict[str, dict] = {}
@@ -36,6 +45,33 @@ class FakeCloud:
         self.valid_tokens: set[str] = {"loci_sk_secret"}
         self.fail_next = 0
         self.user_agents: set[str] = set()
+        self.supports_upsert = True
+
+    def _write(self, body: dict) -> dict:
+        obs, dels = body.get("observations", []), body.get("deletes", [])
+        upsert = bool(body.get("upsert")) and self.supports_upsert
+        for d in dels:
+            self.observations.pop(d, None)
+        accepted = duplicates = updated = conflicts = 0
+        for o in obs:
+            old = self.observations.get(o["id"])
+            if old is None:
+                self.observations[o["id"]] = o
+                accepted += 1
+            elif not upsert or old == o:
+                duplicates += 1
+            elif (old["label"], old.get("room")) != (o["label"], o.get("room")) or o["t"] < old[
+                "t"
+            ]:
+                conflicts += 1
+            else:
+                self.observations[o["id"]] = o
+                updated += 1
+        self.rev += 1
+        reply = {"accepted": accepted, "duplicates": duplicates, "deleted": len(dels)}
+        if self.supports_upsert:
+            reply.update(updated=updated, conflicts=conflicts)
+        return {**reply, "rev": self.rev}
 
     def handle(
         self, method: str, path: str, auth: str | None, body: dict | None
@@ -63,17 +99,7 @@ class FakeCloud:
             obs, dels = body.get("observations", []), body.get("deletes", [])
             assert len(obs) <= 50 and len(dels) <= 200
             self.batches.append(body)
-            for o in obs:
-                self.observations.setdefault(o["id"], o)
-            for d in dels:
-                self.observations.pop(d, None)
-            self.rev += 1
-            return 201, {
-                "accepted": len(obs),
-                "duplicates": 0,
-                "deleted": len(dels),
-                "rev": self.rev,
-            }
+            return 201, self._write(body)
         if rest.startswith("spaces/home/digest") and method == "GET":
             return 200, {"rev": self.rev, "full": True, "objects": [], "removed": []}
         if rest == "spaces/home/ask" and method == "POST":
@@ -180,7 +206,7 @@ def test_sync_pushes_new_records_in_batches_and_deletes_removed(cloud, tmp_path:
     assert [len(b["observations"]) for b in cloud.batches] == [50, 50, 20]
     assert len(cloud.observations) == 120
 
-    assert sync.sync_once() == {"sent": 0, "deleted": 0, "held": 0, "rev": 3}
+    assert sync.sync_once() == {"sent": 0, "updated": 0, "deleted": 0, "held": 0, "rev": 3}
 
     mem.records = mem.records[5:] + [rec(500)]  # merge: 5 records gone, one new
     second = sync.sync_once()
@@ -196,7 +222,7 @@ def test_state_survives_restart_so_deletes_are_not_lost(cloud, tmp_path: Path) -
     mem.records = mem.records[1:]
     restarted = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
     out = restarted.sync_once()
-    assert out == {"sent": 0, "deleted": 1, "held": 0, "rev": 2}
+    assert out == {"sent": 0, "updated": 0, "deleted": 1, "held": 0, "rev": 2}
     assert set(cloud.observations) == {"h_r1", "h_r2"}
 
 
@@ -326,15 +352,18 @@ def test_empty_restore_sends_no_deletes_and_keeps_the_breaker_open(
     assert _deletes_sent(cloud) == 0
 
 
-def test_restart_with_fresh_ids_uploads_them_and_holds_the_old_ones(cloud, tmp_path: Path) -> None:
-    # Until stable sighting ids (CLOUD-1), restore gives every record a new id, so a restart
-    # looks like "all gone, all new": the new ids go up and the old ones wait for a human.
+def test_restart_with_fresh_record_ids_keeps_the_cloud_ids(cloud, tmp_path: Path) -> None:
+    # CLOUD-1: restore gives every record a new id but keeps its sighting id, so the cloud
+    # sees the same 1,225 sightings after a restart: nothing to send, update or delete.
     mem, state = _seeded(cloud, tmp_path)
-    mem.records = [{**rec(i), "id": f"new{i}"} for i in range(LIVE)]
+    mem.records = [
+        {**rec(i), "id": f"new{i}", "metadata": {**rec(i)["metadata"], "sighting_id": f"r{i}"}}
+        for i in range(LIVE)
+    ]
     sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
     out = sync.sync_once()
-    assert (out["sent"], out["deleted"], out["held"]) == (LIVE, 0, LIVE)
-    assert len(cloud.observations) == 2 * LIVE
+    assert (out["sent"], out["updated"], out["deleted"], out["held"]) == (0, 0, 0, 0)
+    assert cloud.batches == [] and len(cloud.observations) == LIVE
 
 
 @pytest.mark.parametrize(
@@ -410,3 +439,114 @@ def test_acceptance_covers_only_the_deletes_that_were_checked(cloud, tmp_path: P
     assert (out["deleted"], out["held"]) == (250, 50)
     assert sync.status()["delete_breaker"] == "open"
     assert len(cloud.observations) == 50
+
+
+# ---------------------------------------------------------------------------
+# Stable sighting ids (CLOUD-1)
+# ---------------------------------------------------------------------------
+
+
+def test_cloud_id_comes_from_the_sighting_id_and_the_room_is_kept() -> None:
+    r = rec(0, frame="image")
+    r["id"] = "r_after_merge"
+    r["metadata"].update(sighting_id="first_id", last_room="kitchen")
+    obs = record_to_observation(r)
+    assert obs is not None and obs["id"] == "h_first_id"
+    assert obs["metadata"]["last_room"] == "kitchen"
+
+
+def test_a_changed_sighting_is_upserted_not_deleted_and_reinserted(cloud) -> None:
+    mem = FakeMemory([rec(i) for i in range(3)])
+    sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)))
+    sync.sync_once()
+    merged = rec(0, t=1_700_000_009_000)
+    merged["id"] = "r0_merged"  # a merge re-ids the record ...
+    merged["metadata"].update(sighting_id="r0", merge_count=1, pos_m=[-1.0, 0.8, 1.5])
+    mem.records = [merged, *mem.records[1:]]
+    out = sync.sync_once()
+    assert (out["sent"], out["updated"], out["deleted"]) == (0, 1, 0)
+    assert cloud.batches[-1]["upsert"] is True and "deletes" not in cloud.batches[-1]
+    assert cloud.observations["h_r0"]["t"] == 1_700_000_009_000
+    assert cloud.observations["h_r0"]["x"] == -1.0 and len(cloud.observations) == 3
+    assert sync.sync_once() == {"sent": 0, "updated": 0, "deleted": 0, "held": 0, "rev": 2}
+    assert sync.status()["updated_total"] == 1
+
+
+def test_merge_and_restart_through_spatial_memory_keep_the_cloud_ids(cloud, tmp_path) -> None:
+    now = 1_760_000_000_000
+
+    def boot() -> SpatialMemory:
+        p = MemoryPersistence(tmp_path / "mem", snapshot_interval_s=1e9, journal_fsync_s=0.02)
+        mem = SpatialMemory(epoch_size_ms=5000, persistence=p, rooms=RoomMap.default())
+        mem.restore()
+        return mem
+
+    def see(mem: SpatialMemory, label: str, x: float, t: int) -> None:
+        mem.observe(
+            label,
+            cx=0.5,
+            cy=0.5,
+            confidence=0.9,
+            timestamp_ms=t,
+            min_confidence=0.0,
+            pos_room_m=(x, 0.8, 1.0),
+            room="kitchen",
+            anchored=True,
+            anchor_confidence=1.0,
+        )
+
+    state = tmp_path / "cloud_sync.json"
+    mem = boot()
+    see(mem, "cup", 1.0, now)
+    see(mem, "bottle", -0.6, now + 1000)
+    sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
+    assert sync.sync_once()["sent"] == 2
+    ids = set(cloud.observations)
+    see(mem, "cup", 1.1, now + 1500)  # merge: the record gets a new id
+    out = sync.sync_once()
+    assert (out["sent"], out["updated"], out["deleted"]) == (0, 1, 0)
+    assert set(cloud.observations) == ids
+    mem.close()
+
+    mem2 = boot()  # restart: restore re-ids every record
+    restarted = CloudSync(mem2, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
+    out = restarted.sync_once()
+    assert (out["sent"], out["updated"], out["deleted"], out["held"]) == (0, 0, 0, 0)
+    assert set(cloud.observations) == ids
+    assert restarted.status()["delete_breaker"] == "closed"
+    mem2.close()
+
+
+def test_a_state_file_from_before_fingerprints_is_adopted_without_resending(
+    cloud, tmp_path: Path
+) -> None:
+    state = tmp_path / "cloud_sync.json"
+    mem = FakeMemory([rec(i) for i in range(5)])
+    CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state).sync_once()
+    data = json.loads(state.read_text())
+    data["pushed"] = sorted(data["pushed"])  # the format before fingerprints: ids only
+    state.write_text(json.dumps(data))
+    cloud.batches.clear()
+    mem.records[0]["metadata"]["last_room"] = "kitchen"  # content the old build never sent
+    sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)), state_path=state)
+    assert sync.sync_once() == {"sent": 0, "updated": 0, "deleted": 0, "held": 0, "rev": None}
+    assert cloud.batches == []
+    assert sorted(json.loads(state.read_text())["pushed"].values())[0]  # fingerprints now
+
+
+def test_a_cloud_that_ignores_upserts_is_reported_and_tried_again_later(cloud) -> None:
+    cloud.supports_upsert = False  # a Worker from before the upsert support
+    mem = FakeMemory([rec(i) for i in range(2)])
+    sync = CloudSync(mem, LociCloudClient(secret_cfg(cloud.url)))
+    sync.sync_once()
+    mem.records[0] = {**mem.records[0], "timestamp_ms": 1_700_000_009_000}
+    assert sync.sync_once()["updated"] == 0
+    assert "does not apply upserts" in (sync.status()["last_error"] or "")
+    batches = len(cloud.batches)
+    sync.sync_once()
+    assert len(cloud.batches) == batches  # no re-send on every pass while it waits
+    cloud.supports_upsert = True
+    sync._upsert_retry_at = 0.0  # the hour is up
+    assert sync.sync_once()["updated"] == 1
+    assert sync.status()["last_error"] is None
+    assert cloud.observations["h_r0"]["t"] == 1_700_000_009_000

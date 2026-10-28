@@ -55,3 +55,14 @@ entries:
 archive: libespressif__esp-dl.a
 entries:
     * (loci_bss_in_psram)
+
+# The on-board detector (firmware/common/loci_detect) and its JPEG decoder, for the same reason.
+[mapping:loci_coco_detect]
+archive: libespressif__coco_detect.a
+entries:
+    * (loci_bss_in_psram)
+
+[mapping:loci_detect]
+archive: libloci_detect.a
+entries:
+    * (loci_bss_in_psram)

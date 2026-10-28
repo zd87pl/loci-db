@@ -616,6 +616,9 @@ class SpatialMemory:
             metadata=metadata,
         )
         state_id = self._client.insert(state)
+        # The sighting keeps its first id for life: merges and restores re-id the record,
+        # but carry this, so mirrors such as cloud_sync see one stable object.
+        metadata.setdefault("sighting_id", state_id)
         rec: ObservationRecord = {
             "id": state_id,
             "scene_id": p.scene_id,
@@ -796,6 +799,8 @@ class SpatialMemory:
                 source=p.source,
                 first_seen_ms=s.first_seen_ms,
                 merge_count=s.merge_count + 1,
+                # a record without the field is known to mirrors by its own id
+                extra={"sighting_id": old_meta.get("sighting_id") or s.state_id},
             )
             return self._insert_pending(merged)
         return None
@@ -1238,6 +1243,8 @@ class SpatialMemory:
             rec["prev_state_id"] = chain.get(rec["scene_id"])
             chain[rec["scene_id"]] = new_id
             rec["metadata"]["embedder"] = str(self._embedder.name)
+            # records saved before sighting ids existed keep the id mirrors already know
+            rec["metadata"].setdefault("sighting_id", old["id"])
             self._restored_ids.add(new_id)
             self._add_record(rec)
 

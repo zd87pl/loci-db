@@ -209,7 +209,7 @@ With those, a device costs cents per month to serve, and a $2–5 per-device pri
 
 Risks:
 
-- **Two implementations of query semantics** (Python and TypeScript/Wasm). Mitigation: a shared conformance suite of golden queries run against both in CI.
+- **Two implementations of query semantics** (Python and TypeScript/Wasm). Mitigation: a shared conformance suite of golden queries run against both in CI. It has been in place since #80 for `query`, and §11 extends it to every README promise.
 - **Durable Object hot spots** for busy spaces. Mitigation: tile sharding from day one in the schema, enabled per space when needed.
 - **Vendor concentration** on Cloudflare. Mitigation: the open-source library and a documented export format keep a self-host exit.
 - **Compliance claims** for health data must be verified product by product before sales.
@@ -222,6 +222,8 @@ Risks:
 | 1 | 3 | Queues bulk ingest, R2 media, Vectorize search, live WebSocket, Analytics Engine metering, minimal dashboard | A robot log of 1M observations ingests without errors; usage visible per project |
 | 2 | 3 | Stripe billing, Free and Pro plans, EU jurisdiction, TypeScript and C SDKs, ROS 2 bridge, conformance suite | First paid design partner on Pro |
 | 3 | ongoing | Workers AI add-ons, Containers jobs, Team plan, audit, retention, OEM device licensing | First hardware partner on device licensing |
+
+Section 11 turns parity with the library and the robotics work into milestones that run alongside phases 1 and 2.
 
 ## 10. Decisions needed
 
@@ -241,4 +243,102 @@ Risks:
 | Cloud inference | Deferred; Phase 0 accepts observations only (edge inference on the P4 board, Pi or home host) | Phase 3 add-ons |
 | Prices | As in section 6, unpublished; Phase 0 meters usage but bills nothing | After 5–10 design-partner interviews |
 
-Sources: [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/), [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), [Durable Objects data location](https://developers.cloudflare.com/durable-objects/reference/data-location/), [Vectorize limits](https://developers.cloudflare.com/vectorize/platform/limits/), [Vectorize metadata filtering](https://developers.cloudflare.com/vectorize/reference/metadata-filtering/), [Containers GA changelog](https://developers.cloudflare.com/changelog/post/2026-04-13-containers-sandbox-ga/), [Containers pricing](https://developers.cloudflare.com/containers/pricing/).
+## 11. Keeping the README's promise, and robots
+
+The README promises what the open-source library does: a 4D Hilbert address, one query that combines similarity, place and time, novelty, trajectories and memory that ages. LOCI Cloud has to keep the same promise, or it is not LOCI. This section is the plan for that, extended to robots, which are the most demanding users of spatial memory. It refines phases 1 and 2.
+
+### 11.1 Where the cloud stands (main, 2026-10-28)
+
+| README promise | Library | Cloud today |
+|---|---|---|
+| Similarity, where and when in one `query(...)` | Yes | Yes. The conformance suite (`cloud/workers/test/conformance-golden.json`) runs 12 golden queries through both, with the same ids in the same order. |
+| Hilbert-bucketed 4D address | `(x, y, z, t)` at orders 4, 8 and 12, time normalised per epoch | No. A 3D key at order 8 only; time is a plain column, and nothing indexes it on its own. |
+| "Is this new?" | `predict_and_retrieve` with a novelty score and an optional calibrator | Partly. The basic form runs as a plain query; the scored and calibrated forms raise `CloudModeUnsupportedError`. |
+| Trajectories and causal links | `get_trajectory`, `get_causal_context` | No. The links are stored, but nothing queries them. |
+| Memory that ages, bounded storage | `ConsolidationPolicy`, `RetentionPolicy` | No. |
+| `insert_batch`, `query_scored`, `funnel_query` | Yes | No. |
+| Scale | Exact in-process search, or Qdrant (approximate, HNSW) | Exact search over at most the newest 20,000 matching rows per vector query; 10 GB and about 1,000 requests per second per space |
+
+### 11.2 Decisions
+
+1. **One engine, not a light and a full product.** The device API (`observations`, `where`, `ask`, `digest`, board routes) and the SDK surface read the same table in the same space object. Two engines would need two conformance suites, and would leave customers asking which one keeps the promise. Size becomes a plan setting (exact search for small spaces; a vector index and tiling for large ones), not a second product.
+2. **There is no SQLite vector search to use.** SQLite in Durable Objects supports a subset of extensions (FTS5, JSON, math functions) and cannot load others, so sqlite-vec and libSQL's vector index are not available; D1 is the same. The space object implements vector search itself, as `LocalLociClient` does.
+3. **Exact search stays the reference.** The library's in-process client keeps every promise with exact scoring behind the Hilbert and time pre-filter, and the space object does the same. An approximate index is added only for large spaces. Exact mode stays available per query, and the conformance suite always runs in it.
+4. **Vectorize is for search across spaces only.** Its limits (at most 50 results with metadata, 10 metadata indexes, writes queryable in under 30 s at the median and under 2 min at p99) suit "where has any robot seen this", not the strongly consistent per-space path.
+5. **The definition of done is a conformance row per promise.** Each row of the README's comparison table gets golden cases that run against the library and the Worker in CI. Once a row's cases pass, the README states that LOCI Cloud supports that row.
+
+### 11.3 Library parity in the space object
+
+- **4D address.**
+  - Store `hilbert_r4`, `hilbert_r8` and `hilbert_r12` exactly as `HilbertIndex.encode` computes them: 4D, with time normalised within the observation's epoch. Each space sets `epoch_ms` (default 5,000, as in the library) when it is created.
+  - Index `(epoch, hilbert_r12)`. A query whose window lies within one epoch becomes `hilbert_r12` prefix ranges, the same construction as today's `hilbertRanges3` in four dimensions.
+  - Windows spanning several epochs, or queries without a window, use the existing 3D `h8` cover plus a new index on `t`. This is the library's own rule: multi-epoch windows use a spatial-only cover and a timestamp range.
+  - The keys are at most 48 bits, so they are exact in JavaScript.
+  - The Hilbert golden file gains 4D cases, so the Worker must produce the library's address for the same state.
+- **Scoring.**
+  - Cosine scoring and Hilbert encoding move into `loci-core` compiled to WebAssembly, with `rayon` behind a feature flag (§3.1), and use SIMD for int8 and float32 rows.
+  - The 20,000-row scan cap stays until the vector index lands.
+- **Vector index for large spaces (IVF).**
+  - When a space passes a size threshold (about 50,000 embedded rows), an alarm trains k-means centroids on a sample, with k of about √N.
+  - Each row gets a `list` column, assigned at insert, so writes stay synchronous and consistent; it is indexed with `t`.
+  - A query probes the nearest lists, applies the Hilbert, time and label filters in SQL, then re-ranks exactly with decay, as `query` does today.
+  - The alarm retrains when list sizes drift.
+  - Target: recall@10 of at least 0.95 against exact search on a benchmark, with the number of probed lists chosen to meet it. Qdrant's HNSW is approximate too, so this is the same promise class as the library on Qdrant.
+- **The full SDK surface.** `insert_batch`, `query_scored` (scores are already computed), `get_trajectory` (by scene and window), `get_causal_context` (along the stored links) and `funnel_query` (coarse to fine through r4, r8 and r12).
+  - `predict_and_retrieve` and its calibrator run in the SDK on top of `query_scored`, reusing the library's code, so novelty is computed one way.
+  - Each method leaves `CloudModeUnsupportedError` as it lands.
+- **Memory that ages.**
+  - Per-space `ConsolidationPolicy` and `RetentionPolicy`, with the library's fields, run from Durable Object alarms.
+  - Summaries go to a `summary` table that queries search alongside raw rows, as `loci_summary` is searched; deleted rows leave tombstones for `digest`.
+  - Storage per space stays bounded however long a robot runs.
+
+### 11.4 Robots
+
+The reference platform is Menlo Research's Asimov v1, an open-source humanoid with a Raspberry Pi 5 for media and networking and a Radxa CM5 for motion control. LOCI runs on the Pi 5 as it already does in the handheld demo (Pi 5 and OAK-D Lite), and nothing touches the motion controller. Until an Asimov is available, the handheld rig stands in for it. We found no confirmed ROS 2 support for Asimov, so integration goes through its own software stack or the bridge below.
+
+- **Two tiers.**
+  - The library on the robot is its working memory: in-process, available offline, with the whole promise.
+  - The cloud space is the shared memory of a site or fleet, fed with consolidated sightings.
+  - Neither tier belongs in a control or safety loop.
+- **Client and bridge.**
+  - A Python client for the v1 API: spaces, coordinates in metres in the space's frame, device tokens, upsert.
+  - A ROS 2 node that turns detection and pose topics into observations and serves `where`, `query` and `changes`.
+  - The `WorldState` compatibility layer stays for normalised SDK data.
+- **Write path.** Robots see far more than they should upload.
+  - Sightings are merged on the robot with the demo's rule (the same label within 2 s and 0.35 m).
+  - They are sent with stable ids as upserts (#81, #82), so retries and restarts never duplicate them.
+  - Bursts and log backfills go through Queues (§3.3) and get a job id.
+  - The Phase 0 limit (120 writes per minute of up to 50 sightings, about 100 per second per robot) becomes a plan setting.
+- **Maps that change.** SLAM loop closures move past poses, and maps get rebuilt. A sighting stored only in map coordinates goes stale when that happens. Neither the library nor the cloud handles this today, and it is the most robot-specific gap.
+  - Observations gain optional `map_id`, `map_version` and `anchor` (a pose-graph node or keyframe id), with the offset from that anchor.
+  - `POST /v1/spaces/{space}/maps/{map}/corrections` takes updated anchor poses. An alarm re-projects the affected rows, recomputing coordinates and Hilbert keys, and bumps the revision.
+  - Queries can ask for a map version.
+  - A rebuilt map is a new version, with an optional transform from the old one.
+  - The library gains the same fields, so both tiers agree.
+- **Fleet scale.**
+  - A site is a space.
+  - Busy or large sites shard into tiles (§3.1) once they near 10 GB or about 1,000 requests per second.
+  - Questions across sites use Vectorize (decision 4).
+  - Vector queries take an `emb_model` and compare only rows with the same model, so a fleet mixing embedding models never compares unlike vectors.
+- **Time.** Robots stamp event time and must keep their clocks synchronised (NTP or PTP); the router already rejects times more than a day ahead.
+- **Safety.** The memory is advisory and can be stale. Every answer carries the sighting's age and confidence, as the spoken answers already do, and the API documentation says the memory is not an obstacle map.
+
+### 11.5 Milestones
+
+| Milestone | Delivers | Exit test |
+|---|---|---|
+| M1 Parity core | 4D address, `t` index and per-space `epoch_ms`; `insert_batch`, `query_scored`, `get_trajectory`, `get_causal_context` | Golden cases for the 4D address and for trajectories and causal links pass on the library and the Worker |
+| M2 Novelty | `predict_and_retrieve` with novelty and calibrator, and `funnel_query`, in cloud mode | A familiar and an unseen view score the same novelty on both |
+| M3 Ageing | Consolidation and retention alarms, the summary table | A long-run golden case ends with the library's summaries and row counts |
+| M4 Robot client | v1 Python client, ROS 2 bridge, merging on the robot, Queues bulk ingest | The handheld rig streams an hour-long session into a site space without loss; a 1M-observation robot log ingests (the Phase 1 exit test) |
+| M5 Scale | WebAssembly scoring, the IVF index, exact mode per query | On a 1M-row space, recall@10 of at least 0.95 against exact search; latency measured and published |
+| M6 Fleets and maps | Map versions and corrections, tiling, cross-space search | A replayed loop closure moves stored sightings to the corrected poses; two robots share one site space |
+
+The README's comparison table gains a LOCI Cloud column as M1 to M3 land. M1 to M3 run alongside Phase 1 (§9); M4 to M6 span phases 1 and 2.
+
+**Open questions.**
+- How map frames line up with ROS conventions (`map`, `odom`, REP 105).
+- Which embedding model a fleet standardises on.
+- How robot write volumes are priced.
+
+Sources: [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/), [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/), [Durable Objects data location](https://developers.cloudflare.com/durable-objects/reference/data-location/), [Vectorize limits](https://developers.cloudflare.com/vectorize/platform/limits/), [Vectorize metadata filtering](https://developers.cloudflare.com/vectorize/reference/metadata-filtering/), [Containers GA changelog](https://developers.cloudflare.com/changelog/post/2026-04-13-containers-sandbox-ga/), [Containers pricing](https://developers.cloudflare.com/containers/pricing/), [SQLite storage API (supported extensions)](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/), [Vectorize write latency changelog, 2026-06-30](https://developers.cloudflare.com/changelog/post/2026-06-30-improved-wal-throughput/), [Menlo Research: Asimov](https://menlo.ai/products/asimov), [Asimov v1 release](https://www.opensourceforu.com/2026/05/asimov-v1-open-sources-humanoid-robotics-development/).

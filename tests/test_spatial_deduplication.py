@@ -45,6 +45,9 @@ def test_duplicate_high_iou_merges_into_existing_record() -> None:
     observations = mem.where_is("cup")
     assert len(observations) == 1
     assert observations[0].state_id == id2
+    # ... while the sighting keeps its first id (what cloud_sync mirrors it under)
+    (rec,) = mem.export_records()
+    assert rec["metadata"]["sighting_id"] == id1
 
 
 def test_unique_low_iou_inserts_as_new_record() -> None:

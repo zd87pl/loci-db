@@ -12,12 +12,14 @@ project URL, ``https://<worker>/p/<ref>``, and ``api_key`` a project key:
 space.  Requests carry their own ``User-Agent`` because Cloudflare rejects
 Python's default one (error 1010).
 
-Only ``insert`` and ``query`` are supported in cloud mode today (plus the
-legacy ``predict_and_retrieve`` path, which is a plain query under the hood).
-Other methods (``insert_batch``, ``query_scored``, ``get_trajectory``,
-``get_causal_context``, ``funnel_query``, and the extended
-``predict_and_retrieve`` path) raise :class:`CloudModeUnsupportedError` until
-the cloud API exposes matching endpoints.
+Cloud mode supports ``insert``, ``insert_batch``, ``query``, ``query_scored``,
+``get_trajectory`` and ``get_causal_context`` (plus the legacy
+``predict_and_retrieve`` path, which is a plain query under the hood).
+``funnel_query`` and the extended ``predict_and_retrieve`` path raise
+:class:`CloudModeUnsupportedError` until the cloud API exposes matching
+endpoints.  ``insert_batch`` sends at most :data:`BATCH_STATES` states per
+request, in (scene, time) order, and passes each scene's last id on to the
+next request, so a split batch links exactly like one ``insert_batch`` call.
 
 The wire format round-trips every :class:`~loci.schema.WorldState` field:
 ``metadata``, ``scale_level``, ``confidence`` and the causal links
@@ -30,7 +32,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from loci.schema import WorldState
+from loci.schema import ScoredWorldState, WorldState
+
+#: States per ``/insert_batch`` request (``MAX_BATCH_STATES`` in cloud/workers/src/compat.ts).
+BATCH_STATES = 100
 
 
 def _user_agent() -> str:
@@ -106,6 +111,23 @@ def _query_payload(
     return body
 
 
+def _parse_world_state(r: dict[str, Any]) -> WorldState:
+    return WorldState(
+        x=r["x"],
+        y=r["y"],
+        z=r["z"],
+        timestamp_ms=r["timestamp_ms"],
+        vector=r.get("vector", []),
+        scene_id=r.get("scene_id", ""),
+        scale_level=r.get("scale_level", "patch"),
+        confidence=r.get("confidence", 1.0),
+        metadata=r.get("metadata") or {},
+        prev_state_id=r.get("prev_state_id"),
+        next_state_id=r.get("next_state_id"),
+        id=str(r["id"]),
+    )
+
+
 def _parse_query_results(payload: dict[str, Any]) -> list[WorldState]:
     """Map cloud query result items to WorldStates.
 
@@ -113,25 +135,28 @@ def _parse_query_results(payload: dict[str, Any]) -> list[WorldState]:
     parsed tolerantly: older servers omit them, in which case the WorldState
     defaults apply.
     """
-    results = []
-    for r in payload.get("results", []):
-        results.append(
-            WorldState(
-                x=r["x"],
-                y=r["y"],
-                z=r["z"],
-                timestamp_ms=r["timestamp_ms"],
-                vector=r.get("vector", []),
-                scene_id=r.get("scene_id", ""),
-                scale_level=r.get("scale_level", "patch"),
-                confidence=r.get("confidence", 1.0),
-                metadata=r.get("metadata") or {},
-                prev_state_id=r.get("prev_state_id"),
-                next_state_id=r.get("next_state_id"),
-                id=str(r["id"]),
-            )
+    return [_parse_world_state(r) for r in payload.get("results", [])]
+
+
+def _parse_scored_results(payload: dict[str, Any]) -> list[ScoredWorldState]:
+    return [
+        ScoredWorldState(
+            state=_parse_world_state(r),
+            score=float(r["score"]),
+            decayed_score=float(r["decayed_score"]),
         )
-    return results
+        for r in payload.get("results", [])
+    ]
+
+
+def _batch_chunks(states: list[WorldState]) -> list[list[int]]:
+    """Input indices in (scene, time) order, split into requests of BATCH_STATES."""
+    order = sorted(range(len(states)), key=lambda i: (states[i].scene_id, states[i].timestamp_ms))
+    return [order[k : k + BATCH_STATES] for k in range(0, len(order), BATCH_STATES)]
+
+
+def _batch_body(states: list[WorldState], chunk: list[int], chains: dict[str, str]) -> dict:
+    return {"states": [_insert_payload(states[i]) for i in chunk], "chains": chains}
 
 
 class CloudTransport:
@@ -188,6 +213,41 @@ class CloudTransport:
         )
         resp = self._request("POST", "/query", body)
         return _parse_query_results(resp)
+
+    def insert_batch(self, states: list[WorldState]) -> list[str]:
+        ids = [""] * len(states)
+        chains: dict[str, str] = {}
+        for chunk in _batch_chunks(states):
+            resp = self._request("POST", "/insert_batch", _batch_body(states, chunk, chains))
+            for i, state_id in zip(chunk, resp["ids"], strict=True):
+                ids[i] = str(state_id)
+            chains.update(resp.get("chains", {}))
+        return ids
+
+    def query_scored(
+        self,
+        vector: list[float],
+        spatial_bounds: dict | None = None,
+        time_window_ms: tuple[int, int] | None = None,
+        limit: int = 10,
+        overlap_factor: float = 1.2,
+        min_confidence: float | None = None,
+    ) -> list[ScoredWorldState]:
+        body = _query_payload(
+            vector, spatial_bounds, time_window_ms, limit, overlap_factor, True, min_confidence
+        )
+        body["include_scores"] = True
+        return _parse_scored_results(self._request("POST", "/query", body))
+
+    def get_trajectory(
+        self, state_id: str, steps_back: int = 10, steps_forward: int = 10
+    ) -> list[WorldState]:
+        body = {"state_id": state_id, "steps_back": steps_back, "steps_forward": steps_forward}
+        return _parse_query_results(self._request("POST", "/trajectory", body))
+
+    def get_causal_context(self, state_id: str, window_ms: int = 5000) -> list[WorldState]:
+        body = {"state_id": state_id, "window_ms": window_ms}
+        return _parse_query_results(self._request("POST", "/causal_context", body))
 
 
 class AsyncCloudTransport:
@@ -252,3 +312,38 @@ class AsyncCloudTransport:
         )
         resp = await self._request("POST", "/query", body)
         return _parse_query_results(resp)
+
+    async def insert_batch(self, states: list[WorldState]) -> list[str]:
+        ids = [""] * len(states)
+        chains: dict[str, str] = {}
+        for chunk in _batch_chunks(states):
+            resp = await self._request("POST", "/insert_batch", _batch_body(states, chunk, chains))
+            for i, state_id in zip(chunk, resp["ids"], strict=True):
+                ids[i] = str(state_id)
+            chains.update(resp.get("chains", {}))
+        return ids
+
+    async def query_scored(
+        self,
+        vector: list[float],
+        spatial_bounds: dict | None = None,
+        time_window_ms: tuple[int, int] | None = None,
+        limit: int = 10,
+        overlap_factor: float = 1.2,
+        min_confidence: float | None = None,
+    ) -> list[ScoredWorldState]:
+        body = _query_payload(
+            vector, spatial_bounds, time_window_ms, limit, overlap_factor, True, min_confidence
+        )
+        body["include_scores"] = True
+        return _parse_scored_results(await self._request("POST", "/query", body))
+
+    async def get_trajectory(
+        self, state_id: str, steps_back: int = 10, steps_forward: int = 10
+    ) -> list[WorldState]:
+        body = {"state_id": state_id, "steps_back": steps_back, "steps_forward": steps_forward}
+        return _parse_query_results(await self._request("POST", "/trajectory", body))
+
+    async def get_causal_context(self, state_id: str, window_ms: int = 5000) -> list[WorldState]:
+        body = {"state_id": state_id, "window_ms": window_ms}
+        return _parse_query_results(await self._request("POST", "/causal_context", body))

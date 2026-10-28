@@ -58,15 +58,17 @@ Vector databases store the *what*. LOCI stores all three, indexes them together,
 | *"Is what I'm about to see new?"* | `predict_and_retrieve(...)`, which returns a **novelty score** in `[0, 1]` |
 | *"How did I get here?"* | `get_trajectory(...)` / `get_causal_context(...)` |
 
-|  | Plain vector DB | LLM agent memory | **LOCI** |
-|:--|:--|:--|:--|
-| Built for | any embedding | chat and text facts | **sensor and world-model embeddings in space and time** |
-| `(x, y, z, t)` as a first-class index | payload filters you wire up yourself | not applicable | **Hilbert-bucketed 4D address** |
-| Space + time + similarity in one call | DIY | not applicable | **one `query(...)`** |
-| "Is this new?" | not built in | not built in | **calibrated novelty score** |
-| Trajectories and causal links | not built in | not built in | **built in** |
-| Memory that ages gracefully | TTL / delete | varies | **episodic → summary consolidation, bounded storage** |
-| Infra needed to try it | a server | varies | **none** (in-process), or Qdrant for production |
+|  | Plain vector DB | LLM agent memory | **LOCI** | LOCI Cloud |
+|:--|:--|:--|:--|:--|
+| Built for | any embedding | chat and text facts | **sensor and world-model embeddings in space and time** | the same, shared by devices and fleets |
+| `(x, y, z, t)` as a first-class index | payload filters you wire up yourself | not applicable | **Hilbert-bucketed 4D address** | yes, the same address |
+| Space + time + similarity in one call | DIY | not applicable | **one `query(...)`** | yes, same results |
+| "Is this new?" | not built in | not built in | **calibrated novelty score** | planned |
+| Trajectories and causal links | not built in | not built in | **built in** | yes |
+| Memory that ages gracefully | TTL / delete | varies | **episodic → summary consolidation, bounded storage** | planned |
+| Infra needed to try it | a server | varies | **none** (in-process), or Qdrant for production | a project key |
+
+The LOCI Cloud column covers what `LociClient` cloud mode does against the managed service ([cloud/workers](cloud/workers/README.md)). "Yes" means a shared conformance suite runs the same golden cases through the library and the service in CI. "Planned" rows are milestones in [docs/CLOUD_PLATFORM_DESIGN.md](docs/CLOUD_PLATFORM_DESIGN.md).
 
 ## Quick start
 
@@ -402,6 +404,23 @@ context = client.get_causal_context(state_id, window_ms=5000)
 ```
 
 Upgrading a deployment created before the bounded two-collection layout? Run `loci migrate-layout --qdrant-url http://localhost:6333` once (see [CHANGELOG.md](CHANGELOG.md); this was a breaking storage-layout change).
+</details>
+
+<details>
+<summary><b>LOCI Cloud (managed, on Cloudflare)</b></summary>
+
+The same client talks to a LOCI Cloud project when given its URL and key. To get them, run `cloud/workers/scripts/bootstrap.py --sdk`, or ask the operator.
+
+```python
+from loci import LociClient
+
+client = LociClient(base_url="https://<worker>/p/<ref>", api_key="loci_sk_...", vector_size=512)
+ids = client.insert_batch(states)
+hits = client.query(vector=v, spatial_bounds=region, time_window_ms=(t0, t1), limit=10)
+path = client.get_trajectory(ids[0], steps_back=5, steps_forward=5)
+```
+
+See [cloud/workers/README.md](cloud/workers/README.md) for the quickstart, the API, limits and which methods cloud mode supports.
 </details>
 
 <details>

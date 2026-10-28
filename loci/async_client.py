@@ -397,7 +397,7 @@ class AsyncLociClient:
             List of assigned IDs (same order as *states*).
         """
         if self._cloud is not None:
-            raise CloudModeUnsupportedError("insert_batch is not supported in cloud mode")
+            return await self._cloud.insert_batch(states)
         for state in states:
             self._validate_vector(state.vector)
         await self._ensure_data_collection()
@@ -558,7 +558,18 @@ class AsyncLociClient:
         truncation behave identically across metrics and backends.
         """
         if self._cloud is not None:
-            raise CloudModeUnsupportedError("query_scored is not supported in cloud mode")
+            if _extra_payload_filter is not None or _epoch_ids is not None:
+                raise CloudModeUnsupportedError(
+                    "advanced filtering (payload filters, epoch ids) is not supported in cloud mode"
+                )
+            return await self._cloud.query_scored(
+                vector=vector,
+                spatial_bounds=spatial_bounds,
+                time_window_ms=time_window_ms,
+                limit=limit,
+                overlap_factor=overlap_factor,
+                min_confidence=min_confidence,
+            )
 
         # Exact x/y/z/confidence Range conditions for the backend filter.
         # The timestamp range is handled separately below because it is also
@@ -829,7 +840,7 @@ class AsyncLociClient:
         excluded by collection.
         """
         if self._cloud is not None:
-            raise CloudModeUnsupportedError("get_trajectory is not supported in cloud mode")
+            return await self._cloud.get_trajectory(state_id, steps_back, steps_forward)
         anchor = await self._get_state_by_id(state_id)
         if anchor is None:
             return []
@@ -882,7 +893,7 @@ class AsyncLociClient:
         excluded by collection.
         """
         if self._cloud is not None:
-            raise CloudModeUnsupportedError("get_causal_context is not supported in cloud mode")
+            return await self._cloud.get_causal_context(state_id, window_ms)
         anchor = await self._get_state_by_id(state_id)
         if anchor is None or not anchor.scene_id:
             return []

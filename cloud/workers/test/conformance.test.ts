@@ -16,13 +16,20 @@ interface GQuery {
   name: string; vector: number[]; bounds?: Record<string, number>; window_dt_ms?: [number, number]; min_confidence?: number;
   labels?: string[]; limit: number; expect: string[];
 }
+type Links = Record<string, { prev: string | null; next: string | null }>;
 interface Golden {
   states: GState[];
   queries: GQuery[];
-  links: Record<string, { prev: string | null; next: string | null }>;
+  links: Links;
   wire: { insert_keys: string[]; query_keys: string[]; result_keys: string[] };
+  scored: { query: string; scores: [string, number][] };
+  batch: { states: GState[]; links: Links };
+  trajectories: { anchor: string; steps_back: number; steps_forward: number; expect: string[] }[];
+  causal: { anchor: string; window_ms: number; expect: string[] }[];
+  addresses: { epoch_ms: number; states: { x: number; y: number; z: number; timestamp_ms: number; expect: Json }[] };
 }
 const G = goldenJson as unknown as Golden;
+const MISSING_ID = "00000000-0000-0000-0000-000000000000";
 
 const now = Date.now();
 let project: Awaited<ReturnType<typeof newProject>>;
@@ -66,6 +73,14 @@ function v1QueryBody(q: GQuery): Json {
   return body;
 }
 
+/** Every state's links, by key. */
+async function links(base: string, token: string, keys: Record<string, string>): Promise<Links> {
+  const r = await call("POST", `${base}/query`, { token, body: { vector: [1, 0, 0, 0], limit: 100, include_vectors: false } });
+  return Object.fromEntries(
+    r.body.results.map((x: Json) => [keys[x.id], { prev: keys[x.prev_state_id] ?? x.prev_state_id, next: keys[x.next_state_id] ?? x.next_state_id }]),
+  );
+}
+
 beforeAll(async () => {
   project = await newProject("Conformance");
   for (const s of G.states) {
@@ -101,14 +116,7 @@ describe("conformance with the Python library", () => {
   });
 
   it("links states within a scene as LociClient.insert does", async () => {
-    const r = await call("POST", `${project.base}/query`, { token: project.sk, body: { vector: [1, 0, 0, 0], limit: 100 } });
-    const links = Object.fromEntries(
-      r.body.results.map((x: Json) => [keyOf[x.id], {
-        prev: keyOf[x.prev_state_id] ?? x.prev_state_id,
-        next: keyOf[x.next_state_id] ?? x.next_state_id,
-      }]),
-    );
-    expect(links).toEqual(G.links);
+    expect(await links(project.base, project.sk, keyOf)).toEqual(G.links);
   });
 
   it("returns every WorldState field, with vectors as float32", async () => {
@@ -131,5 +139,69 @@ describe("conformance with the Python library", () => {
   it("omits vectors when include_vectors is false", async () => {
     const r = await call("POST", `${project.base}/query`, { token: project.sk, body: { vector: [1, 0, 0, 0], limit: 2, include_vectors: false } });
     expect(r.body.results.map((x: Json) => x.vector)).toEqual([[], []]);
+  });
+});
+
+describe("conformance, M1: scores, batches, trajectories, causal context, the 4D address", () => {
+  const idOf = (key: string) => Object.entries(keyOf).find(([, k]) => k === key)?.[0] ?? MISSING_ID;
+
+  it("returns the library's similarity with include_scores", async () => {
+    const q = G.queries.find((x) => x.name === G.scored.query)!;
+    const r = await call("POST", `${project.base}/query`, { token: project.pk, body: { ...sdkQueryBody(q), include_scores: true } });
+    expect(r.body.results.map((x: Json) => keyOf[x.id])).toEqual(G.scored.scores.map(([k]) => k));
+    r.body.results.forEach((x: Json, i: number) => {
+      expect(x.score).toBeCloseTo(G.scored.scores[i]![1], 6);
+      expect(x.decayed_score).toBeLessThanOrEqual(x.score);
+    });
+  });
+
+  it("links an insert_batch as LocalLociClient.insert_batch does", async () => {
+    const r = await call("POST", `${project.base}/insert_batch`, { token: project.sk, body: { states: G.batch.states.map(insertBody) } });
+    expect(r.status).toBe(200);
+    G.batch.states.forEach((s, i) => (keyOf[r.body.ids[i]] = s.key));
+    expect(await links(project.base, project.sk, keyOf)).toEqual(G.batch.links);
+  });
+
+  it.each(G.trajectories)("trajectory around $anchor", async (t) => {
+    const body = { state_id: idOf(t.anchor), steps_back: t.steps_back, steps_forward: t.steps_forward };
+    const r = await call("POST", `${project.base}/trajectory`, { token: project.pk, body });
+    expect(r.status).toBe(200);
+    expect(r.body.results.map((x: Json) => keyOf[x.id])).toEqual(t.expect);
+  });
+
+  it.each(G.causal)("causal context around $anchor", async (c) => {
+    const r = await call("POST", `${project.base}/causal_context`, { token: project.pk, body: { state_id: idOf(c.anchor), window_ms: c.window_ms } });
+    expect(r.status).toBe(200);
+    expect(r.body.results.map((x: Json) => keyOf[x.id])).toEqual(c.expect);
+  });
+
+  it("links a batch split into requests, with chains, the same as one request", async () => {
+    const p = await newProject("Chunked");
+    const keys: Record<string, string> = {};
+    for (const s of G.states) keys[(await call("POST", `${p.base}/insert`, { token: p.sk, body: insertBody(s) })).body.id] = s.key;
+    // The SDK's order: (scene, time). Split inside the kitchen scene.
+    const sorted = [...G.batch.states].sort((a, b) => (a.scene_id < b.scene_id ? -1 : a.scene_id > b.scene_id ? 1 : 0) || a.dt_ms - b.dt_ms);
+    let chains: Record<string, string> = {};
+    for (const chunk of [sorted.slice(0, 2), sorted.slice(2)]) {
+      const r = await call("POST", `${p.base}/insert_batch`, { token: p.sk, body: { states: chunk.map(insertBody), chains } });
+      expect(r.status).toBe(200);
+      chunk.forEach((s, i) => (keys[r.body.ids[i]] = s.key));
+      chains = { ...chains, ...r.body.chains };
+    }
+    expect(await links(p.base, p.sk, keys)).toEqual(G.batch.links);
+  });
+
+  it("stores the library's 4D address", async () => {
+    const p = await newProject("Addresses");
+    const want: Record<string, Json> = {};
+    for (const a of G.addresses.states) {
+      const body = { x: a.x, y: a.y, z: a.z, timestamp_ms: a.timestamp_ms, vector: [1], scene_id: "address" };
+      want[(await call("POST", `${p.base}/insert`, { token: p.sk, body })).body.id] = a.expect;
+    }
+    const spaces = await call("GET", `${p.v1}/spaces`, { token: p.pk });
+    expect(spaces.body.spaces[0].epoch_ms).toBe(G.addresses.epoch_ms);
+    const r = await call("POST", `${p.v1}/spaces/default/query`, { token: p.pk, body: { limit: 100 } });
+    expect(r.body.results).toHaveLength(G.addresses.states.length);
+    for (const x of r.body.results as Json[]) expect(x.address).toEqual(want[x.id]);
   });
 });

@@ -26,6 +26,18 @@ export interface SpaceMeta {
   space: string;
   frame: Frame;
   extents: Extents;
+  /** Logical epoch length: the unit of the 4D address's time normalisation, as in the library. */
+  epoch_ms: number;
+}
+
+export const DEFAULT_EPOCH_MS = 5000;
+
+/** The library's 4D address: Hilbert indices of (x, y, z, t within the epoch) at orders 4, 8 and 12. */
+export interface Address {
+  epoch: number;
+  r4: number;
+  r8: number;
+  r12: number;
 }
 
 /** One observation as accepted by POST /spaces/:space/observations. */
@@ -92,6 +104,8 @@ export interface SdkFields {
 export interface QueryHit {
   obs: Observation;
   sdk: SdkFields;
+  /** Null only while a Phase 0 row waits for the address backfill. */
+  address: Address | null;
   /** Raw cosine similarity and the decayed ranking score; null when not ranked by vector. */
   similarity: number | null;
   score: number | null;
@@ -117,6 +131,13 @@ export interface SdkStateIn {
   metadata: Record<string, unknown>;
   prev_state_id: string | null;
   next_state_id: string | null;
+}
+
+/** Result of the SDK's insert_batch: ids in input order, and the last id per scene for the next chunk. */
+export interface BatchResult {
+  ids: string[];
+  chains: Record<string, string>;
+  rev: number;
 }
 
 export interface InsertResult {

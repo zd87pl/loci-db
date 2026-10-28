@@ -201,23 +201,25 @@ async def test_backend_query_failures_are_not_reported_as_empty_results(client, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client_type", [LociClient, AsyncLociClient])
 @pytest.mark.parametrize(
-    ("operation", "args", "kwargs"),
+    ("operation", "args", "kwargs", "match"),
     [
-        ("query_scored", ([1.0, 0.0],), {}),
-        ("insert_batch", ([],), {}),
+        # insert_batch, query_scored, get_trajectory and get_causal_context have cloud
+        # endpoints (tests/test_cloud_conformance.py); internal filters do not.
+        ("query_scored", ([1.0, 0.0],), {"_epoch_ids": {1}}, "advanced filtering"),
         # The legacy predict_and_retrieve path (plain query on the predicted
         # vector) is supported in cloud mode; the scored path is not.
         (
             "predict_and_retrieve",
             ([1.0, 0.0], lambda vector: vector),
             {"current_position": (0.5, 0.5, 0.5)},
+            "predict_and_retrieve",
         ),
-        ("funnel_query", ([1.0, 0.0],), {}),
-        ("get_trajectory", ("missing-id",), {}),
-        ("get_causal_context", ("missing-id",), {}),
+        ("funnel_query", ([1.0, 0.0],), {}, "funnel_query"),
     ],
 )
-async def test_cloud_unsupported_operations_fail_explicitly(client_type, operation, args, kwargs):
+async def test_cloud_unsupported_operations_fail_explicitly(
+    client_type, operation, args, kwargs, match
+):
     client = client_type(base_url="https://example.com", api_key="test")
-    with pytest.raises(CloudModeUnsupportedError, match=operation):
+    with pytest.raises(CloudModeUnsupportedError, match=match):
         await _call(getattr(client, operation), *args, **kwargs)

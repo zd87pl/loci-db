@@ -92,7 +92,9 @@ near_door = client.query(
 
 Each result is a full `WorldState`: metadata, scale level, confidence, causal links, and the vector. Vectors are stored as float32, so `0.6` comes back as `0.6000000238418579`.
 
-`AsyncLociClient` takes the same arguments (`async with AsyncLociClient(...) as client`) and needs `httpx`. Only `insert` and `query` work in cloud mode; the other methods raise `CloudModeUnsupportedError`.
+`AsyncLociClient` takes the same arguments (`async with AsyncLociClient(...) as client`) and needs `httpx`.
+
+Cloud mode supports `insert`, `insert_batch`, `query`, `query_scored`, `get_trajectory` and `get_causal_context`, each checked against the library by the conformance suite. `funnel_query` and the scored or calibrated forms of `predict_and_retrieve` still raise `CloudModeUnsupportedError`; they are M2 in [docs/CLOUD_PLATFORM_DESIGN.md](../../docs/CLOUD_PLATFORM_DESIGN.md) §11.
 
 **3. The same calls with curl** (curl's own User-Agent is accepted):
 
@@ -122,7 +124,7 @@ Path routing on `workers.dev`: `https://<worker>/p/<ref>/v1/...`. Setting `PROJE
 | Method and path | Credential | Purpose |
 |---|---|---|
 | `POST /admin/projects` | `ADMIN_TOKEN` | Create a project; returns its ref, secret key and publishable key |
-| `GET /spaces` · `POST /spaces` | read: any · create: secret | List or create spaces (`{"space":"home","frame":"room","extents":{"lo":[..],"hi":[..]}}`) |
+| `GET /spaces` · `POST /spaces` | read: any · create: secret | List or create spaces (`{"space":"home","frame":"room","extents":{"lo":[..],"hi":[..]},"epoch_ms":5000}`) |
 | `POST /devices` · `GET /devices` · `DELETE /devices/<id>` | secret | Provision (returns a one-time claim code, valid 30 min), list, revoke |
 | `POST /devices/claim` | none (claim code) | Exchange the claim code for a device id and device secret, once |
 | `POST /devices/token` | none (device secret) | 1-hour device token (HS256), scoped to the device's spaces |
@@ -133,7 +135,7 @@ Path routing on `workers.dev`: `https://<worker>/p/<ref>/v1/...`. Setting `PROJE
 | `POST /spaces/<s>/query` | any reader | Region, time, label, room, confidence and vector filters (below) |
 | `POST /spaces/<s>/ask` | any reader | `{"text":"where is my mug"}` → spoken-style answer |
 | `GET /spaces/<s>/stats` | any reader | Counts and revision |
-| `POST /p/<ref>/insert` · `POST /p/<ref>/query` | insert: secret · query: any reader | Python SDK cloud mode on the project's `default` space (below) |
+| `POST /p/<ref>/insert` · `/insert_batch` · `/query` · `/trajectory` · `/causal_context` | inserts: secret · the rest: any reader | Python SDK cloud mode on the project's `default` space (below) |
 
 Publishable keys can read and ask but not write. Revoking a device bumps its token epoch, so its tokens stop working within a minute (immediately on the same isolate).
 
@@ -159,9 +161,18 @@ Every field is optional. `region` is a box in the space's frame (metres for `roo
 - **Without `vector`**, results are newest first.
 - **With `vector`**, only observations with an embedding of the same dimension are candidates. Ranking follows `LociClient.query` in the library: the top `3 × limit` by cosine similarity are re-ranked by `similarity × exp(-ln 2 × age / half_life)`. The default half-life is one hour; `half_life_s: 0` ranks by similarity alone. Each result adds `similarity` and `score`. A vector query scores at most the 20,000 newest matching rows; `truncated: true` says it stopped there.
 
-Results have the `where` shape (`id`, `label`, `x`, `y`, `z`, `t`, `confidence`, `room`, `metadata`, ...), plus `embedding` when `include_embedding` is set. Observation embeddings are stored int8-quantised, so they come back approximately.
+Results have the `where` shape (`id`, `label`, `x`, `y`, `z`, `t`, `confidence`, `room`, `metadata`, ...), plus `address` and, when `include_embedding` is set, `embedding`. Observation embeddings are stored int8-quantised, so they come back approximately.
 
-A region becomes Hilbert cell ranges (`hilbertRanges3` in `src/hilbert.ts`) over the stored order-8 cell, an indexed pre-filter; the exact bounds then decide membership.
+### The 4D address
+
+Every observation stores the library's 4D address: `{"epoch", "r4", "r8", "r12"}`. These are the `hilbert_r4`, `hilbert_r8` and `hilbert_r12` values that `loci`'s `HilbertIndex.encode` gives the position, normalised to the space's extents, and the time within its epoch. A space's `epoch_ms` is set when it is created: 100 ms to one day, default 5,000 ms as in the library. The conformance suite checks the values against the library's.
+
+Queries use it as the library does:
+
+- **A window inside one epoch** becomes `epoch = e` plus `r12` ranges covering the box and the window (`hilbertRanges` in `src/hilbert.ts`), through the `(epoch, r12)` index.
+- **A window spanning epochs, or no window,** uses the 3D order-8 cell for the box and the time index for the window.
+
+Either way the exact bounds decide membership, so the index only narrows the scan.
 
 ### Python SDK (compatibility layer)
 
@@ -178,6 +189,14 @@ A region becomes Hilbert cell ranges (`hilbertRanges3` in `src/hilbert.ts`) over
 - **Vector dimension.** The first insert fixes the space's vector dimension; later inserts and queries with another dimension get `422`.
 - **Vectors** are stored as float32, as Qdrant stores them, and returned unless `include_vectors` is false.
 - **Causal links.** An insert links to the latest earlier state of the same `scene_id`, and that state's `next_state_id` becomes the new id, as `LociClient.insert` does.
+- **`insert_batch`** takes up to 100 states and links them as `LocalLociClient.insert_batch` does:
+  - in (scene, time) order, each state after the previous one of its scene;
+  - the first of a scene after the latest earlier state in the store, keeping its own `prev_state_id` when there is none;
+  - every state with a predecessor becomes that state's `next_state_id`.
+
+  The reply has the ids in input order and each scene's last id (`chains`). The SDK sends bigger batches in sorted chunks and passes `chains` on, so a split batch links exactly like one call.
+- **`query` with `"include_scores": true`** adds `score` (cosine similarity) and `decayed_score` to each result, for `query_scored`.
+- **`trajectory`** (`state_id`, `steps_back`, `steps_forward`, each 0–1000, default 10) and **`causal_context`** (`state_id`, `window_ms`, default 5,000) return the anchor's scene in time order, as `get_trajectory` and `get_causal_context` do. An unknown id returns no results. `causal_context` stops at 10,000 states and then adds `"truncated": true`.
 - **Labels.** A state is filed under its `metadata.label` (normalised), so `where`, `ask`, `digest` and v1 `query` label filters see SDK data. States without a label are stored with an empty label and left out of `where`, `ask`, `changes` and `digest`.
 
 Clients must send their own `User-Agent` (see Production below); the SDK sends `loci-python/<version>`.
@@ -222,6 +241,8 @@ npx wrangler secret put ADMIN_TOKEN
 npm run deploy
 ```
 
+Run `npm run db:migrate:remote` before every deploy that adds a migration. For example, `0002_space_epoch.sql` adds `spaces.epoch_ms`, which the Worker reads on every space request.
+
 ## Limits and errors
 
 | What | Limit |
@@ -251,13 +272,29 @@ Errors have the shape `{"detail": "<message>", "code": "<code>"}`:
 
 ## Conformance with the library
 
-`test/conformance-golden.json` holds states, golden queries and the expected result keys in order, covering ranking with decay and over-fetch, region, time and confidence filters with inclusive bounds, labels, and causal links. Two tests use the same file:
+`test/conformance-golden.json` holds states, golden queries and the expected results. It covers:
 
-- `test/conformance.test.ts` sends it through the Worker's SDK `/query` and v1 `/query`.
+- ranking with decay and over-fetch;
+- region, time and confidence filters with inclusive bounds;
+- labels;
+- causal links from single inserts and from batches, including a batch split into chained requests;
+- scores, trajectories and causal context;
+- the 4D address at epoch boundaries.
+
+Two tests use the same file:
+
+- `test/conformance.test.ts` sends it through the Worker's SDK endpoints and v1 `/query`.
 - `tests/test_cloud_conformance.py` runs it through `LocalLociClient`, and through `LociClient` and `AsyncLociClient` in cloud mode against a fake server.
 
 Regenerate the expectations from the library after an intended ranking change: `LOCI_REGEN_GOLDEN=1 pytest tests/test_cloud_conformance.py`.
 
 ## Schema
 
-The space object migrates itself on construction (`SCHEMA_VERSION` in `src/space.ts`). Version 2 adds the WorldState columns (`scene`, `scale`, `prev_id`, `next_id`) and the `obs_h8` and `obs_scene_t` indexes to Phase 0 objects in place. `emb_scale IS NULL` marks a float32 embedding; otherwise `emb` is int8.
+The space object migrates itself on construction (`SCHEMA_VERSION` in `src/space.ts`):
+
+- **Version 2** adds the WorldState columns (`scene`, `scale`, `prev_id`, `next_id`) and the `obs_h8` and `obs_scene_t` indexes to Phase 0 objects in place.
+- **Version 3** adds the 4D address (`epoch`, `r4`, `r8`, `r12`, with an `(epoch, r12)` index) and an index on `t`.
+  - Existing rows are backfilled 5,000 per pass: the first pass runs on construction, the rest from alarms.
+  - Until the backfill finishes, queries use the 3D cell and the time index.
+
+`emb_scale IS NULL` marks a float32 embedding; otherwise `emb` is int8.

@@ -3,7 +3,7 @@
 import { getProject, invalidateDevice } from "./auth";
 import type { SpaceObject } from "./space";
 import type { Env, Extents, Frame, SpaceMeta } from "./types";
-import { FRAMES } from "./types";
+import { DEFAULT_EPOCH_MS, FRAMES } from "./types";
 import { validateExtents } from "./validate";
 import { HttpError, SLUG, claimCode, randomAlnum, randomHex, sha256Hex, signJwt } from "./util";
 
@@ -44,6 +44,13 @@ export interface SpaceRow {
   name: string | null;
   frame: Frame;
   extents: Extents;
+  epoch_ms: number;
+}
+
+type SpaceDbRow = { space: string; name: string | null; frame: Frame; extents: string; epoch_ms: number };
+
+function spaceRow(r: SpaceDbRow): SpaceRow {
+  return { ...r, extents: JSON.parse(r.extents) as Extents };
 }
 
 const spaceCache = new Map<string, { v: SpaceRow | null; until: number }>();
@@ -52,10 +59,10 @@ export async function getSpace(env: Env, ref: string, space: string): Promise<Sp
   const k = `${ref}/${space}`;
   const c = spaceCache.get(k);
   if (c && c.until > Date.now()) return c.v;
-  const r = await env.DB.prepare("SELECT space, name, frame, extents FROM spaces WHERE project_ref = ? AND space = ?")
+  const r = await env.DB.prepare("SELECT space, name, frame, extents, epoch_ms FROM spaces WHERE project_ref = ? AND space = ?")
     .bind(ref, space)
-    .first<{ space: string; name: string | null; frame: Frame; extents: string }>();
-  const v = r ? { ...r, extents: JSON.parse(r.extents) as Extents } : null;
+    .first<SpaceDbRow>();
+  const v = r ? spaceRow(r) : null;
   spaceCache.set(k, { v, until: Date.now() + 60_000 });
   return v;
 }
@@ -88,23 +95,29 @@ export async function createSpace(env: Env, ref: string, body: Record<string, un
   if (!FRAMES.includes(frame)) throw new HttpError(422, `frame must be one of ${FRAMES.join(", ")}`, "invalid");
   const extents = validateExtents(body.extents, frame);
   const name = typeof body.name === "string" ? body.name.slice(0, 128) : null;
+  const epochMs = body.epoch_ms ?? DEFAULT_EPOCH_MS;
+  if (!Number.isInteger(epochMs) || (epochMs as number) < 100 || (epochMs as number) > 86_400_000) {
+    throw new HttpError(422, "epoch_ms must be an integer from 100 to 86400000", "invalid");
+  }
   const res = await env.DB.prepare(
-    "INSERT OR IGNORE INTO spaces (project_ref, space, name, frame, extents, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT OR IGNORE INTO spaces (project_ref, space, name, frame, extents, epoch_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
   )
-    .bind(ref, space, name, frame, JSON.stringify(extents), Date.now())
+    .bind(ref, space, name, frame, JSON.stringify(extents), epochMs, Date.now())
     .run();
   if (!res.meta.changes) throw new HttpError(409, `space ${space} already exists`, "conflict");
   spaceCache.delete(`${ref}/${space}`);
-  const meta: SpaceMeta = { ref, space, frame, extents };
+  const meta: SpaceMeta = { ref, space, frame, extents, epoch_ms: epochMs as number };
   await (await spaceStub(env, ref, space)).configure(meta);
-  return { space, name, frame, extents };
+  return { space, name, frame, extents, epoch_ms: epochMs as number };
 }
 
 export async function listSpaces(env: Env, ref: string): Promise<SpaceRow[]> {
-  const { results } = await env.DB.prepare("SELECT space, name, frame, extents FROM spaces WHERE project_ref = ? ORDER BY space")
+  const { results } = await env.DB.prepare(
+    "SELECT space, name, frame, extents, epoch_ms FROM spaces WHERE project_ref = ? ORDER BY space",
+  )
     .bind(ref)
-    .all<{ space: string; name: string | null; frame: Frame; extents: string }>();
-  return results.map((r) => ({ ...r, extents: JSON.parse(r.extents) as Extents }));
+    .all<SpaceDbRow>();
+  return results.map(spaceRow);
 }
 
 export async function createDevice(

@@ -4,7 +4,8 @@
     "and through the Worker (cloud/workers/test/conformance.test.ts). States are inserted in order;",
     "dt_ms and window_dt_ms are offsets from the test's clock. Queries with labels run only on the v1",
     "/query (the SDK has no label filter); the library side runs them on the subset with those",
-    "metadata labels. Regenerate expect/links: LOCI_REGEN_GOLDEN=1 pytest tests/test_cloud_conformance.py"
+    "metadata labels. Regenerate expect/links: LOCI_REGEN_GOLDEN=1 pytest tests/test_cloud_conformance.py",
+    "Sections added for M1 (docs/CLOUD_PLATFORM_DESIGN.md section 11): scored, batch, trajectories, causal, addresses."
   ],
   "vector_size": 4,
   "states": [
@@ -42,8 +43,99 @@
     "h": {"prev": "ext-prev", "next": "ext-next"}
   },
   "wire": {
-    "insert_keys": ["confidence", "metadata", "next_state_id", "prev_state_id", "scale_level", "scene_id", "timestamp_ms", "vector", "x", "y", "z"],
-    "query_keys": ["include_vectors", "limit", "min_confidence", "overlap_factor", "time_end_ms", "time_start_ms", "vector", "x_max", "x_min", "y_max", "y_min", "z_max", "z_min"],
-    "result_keys": ["confidence", "id", "metadata", "next_state_id", "prev_state_id", "scale_level", "scene_id", "timestamp_ms", "vector", "x", "y", "z"]
+    "insert_keys": [
+      "confidence",
+      "metadata",
+      "next_state_id",
+      "prev_state_id",
+      "scale_level",
+      "scene_id",
+      "timestamp_ms",
+      "vector",
+      "x",
+      "y",
+      "z"
+    ],
+    "query_keys": [
+      "include_vectors",
+      "limit",
+      "min_confidence",
+      "overlap_factor",
+      "time_end_ms",
+      "time_start_ms",
+      "vector",
+      "x_max",
+      "x_min",
+      "y_max",
+      "y_min",
+      "z_max",
+      "z_min"
+    ],
+    "result_keys": [
+      "confidence",
+      "id",
+      "metadata",
+      "next_state_id",
+      "prev_state_id",
+      "scale_level",
+      "scene_id",
+      "timestamp_ms",
+      "vector",
+      "x",
+      "y",
+      "z"
+    ]
+  },
+  "scored": {
+    "query": "nearest_decayed",
+    "scores": [["b", 0.9938837346736189], ["c", 0.6], ["h", 0.9523839435224625]]
+  },
+  "batch": {
+    "states": [
+      {"key": "j", "dt_ms": -300000, "x": 0.6, "y": 0.4, "z": 0.3, "vector": [0.3, 0.3, 0.3, 0.3], "scene_id": "kitchen", "confidence": 0.8, "metadata": {"label": "cup"}},
+      {"key": "k", "dt_ms": -20000, "x": 0.85, "y": 0.9, "z": 0.95, "vector": [0, 0.5, 0.5, 0], "scene_id": "hall", "confidence": 0.7, "prev_state_id": "ext-k"},
+      {"key": "l", "dt_ms": -900000, "x": 0.2, "y": 0.95, "z": 0.6, "vector": [0.2, 0, 0, 1], "scene_id": "roof", "scale_level": "frame", "confidence": 0.9, "prev_state_id": "ext-l"},
+      {"key": "i", "dt_ms": -5400000, "x": 0.5, "y": 0.45, "z": 0.4, "vector": [0.5, 0.5, 0, 0], "scene_id": "kitchen", "confidence": 0.6, "metadata": {"label": "mug"}},
+      {"key": "m", "dt_ms": -960000, "x": 0.25, "y": 0.9, "z": 0.65, "vector": [0, 0, 1, 0], "scene_id": "roof", "confidence": 1.0, "prev_state_id": "ext-m", "next_state_id": "ext-m-next"}
+    ],
+    "links": {
+      "a": {"prev": null, "next": "e"},
+      "b": {"prev": "a", "next": null},
+      "c": {"prev": null, "next": "d"},
+      "d": {"prev": "c", "next": "k"},
+      "e": {"prev": "a", "next": "i"},
+      "f": {"prev": null, "next": "g"},
+      "g": {"prev": "f", "next": null},
+      "h": {"prev": "ext-prev", "next": "ext-next"},
+      "i": {"prev": "e", "next": "j"},
+      "j": {"prev": "i", "next": null},
+      "k": {"prev": "d", "next": null},
+      "l": {"prev": "m", "next": null},
+      "m": {"prev": "ext-m", "next": "l"}
+    }
+  },
+  "trajectories": [
+    {"anchor": "b", "steps_back": 2, "steps_forward": 1, "expect": ["e", "i", "b", "j"]},
+    {"anchor": "a", "steps_back": 10, "steps_forward": 0, "expect": ["a"]},
+    {"anchor": "d", "steps_back": 1, "steps_forward": 10, "expect": ["c", "d", "k"]},
+    {"anchor": "l", "steps_back": 10, "steps_forward": 10, "expect": ["m", "l"]},
+    {"anchor": "missing", "steps_back": 5, "steps_forward": 5, "expect": []}
+  ],
+  "causal": [
+    {"anchor": "b", "window_ms": 600000, "expect": ["b", "j"]},
+    {"anchor": "c", "window_ms": 60000, "expect": ["c", "d", "k"]},
+    {"anchor": "f", "window_ms": 3600000, "expect": ["f"]},
+    {"anchor": "missing", "window_ms": 1000, "expect": []}
+  ],
+  "addresses": {
+    "epoch_ms": 5000,
+    "states": [
+      {"x": 0.0, "y": 0.0, "z": 0.0, "timestamp_ms": 1793140000000, "expect": {"epoch": 358628000, "r4": 0, "r8": 0, "r12": 0}},
+      {"x": 1.0, "y": 1.0, "z": 1.0, "timestamp_ms": 1793140004999, "expect": {"epoch": 358628000, "r4": 43690, "r8": 2863311530, "r12": 187649984473771}},
+      {"x": 0.5, "y": 0.25, "z": 1.0, "timestamp_ms": 1793140002500, "expect": {"epoch": 358628000, "r4": 54357, "r8": 3562362197, "r12": 233462968964437}},
+      {"x": 0.123456, "y": 0.654321, "z": 0.999, "timestamp_ms": 1793140001234, "expect": {"epoch": 358628000, "r4": 19637, "r8": 1135958698, "r12": 74446189242217}},
+      {"x": 0.25, "y": 0.75, "z": 0.5, "timestamp_ms": 1793140005000, "expect": {"epoch": 358628001, "r4": 16701, "r8": 1094573533, "r12": 71733971115485}},
+      {"x": 0.4, "y": 0.6, "z": 0.5, "timestamp_ms": 7, "expect": {"epoch": 0, "r4": 16671, "r8": 1092615103, "r12": 71605623452207}}
+    ]
   }
 }

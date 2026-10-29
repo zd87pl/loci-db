@@ -95,6 +95,24 @@ describe("upsert", () => {
     expect(again.body).toMatchObject({ updated: 0, duplicates: 1, rev: moved.body.rev });
   });
 
+  it("moves the 4D address with the sighting, so one-epoch region queries find it at the new place", async () => {
+    const id = `d_${dev}_4_a11e_1`;
+    const t = NOW - 2000;
+    await write(devToken, { observations: [obs({ id, label: "plate", room: "kitchen", x: 0.2, t: t - 30_000 })], upsert: true });
+    const moved = await write(devToken, { observations: [obs({ id, label: "plate", room: "kitchen", x: 0.8, t })], upsert: true });
+    expect(moved.body).toMatchObject({ updated: 1 });
+    await write(sk, { observations: [obs({ label: "plate-ref", room: "kitchen", x: 0.8, t })] });
+    const query = (x: number, at: number) => call("POST", `${v1}/spaces/home/query`, {
+      token: devToken,
+      body: { region: { lo: [x - 0.1, 0.4, 0.4], hi: [x + 0.1, 0.6, 0.6] }, time: { start: at, end: at }, labels: ["plate", "plate-ref"] },
+    });
+    const now = await query(0.8, t);
+    expect(now.body.results.map((r: Observation) => r.label).sort()).toEqual(["plate", "plate-ref"]);
+    const [plate, ref] = ["plate", "plate-ref"].map((l) => now.body.results.find((r: Observation) => r.label === l));
+    expect(plate.address).toEqual(ref.address); // the same as a fresh insert at the same place and time
+    expect((await query(0.2, t - 30_000)).body.results).toEqual([]);
+  });
+
   it("refuses to rewrite another writer's row, a different label or room, or an older time", async () => {
     const id = `d_${dev}_3_9f2c_2`;
     await write(devToken, { observations: [obs({ id, label: "bottle", room: "kitchen", t: NOW - 5000 })], upsert: true });

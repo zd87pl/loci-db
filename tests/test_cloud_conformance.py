@@ -31,13 +31,15 @@ from typing import Any
 
 import pytest
 
-from loci import AsyncLociClient, LocalLociClient, LociClient, WorldState
-from loci.cloud_transport import _insert_payload, _query_payload
+from loci import AsyncLociClient, LocalLociClient, LociClient, WorldState, cloud_transport
+from loci.cloud_transport import CloudTransport, _insert_payload, _query_payload
+from loci.temporal.consolidation import data_collection_name
 
 GOLDEN_PATH = Path(__file__).resolve().parents[1] / "cloud/workers/test/conformance-golden.json"
 GOLDEN: dict[str, Any] = json.loads(GOLDEN_PATH.read_text())
 REF = "conformance1"
 KEY = f"loci_sk_{REF}_{'0' * 48}"
+MISSING_ID = "00000000-0000-0000-0000-000000000000"
 
 
 def _label(state: dict) -> str:
@@ -81,9 +83,9 @@ def _keys(results: list[WorldState], key_of: dict[str, str]) -> list[str]:
     return [key_of[s.id] for s in results]
 
 
-def _links(client: Any, key_of: dict[str, str]) -> dict[str, dict]:
+def _links(client: Any, key_of: dict[str, str], n: int) -> dict[str, dict]:
     everything = client.query(vector=[1.0, 0.0, 0.0, 0.0], limit=100)
-    assert len(everything) == len(GOLDEN["states"])
+    assert len(everything) == n
     return {
         key_of[s.id]: {
             "prev": key_of.get(s.prev_state_id, s.prev_state_id),
@@ -93,7 +95,70 @@ def _links(client: Any, key_of: dict[str, str]) -> dict[str, dict]:
     }
 
 
-def _run_library(now: int) -> tuple[dict[str, list[str]], dict[str, dict]]:
+def _run_m1(client: Any, now: int, key_of: dict[str, str]) -> dict[str, Any]:
+    """After the base states and queries: scores, the batch, trajectories, causal context."""
+    q = next(q for q in GOLDEN["queries"] if q["name"] == GOLDEN["scored"]["query"])
+    scores = [[key_of[r.state.id], r.score] for r in client.query_scored(**_query_kwargs(q, now))]
+    batch = GOLDEN["batch"]["states"]
+    ids = client.insert_batch([_world_state(s, now) for s in batch])
+    key_of.update({state_id: s["key"] for state_id, s in zip(ids, batch, strict=True)})
+    id_of = {key: state_id for state_id, key in key_of.items()}
+
+    def anchor(key: str) -> str:
+        return id_of.get(key, MISSING_ID)
+
+    return {
+        "scores": scores,
+        "batch_links": _links(client, key_of, len(GOLDEN["states"]) + len(batch)),
+        "trajectories": [
+            _keys(
+                client.get_trajectory(anchor(t["anchor"]), t["steps_back"], t["steps_forward"]),
+                key_of,
+            )
+            for t in GOLDEN["trajectories"]
+        ],
+        "causal": [
+            _keys(client.get_causal_context(anchor(c["anchor"]), c["window_ms"]), key_of)
+            for c in GOLDEN["causal"]
+        ],
+    }
+
+
+def _golden_m1() -> dict[str, Any]:
+    return {
+        "scores": GOLDEN["scored"]["scores"],
+        "batch_links": GOLDEN["batch"]["links"],
+        "trajectories": [t["expect"] for t in GOLDEN["trajectories"]],
+        "causal": [c["expect"] for c in GOLDEN["causal"]],
+    }
+
+
+def _library_addresses() -> list[dict[str, int]]:
+    """The 4D address the library stores for each address case."""
+    spec = GOLDEN["addresses"]
+    client = LocalLociClient(vector_size=1, epoch_size_ms=spec["epoch_ms"])
+    out = []
+    for a in spec["states"]:
+        state = WorldState(
+            x=a["x"], y=a["y"], z=a["z"], timestamp_ms=a["timestamp_ms"], vector=[1.0]
+        )
+        stored = client.store.retrieve(data_collection_name(""), [client.insert(state)])
+        payload = stored[0]["payload"]
+        address = {"epoch": a["timestamp_ms"] // spec["epoch_ms"]}
+        out.append(address | {f"r{r}": payload[f"hilbert_r{r}"] for r in (4, 8, 12)})
+    return out
+
+
+def _assert_m1(got: dict[str, Any]) -> None:
+    want = _golden_m1()
+    assert [k for k, _ in got["scores"]] == [k for k, _ in want["scores"]]
+    got_scores = [s for _, s in got["scores"]]
+    assert got_scores == pytest.approx([s for _, s in want["scores"]], abs=1e-9)
+    keys = ("batch_links", "trajectories", "causal")
+    assert {k: got[k] for k in keys} == {k: want[k] for k in keys}
+
+
+def _run_library(now: int) -> tuple[dict[str, list[str]], dict[str, dict], dict[str, Any]]:
     client = LocalLociClient(vector_size=GOLDEN["vector_size"])
     key_of = {client.insert(_world_state(s, now)): s["key"] for s in GOLDEN["states"]}
     results: dict[str, list[str]] = {}
@@ -109,36 +174,42 @@ def _run_library(now: int) -> tuple[dict[str, list[str]], dict[str, dict]]:
             results[q["name"]] = _keys(subset.query(**_query_kwargs(q, now)), sub_key_of)
         else:
             results[q["name"]] = _keys(client.query(**_query_kwargs(q, now)), key_of)
-    return results, _links(client, key_of)
+    links = _links(client, key_of, len(GOLDEN["states"]))
+    return results, links, _run_m1(client, now, key_of)
 
 
-def _dump_golden(golden: dict) -> str:
-    """One state or query per line, so diffs of expectations stay readable."""
-    lines = ["{"]
-    items = list(golden.items())
-    for i, (k, v) in enumerate(items):
-        comma = "," if i < len(items) - 1 else ""
-        if isinstance(v, list) and k in ("states", "queries", "about"):
-            body = ",\n".join(f"    {json.dumps(x)}" for x in v)
-            lines.append(f'  "{k}": [\n{body}\n  ]{comma}')
-        elif isinstance(v, dict):
-            body = ",\n".join(f"    {json.dumps(kk)}: {json.dumps(vv)}" for kk, vv in v.items())
-            lines.append(f'  "{k}": {{\n{body}\n  }}{comma}')
-        else:
-            lines.append(f'  "{k}": {json.dumps(v)}{comma}')
-    return "\n".join(lines) + "\n}\n"
+def _dump(v: Any, indent: str = "") -> str:
+    """One state, query or link per line, so diffs of expectations stay readable."""
+    inner = indent + "  "
+    if isinstance(v, list) and v and all(isinstance(x, (dict, str)) for x in v):
+        return "[\n" + ",\n".join(inner + json.dumps(x) for x in v) + "\n" + indent + "]"
+    if isinstance(v, dict) and any(isinstance(x, (dict, list)) for x in v.values()):
+        body = ",\n".join(f"{inner}{json.dumps(k)}: {_dump(x, inner)}" for k, x in v.items())
+        return "{\n" + body + "\n" + indent + "}"
+    return json.dumps(v)
 
 
 def test_local_library_matches_golden():
     now = int(time.time() * 1000)
-    results, links = _run_library(now)
+    results, links, m1 = _run_library(now)
+    addresses = _library_addresses()
     if os.environ.get("LOCI_REGEN_GOLDEN"):
         for q in GOLDEN["queries"]:
             q["expect"] = results[q["name"]]
         GOLDEN["links"] = links
-        GOLDEN_PATH.write_text(_dump_golden(GOLDEN))
+        GOLDEN["scored"]["scores"] = m1["scores"]
+        GOLDEN["batch"]["links"] = m1["batch_links"]
+        for t, keys in zip(GOLDEN["trajectories"], m1["trajectories"], strict=True):
+            t["expect"] = keys
+        for c, keys in zip(GOLDEN["causal"], m1["causal"], strict=True):
+            c["expect"] = keys
+        for a, address in zip(GOLDEN["addresses"]["states"], addresses, strict=True):
+            a["expect"] = address
+        GOLDEN_PATH.write_text(_dump(GOLDEN) + "\n")
     assert results == {q["name"]: q["expect"] for q in GOLDEN["queries"]}
     assert links == GOLDEN["links"]
+    _assert_m1(m1)
+    assert addresses == [a["expect"] for a in GOLDEN["addresses"]["states"]]
 
 
 def test_wire_keys_match_the_sdk():
@@ -192,12 +263,13 @@ class _FakeWorker:
                         "body": body,
                     }
                 )
-                m = re.fullmatch(rf"/p/{REF}/(insert|query)", self.path)
+                actions = "insert|insert_batch|query|trajectory|causal_context"
+                m = re.fullmatch(rf"/p/{REF}/({actions})", self.path)
                 if m is None:
                     return self._send(404, {"detail": "not found", "code": "not_found"})
                 if self.headers.get("Authorization") != f"Bearer {KEY}":
                     return self._send(401, {"detail": "invalid key", "code": "unauthenticated"})
-                return self._send(200, fake.insert(body) if m[1] == "insert" else fake.query(body))
+                return self._send(200, getattr(fake, m[1])(body))
 
             def _send(self, status: int, payload: dict) -> None:
                 data = json.dumps(payload).encode()
@@ -215,10 +287,38 @@ class _FakeWorker:
         assert set(body) <= set(GOLDEN["wire"]["insert_keys"])
         return {"id": self.store.insert(WorldState(**body))}
 
+    def insert_batch(self, body: dict) -> dict:
+        # One request holds the whole batch here, so there are no chains to continue.
+        assert set(body) == {"states", "chains"} and body["chains"] == {}
+        states = [WorldState(**st) for st in body["states"]]
+        ids = self.store.insert_batch(states)
+        order = sorted(
+            range(len(states)), key=lambda i: (states[i].scene_id, states[i].timestamp_ms)
+        )
+        return {"ids": ids, "chains": {states[i].scene_id: ids[i] for i in order}}
+
+    def _results(self, states: list[WorldState], body: dict) -> dict:
+        results = []
+        for s in states:
+            r = {k: getattr(s, k) for k in GOLDEN["wire"]["result_keys"]}
+            r["vector"] = _f32(s.vector) if body.get("include_vectors", True) else []
+            results.append(r)
+        return {"results": results}
+
+    def trajectory(self, body: dict) -> dict:
+        states = self.store.get_trajectory(
+            body["state_id"], body["steps_back"], body["steps_forward"]
+        )
+        return self._results(states, body)
+
+    def causal_context(self, body: dict) -> dict:
+        states = self.store.get_causal_context(body["state_id"], body["window_ms"])
+        return self._results(states, body)
+
     def query(self, body: dict) -> dict:
-        assert set(body) <= set(GOLDEN["wire"]["query_keys"])
+        assert set(body) <= set(GOLDEN["wire"]["query_keys"]) | {"include_scores"}
         has_window = body.get("time_start_ms") is not None and body.get("time_end_ms") is not None
-        hits = self.store.query(
+        hits = self.store.query_scored(
             vector=body["vector"],
             spatial_bounds={
                 k: body.get(k, 0.0 if k.endswith("min") else 1.0)
@@ -228,12 +328,11 @@ class _FakeWorker:
             limit=body.get("limit", 10),
             min_confidence=body.get("min_confidence"),
         )
-        results = []
-        for s in hits:
-            r = {k: getattr(s, k) for k in GOLDEN["wire"]["result_keys"]}
-            r["vector"] = _f32(s.vector) if body.get("include_vectors", True) else []
-            results.append(r)
-        return {"results": results}
+        out = self._results([h.state for h in hits], body)
+        if body.get("include_scores"):
+            for r, h in zip(out["results"], hits, strict=True):
+                r |= {"score": h.score, "decayed_score": h.decayed_score}
+        return out
 
 
 @pytest.fixture
@@ -253,7 +352,7 @@ def test_sdk_cloud_mode_matches_golden(fake_worker):
 
     for q in _sdk_queries():
         assert _keys(client.query(**_query_kwargs(q, now)), key_of) == q["expect"], q["name"]
-    assert _links(client, key_of) == GOLDEN["links"]
+    assert _links(client, key_of, len(GOLDEN["states"])) == GOLDEN["links"]
 
     # Every WorldState field round-trips; vectors come back float32-rounded.
     for s in client.query(vector=[1.0, 0.0, 0.0, 0.0], limit=100):
@@ -267,9 +366,42 @@ def test_sdk_cloud_mode_matches_golden(fake_worker):
         assert s.metadata == sent.metadata
         assert s.vector == pytest.approx(sent.vector, abs=1e-6)
 
+    # insert_batch, query_scored, get_trajectory and get_causal_context, as in the library.
+    _assert_m1(_run_m1(client, now, key_of))
+
     paths = {r["path"] for r in fake_worker.requests}
-    assert paths == {f"/p/{REF}/insert", f"/p/{REF}/query"}
+    assert paths == {
+        f"/p/{REF}/{action}"
+        for action in ("insert", "insert_batch", "query", "trajectory", "causal_context")
+    }
     assert all(r["ua"].startswith("loci-python/") for r in fake_worker.requests)
+
+
+def test_sdk_splits_large_batches_and_chains_scenes(monkeypatch):
+    """Requests go in (scene, time) order and carry each scene's last id to the next request."""
+    monkeypatch.setattr(cloud_transport, "BATCH_STATES", 2)
+    bodies: list[dict] = []
+
+    def server(method: str, path: str, body: dict | None = None) -> dict:
+        assert (method, path) == ("POST", "/insert_batch") and body is not None
+        bodies.append(json.loads(json.dumps(body)))
+        ids = [f"id{len(bodies)}-{n}" for n in range(len(body["states"]))]
+        chains = {st["scene_id"]: i for st, i in zip(body["states"], ids, strict=True)}
+        return {"ids": ids, "chains": chains}
+
+    transport = CloudTransport("http://fake/p/ref", KEY)
+    monkeypatch.setattr(transport, "_request", server)
+    now = int(time.time() * 1000)
+    ids = transport.insert_batch([_world_state(s, now) for s in GOLDEN["batch"]["states"]])
+
+    sent = [(st["scene_id"], st["timestamp_ms"]) for b in bodies for st in b["states"]]
+    assert [len(b["states"]) for b in bodies] == [2, 2, 1]
+    assert sent == sorted(sent)
+    assert bodies[0]["chains"] == {}
+    assert bodies[1]["chains"] == {"hall": "id1-0", "kitchen": "id1-1"}
+    assert bodies[2]["chains"] == {"hall": "id1-0", "kitchen": "id2-0", "roof": "id2-1"}
+    # Ids come back in input order: j, k, l, i, m.
+    assert ids == ["id2-0", "id1-0", "id3-0", "id1-1", "id2-1"]
 
 
 def test_sdk_cloud_mode_without_vectors(fake_worker):
@@ -289,5 +421,10 @@ async def test_async_sdk_cloud_mode_keeps_the_project_path(fake_worker):
         key_of = {await client.insert(_world_state(s, now)): s["key"] for s in GOLDEN["states"]}
         q = next(q for q in GOLDEN["queries"] if q["name"] == "combined")
         assert _keys(await client.query(**_query_kwargs(q, now)), key_of) == q["expect"]
-    assert {r["path"] for r in fake_worker.requests} == {f"/p/{REF}/insert", f"/p/{REF}/query"}
+        scored = await client.query_scored(**_query_kwargs(q, now))
+        assert [key_of[h.state.id] for h in scored] == q["expect"]
+        b = next(k for k, v in key_of.items() if v == "b")
+        assert _keys(await client.get_trajectory(b, 1, 0), key_of) == ["e", "b"]
+    paths = {r["path"] for r in fake_worker.requests}
+    assert paths == {f"/p/{REF}/{a}" for a in ("insert", "query", "trajectory")}
     assert all(r["ua"].startswith("loci-python/") for r in fake_worker.requests)

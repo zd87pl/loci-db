@@ -7,7 +7,7 @@ correct request payload, and maps responses back to :class:`WorldState`.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -127,26 +127,41 @@ def _predictor(vec: list[float]) -> list[float]:
 
 
 class TestSyncCloudGuards:
-    def test_insert_batch_raises(self):
-        client, _ = _make_sync_client()
+    def test_insert_batch_routes_through_cloud(self):
+        client, transport = _make_sync_client()
         state = WorldState(x=0.1, y=0.2, z=0.3, timestamp_ms=1000, vector=[0.0] * 4)
-        with pytest.raises(CloudModeUnsupportedError, match="insert_batch"):
-            client.insert_batch([state])
+        with patch.object(transport, "insert_batch", return_value=["a"]) as m:
+            assert client.insert_batch([state]) == ["a"]
+        m.assert_called_once_with([state])
 
-    def test_query_scored_raises(self):
-        client, _ = _make_sync_client()
-        with pytest.raises(CloudModeUnsupportedError, match="query_scored"):
-            client.query_scored(vector=[0.0] * 4)
+    def test_query_scored_routes_through_cloud(self):
+        client, transport = _make_sync_client()
+        with patch.object(transport, "query_scored", return_value=[]) as m:
+            assert client.query_scored(vector=[0.0] * 4, limit=3, min_confidence=0.5) == []
+        m.assert_called_once_with(
+            vector=[0.0] * 4,
+            spatial_bounds=None,
+            time_window_ms=None,
+            limit=3,
+            overlap_factor=1.2,
+            min_confidence=0.5,
+        )
 
-    def test_get_trajectory_raises(self):
+    def test_query_scored_advanced_filters_raise(self):
         client, _ = _make_sync_client()
-        with pytest.raises(CloudModeUnsupportedError, match="get_trajectory"):
-            client.get_trajectory("some-id")
+        with pytest.raises(CloudModeUnsupportedError, match="advanced filtering"):
+            client.query_scored(vector=[0.0] * 4, _epoch_ids={1})
 
-    def test_get_causal_context_raises(self):
-        client, _ = _make_sync_client()
-        with pytest.raises(CloudModeUnsupportedError, match="get_causal_context"):
-            client.get_causal_context("some-id")
+    def test_trajectory_and_causal_context_route_through_cloud(self):
+        client, transport = _make_sync_client()
+        with (
+            patch.object(transport, "get_trajectory", return_value=[]) as traj,
+            patch.object(transport, "get_causal_context", return_value=[]) as ctx,
+        ):
+            client.get_trajectory("some-id", steps_back=2, steps_forward=3)
+            client.get_causal_context("some-id", window_ms=750)
+        traj.assert_called_once_with("some-id", 2, 3)
+        ctx.assert_called_once_with("some-id", 750)
 
     def test_funnel_query_raises(self):
         client, _ = _make_sync_client()
@@ -191,29 +206,37 @@ class TestAsyncCloudGuards:
         return AsyncLociClient(base_url="https://api.example.com", api_key="loci_x", vector_size=4)
 
     @pytest.mark.asyncio
-    async def test_insert_batch_raises(self):
+    async def test_insert_batch_routes_through_cloud(self):
         client = self._make_async_client()
         state = WorldState(x=0.1, y=0.2, z=0.3, timestamp_ms=1000, vector=[0.0] * 4)
-        with pytest.raises(CloudModeUnsupportedError, match="insert_batch"):
-            await client.insert_batch([state])
+        with patch.object(client._cloud, "insert_batch", AsyncMock(return_value=["a"])) as m:
+            assert await client.insert_batch([state]) == ["a"]
+        m.assert_awaited_once_with([state])
 
     @pytest.mark.asyncio
-    async def test_query_scored_raises(self):
+    async def test_query_scored_routes_through_cloud(self):
         client = self._make_async_client()
-        with pytest.raises(CloudModeUnsupportedError, match="query_scored"):
-            await client.query_scored(vector=[0.0] * 4)
+        with patch.object(client._cloud, "query_scored", AsyncMock(return_value=[])) as m:
+            assert await client.query_scored(vector=[0.0] * 4) == []
+        m.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_get_trajectory_raises(self):
+    async def test_query_scored_advanced_filters_raise(self):
         client = self._make_async_client()
-        with pytest.raises(CloudModeUnsupportedError, match="get_trajectory"):
-            await client.get_trajectory("some-id")
+        with pytest.raises(CloudModeUnsupportedError, match="advanced filtering"):
+            await client.query_scored(vector=[0.0] * 4, _extra_payload_filter={"k": 1})
 
     @pytest.mark.asyncio
-    async def test_get_causal_context_raises(self):
+    async def test_trajectory_and_causal_context_route_through_cloud(self):
         client = self._make_async_client()
-        with pytest.raises(CloudModeUnsupportedError, match="get_causal_context"):
-            await client.get_causal_context("some-id")
+        with (
+            patch.object(client._cloud, "get_trajectory", AsyncMock(return_value=[])) as traj,
+            patch.object(client._cloud, "get_causal_context", AsyncMock(return_value=[])) as ctx,
+        ):
+            await client.get_trajectory("some-id", steps_back=2, steps_forward=3)
+            await client.get_causal_context("some-id", window_ms=750)
+        traj.assert_awaited_once_with("some-id", 2, 3)
+        ctx.assert_awaited_once_with("some-id", 750)
 
     @pytest.mark.asyncio
     async def test_funnel_query_raises(self):

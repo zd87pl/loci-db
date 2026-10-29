@@ -19,7 +19,8 @@
  *     POST   spaces/<space>/ask                  {"text": "..."}
  *     GET    spaces/<space>/stats
  *     *      spaces/<space>/board/...            ESP32 boards: cache JSON, spoken answers (src/board.ts)
- *   /p/<ref>/insert, /p/<ref>/query                Python SDK cloud mode, on the default space (src/compat.ts)
+ *   /p/<ref>/{insert,insert_batch,query,trajectory,causal_context}
+ *                                                  Python SDK cloud mode, on the default space (src/compat.ts)
  */
 
 import { authenticate, canRead, canWrite, principalKey, requireSecret } from "./auth";
@@ -28,7 +29,7 @@ import {
   claimDevice, createDevice, createProject, createSpace, getSpace, issueDeviceToken, listDevices, listSpaces,
   recordUsage, revokeDevice, spaceStub,
 } from "./control";
-import { handleCompat } from "./compat";
+import { COMPAT_ACTIONS, type CompatAction, handleCompat } from "./compat";
 import type { Env, Principal, QueryResult, SpaceMeta } from "./types";
 import { normLabel, normRoom, validateBatch, validateQuery } from "./validate";
 import { HttpError, errorResponse, json, readJson, timingSafeEqualStr } from "./util";
@@ -51,7 +52,7 @@ function routeProject(url: URL, env: Env): { ref: string; rest: string } | null 
     ref = m[1] as string;
     path = m[2] as string;
   }
-  const m = path.match(/^\/(v1\/.*|insert|query)$/);
+  const m = path.match(/^\/(v1\/.*|insert|insert_batch|query|trajectory|causal_context)$/);
   return m ? { ref, rest: m[1] as string } : null;
 }
 
@@ -59,6 +60,7 @@ function queryResponse(r: QueryResult) {
   return {
     results: r.hits.map((h) => ({
       ...h.obs,
+      address: h.address,
       ...(h.score === null ? {} : { similarity: h.similarity, score: h.score }),
       ...(h.embedding === null ? {} : { embedding: h.embedding }),
     })),
@@ -88,7 +90,7 @@ async function handleSpace(
       if (!success) throw new HttpError(429, "write rate limit exceeded", "rate_limited");
     }
     const { observations, deletes, upsert } = validateBatch(await readJson(req), Date.now());
-    const meta: SpaceMeta = { ref, space, frame: row.frame, extents: row.extents };
+    const meta: SpaceMeta = { ref, space, frame: row.frame, extents: row.extents, epoch_ms: row.epoch_ms };
     const result = await stub.insertBatch(meta, observations, deletes, p.kind === "device" ? p.deviceId : null, upsert);
     ctx.waitUntil(recordUsage(env, ref, result.accepted + result.updated));
     env.USAGE?.writeDataPoint({
@@ -112,7 +114,7 @@ async function handleSpace(
       if (!success) throw new HttpError(429, "query rate limit exceeded", "rate_limited");
     }
     const spec = validateQuery(await readJson(req));
-    const meta: SpaceMeta = { ref, space, frame: row.frame, extents: row.extents };
+    const meta: SpaceMeta = { ref, space, frame: row.frame, extents: row.extents, epoch_ms: row.epoch_ms };
     return json(queryResponse(await stub.query(meta, spec)));
   }
   if (action === "changes" && req.method === "GET") {
@@ -134,7 +136,9 @@ async function handleSpace(
 }
 
 async function handleProject(req: Request, env: Env, ctx: ExecutionContext, url: URL, ref: string, rest: string): Promise<Response> {
-  if (rest === "insert" || rest === "query") return handleCompat(req, env, ctx, ref, await authenticate(env, req, ref), rest);
+  if ((COMPAT_ACTIONS as readonly string[]).includes(rest)) {
+    return handleCompat(req, env, ctx, ref, await authenticate(env, req, ref), rest as CompatAction);
+  }
   const parts = rest.slice("v1/".length).split("/").filter(Boolean);
 
   // Unauthenticated device bootstrap.

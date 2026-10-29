@@ -217,3 +217,95 @@ describe("SDK compatibility layer", () => {
     expect((await call("POST", `${C.base}/v1/insert`, { token: C.sk, body: {} })).status).toBe(404);
   });
 });
+
+describe("4D address and per-space epochs", () => {
+  it("sets epoch_ms per space, 5,000 by default", async () => {
+    const p = await newProject("Epochs");
+    expect((await call("POST", `${p.v1}/spaces`, { token: p.sk, body: { space: "lab", epoch_ms: 1000 } })).body.epoch_ms).toBe(1000);
+    expect((await call("POST", `${p.v1}/spaces`, { token: p.sk, body: { space: "home" } })).body.epoch_ms).toBe(5000);
+    for (const epoch_ms of [50, 1.5, "1000", 86_400_001]) {
+      expect((await call("POST", `${p.v1}/spaces`, { token: p.sk, body: { space: "bad", epoch_ms } })).status).toBe(422);
+    }
+    const list = await call("GET", `${p.v1}/spaces`, { token: p.pk });
+    expect(list.body.spaces.map((s: Json) => [s.space, s.epoch_ms])).toEqual([["home", 5000], ["lab", 1000]]);
+  });
+
+  it("matches a brute-force filter for regions with windows inside and across epochs", async () => {
+    const rand = rng(11);
+    const p = await newProject("Epoch property");
+    await call("POST", `${p.v1}/spaces`, { token: p.sk, body: { space: "lab", epoch_ms: 1000, extents: { lo: [-5, 0, -5], hi: [5, 3, 5] } } });
+    const base = Math.floor(now / 1000) * 1000 - 10_000;
+    const pts = Array.from({ length: 50 }, (_, i) => ({
+      id: `q${i}`, label: "dot", x: rand() * 12 - 6, y: rand() * 4 - 0.5, z: rand() * 12 - 6, t: base + Math.floor(rand() * 5000),
+    }));
+    expect((await call("POST", `${p.v1}/spaces/lab/observations`, { token: p.sk, body: { observations: pts } })).status).toBe(201);
+    const newestFirst = (a: { t: number; id: string }, b: { t: number; id: string }) => b.t - a.t || (a.id < b.id ? -1 : 1);
+    for (let k = 0; k < 40; k++) {
+      const a = [rand() * 12 - 6, rand() * 4 - 0.5, rand() * 12 - 6];
+      const b = [rand() * 12 - 6, rand() * 4 - 0.5, rand() * 12 - 6];
+      const lo = a.map((v, i) => Math.min(v, b[i]!));
+      const hi = a.map((v, i) => Math.max(v, b[i]!));
+      // Even k: a window inside one epoch; odd k: one spanning up to three epochs.
+      const epoch = base + 1000 * Math.floor(rand() * 5);
+      const [s, e] = k % 2 === 0
+        ? [epoch + Math.floor(rand() * 500), epoch + 500 + Math.floor(rand() * 499)]
+        : [base + Math.floor(rand() * 2000), base + 2000 + Math.floor(rand() * 3000)];
+      const want = pts
+        .filter((pt) => [pt.x, pt.y, pt.z].every((v, i) => v >= lo[i]! && v <= hi[i]!) && pt.t >= s && pt.t <= e)
+        .sort(newestFirst)
+        .map((pt) => pt.id);
+      const r = await call("POST", `${p.v1}/spaces/lab/query`, { token: p.pk, body: { region: { lo, hi }, time: { start: s, end: e }, limit: 100 } });
+      expect(ids(r), JSON.stringify({ lo, hi, s, e })).toEqual(want);
+    }
+  });
+
+  it("returns each result's address", async () => {
+    const [first] = (await q({ limit: 1 })).body.results;
+    expect(first.address).toEqual({ epoch: Math.floor(first.t / 5000), r4: expect.any(Number), r8: expect.any(Number), r12: expect.any(Number) });
+  });
+});
+
+describe("SDK compatibility layer, M1 endpoints", () => {
+  let C: Awaited<ReturnType<typeof newProject>>;
+  let anchor = "";
+  beforeAll(async () => {
+    C = await newProject("Compat M1");
+    anchor = (await call("POST", `${C.base}/insert`, { token: C.sk, body: sdkState() })).body.id;
+  });
+
+  it("validates insert_batch", async () => {
+    const batch = (body: Json, token = C.sk) => call("POST", `${C.base}/insert_batch`, { token, body });
+    expect((await batch({ states: [sdkState()] }, C.pk)).status).toBe(403);
+    expect((await batch({ states: Array.from({ length: 101 }, () => sdkState()) })).status).toBe(413);
+    expect((await batch({ states: [] })).status).toBe(422);
+    const bad = await batch({ states: [sdkState(), sdkState({ x: 2 })] });
+    expect([bad.status, bad.body.detail]).toEqual([422, "states[1]: x must be in [0, 1]"]);
+    expect((await batch({ states: [sdkState()], chains: { s: 5 } })).status).toBe(422);
+    expect((await batch({ states: [sdkState()], chains: [] })).status).toBe(422);
+    const dims = await batch({ states: [sdkState({ vector: [1, 0, 0] })] });
+    expect([dims.status, dims.body.detail]).toEqual([422, "states[0].vector must have 4 dimensions, got 3"]);
+    const ok = await batch({ states: [sdkState({ timestamp_ms: now - 500 }), sdkState({ scene_id: "t", timestamp_ms: now - 900 })] });
+    expect(ok.body.ids).toHaveLength(2);
+    expect(ok.body.chains).toEqual({ s: ok.body.ids[0], t: ok.body.ids[1] });
+  });
+
+  it("validates trajectory and causal_context, and answers an unknown id with no results", async () => {
+    const post = (path: string, body: Json) => call("POST", `${C.base}/${path}`, { token: C.pk, body });
+    expect((await post("trajectory", {})).status).toBe(422);
+    expect((await post("trajectory", { state_id: anchor, steps_back: 1001 })).status).toBe(422);
+    expect((await post("trajectory", { state_id: anchor, steps_forward: -1 })).status).toBe(422);
+    expect((await post("causal_context", { state_id: anchor, window_ms: -1 })).status).toBe(422);
+    expect((await post("causal_context", { state_id: anchor, include_vectors: "no" })).status).toBe(422);
+    expect((await post("trajectory", { state_id: "nope" })).body).toEqual({ results: [] });
+    expect((await post("causal_context", { state_id: "nope" })).body).toEqual({ results: [] });
+    const traj = await post("trajectory", { state_id: anchor, include_vectors: false });
+    expect(traj.body.results[0]).toMatchObject({ id: anchor, vector: [] });
+    expect((await call("GET", `${C.base}/trajectory`, { token: C.pk })).status).toBe(405);
+  });
+
+  it("validates include_scores", async () => {
+    expect((await call("POST", `${C.base}/query`, { token: C.pk, body: { vector: [1, 0, 0, 0], include_scores: 1 } })).status).toBe(422);
+    const r = await call("POST", `${C.base}/query`, { token: C.pk, body: { vector: [1, 0, 0, 0] } });
+    expect(r.body.results[0]).not.toHaveProperty("score");
+  });
+});

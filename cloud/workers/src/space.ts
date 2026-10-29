@@ -6,15 +6,23 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { age, changesAnswer, listAnswer, parseIntent, resolveLabel, wherePhrase, whereAnswer } from "./ask";
-import { hilbert3, hilbertRanges3 } from "./hilbert";
+import { hilbert3, hilbert4, hilbertRanges, hilbertRanges3 } from "./hilbert";
 import type {
-  Change, Digest, Env, Frame, InsertResult, Observation, ObservationIn, QueryHit, QueryResult, QuerySpec, SdkFields,
-  SdkStateIn, SpaceMeta,
+  Address, BatchResult, Change, Digest, Env, Extents, Frame, InsertResult, Observation, ObservationIn, QueryHit, QueryResult,
+  QuerySpec, SdkFields, SdkStateIn, SpaceMeta,
 } from "./types";
+import { DEFAULT_EPOCH_MS } from "./types";
 
 const HILBERT_ORDER = 8;
 const MOVED_THRESHOLD_M = 0.5;
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+/** Causal-context replies stop at this many states. */
+const MAX_CONTEXT = 10_000;
+/**
+ * Delay before the next backfill pass. The clock is frozen within an event, so an alarm set to
+ * Date.now() from alarm() would equal the running alarm's time and be cleared with it.
+ */
+const BACKFILL_DELAY_MS = 100;
 /** Vector queries score at most this many matching rows, newest first. */
 const MAX_VECTOR_SCAN = 20_000;
 /** Same over-fetch and decay clamp as loci's query_scored and temporal.decay. */
@@ -54,6 +62,35 @@ function cosine(q: number[], qNorm: number, v: number[]): number {
 
 function vec3InUnit(v: [number, number, number], lo: [number, number, number], hi: [number, number, number]) {
   return v.map((x, k) => (x - lo[k]!) / (hi[k]! - lo[k]!)) as [number, number, number];
+}
+
+function epochOf(meta: SpaceMeta): number {
+  return meta.epoch_ms ?? DEFAULT_EPOCH_MS; // Phase 0 objects stored their meta without one
+}
+
+/** The stored keys of a position: the 3D cell for region queries, and the library's 4D address. */
+function addressOf(extents: Extents, epochMs: number, x: number, y: number, z: number, t: number): Address & { h8: number } {
+  const u = vec3InUnit([x, y, z], extents.lo, extents.hi);
+  // As loci's epoch_id and LociClient._normalise_time.
+  const epoch = Math.floor(t / epochMs);
+  const p: [number, number, number, number] = [u[0], u[1], u[2], Math.min(1, Math.max(0, (t - epoch * epochMs) / epochMs))];
+  return { h8: hilbert3(u, HILBERT_ORDER), epoch, r4: hilbert4(p, 4), r8: hilbert4(p, 8), r12: hilbert4(p, 12) };
+}
+
+function rowToAddress(r: Row): Address | null {
+  if (r.r12 === null || r.r12 === undefined) return null;
+  return { epoch: Number(r.epoch), r4: Number(r.r4), r8: Number(r.r8), r12: Number(r.r12) };
+}
+
+function rowToHit(r: Row, includeEmbedding: boolean, similarity: number | null = null, score: number | null = null): QueryHit {
+  return {
+    obs: rowToObs(r),
+    sdk: rowToSdk(r),
+    address: rowToAddress(r),
+    similarity,
+    score,
+    embedding: includeEmbedding && r.emb ? decodeEmbedding(r.emb as ArrayBuffer, r.emb_scale as number | null) : null,
+  };
 }
 
 function rowToSdk(r: Row): SdkFields {
@@ -116,25 +153,70 @@ export class SpaceObject extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS tts_cache (k TEXT PRIMARY KEY, pcm BLOB NOT NULL, used INTEGER NOT NULL);
     `);
     this.migrate();
+    if (this.backfillAddresses()) void ctx.storage.setAlarm(Date.now() + BACKFILL_DELAY_MS);
   }
+
+  /** Rows the address backfill handles per pass; the rest continue from an alarm. */
+  static backfillPerPass = 5000;
 
   /** Additive schema changes for objects created by earlier versions. */
   private migrate(): void {
     const r = this.sql.exec("SELECT v FROM meta WHERE k = 'schema'").toArray()[0];
-    if ((r ? Number(r.v) : 1) >= SCHEMA_VERSION) return;
+    const from = r ? Number(r.v) : 1;
+    if (from >= SCHEMA_VERSION) return;
     this.ctx.storage.transactionSync(() => {
-      // v2: WorldState fields for the SDK compatibility layer, and a Hilbert index for region queries.
-      // Observations without a label (SDK states whose metadata has none) are stored with label ''.
-      this.sql.exec(`
-        ALTER TABLE obs ADD COLUMN scene TEXT;
-        ALTER TABLE obs ADD COLUMN scale TEXT;
-        ALTER TABLE obs ADD COLUMN prev_id TEXT;
-        ALTER TABLE obs ADD COLUMN next_id TEXT;
-        CREATE INDEX IF NOT EXISTS obs_scene_t ON obs(scene, t);
-        CREATE INDEX IF NOT EXISTS obs_h8 ON obs(h8);
-      `);
+      if (from < 2) {
+        // v2: WorldState fields for the SDK compatibility layer, and a Hilbert index for region queries.
+        // Observations without a label (SDK states whose metadata has none) are stored with label ''.
+        this.sql.exec(`
+          ALTER TABLE obs ADD COLUMN scene TEXT;
+          ALTER TABLE obs ADD COLUMN scale TEXT;
+          ALTER TABLE obs ADD COLUMN prev_id TEXT;
+          ALTER TABLE obs ADD COLUMN next_id TEXT;
+          CREATE INDEX IF NOT EXISTS obs_scene_t ON obs(scene, t);
+          CREATE INDEX IF NOT EXISTS obs_h8 ON obs(h8);
+        `);
+      }
+      if (from < 3) {
+        // v3: the library's 4D address (epoch and hilbert_r4/r8/r12) and a time index. Existing rows are
+        // backfilled; until that finishes, queries use the 3D cell and the time index only.
+        this.sql.exec(`
+          ALTER TABLE obs ADD COLUMN epoch INTEGER;
+          ALTER TABLE obs ADD COLUMN r4 INTEGER;
+          ALTER TABLE obs ADD COLUMN r8 INTEGER;
+          ALTER TABLE obs ADD COLUMN r12 INTEGER;
+          CREATE INDEX IF NOT EXISTS obs_epoch_r12 ON obs(epoch, r12);
+          CREATE INDEX IF NOT EXISTS obs_t ON obs(t);
+        `);
+        this.sql.exec("INSERT INTO meta (k, v) VALUES ('address', 'pending') ON CONFLICT(k) DO UPDATE SET v = excluded.v");
+      }
       this.sql.exec("INSERT INTO meta (k, v) VALUES ('schema', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", String(SCHEMA_VERSION));
     });
+  }
+
+  private addressReady(): boolean {
+    const r = this.sql.exec("SELECT v FROM meta WHERE k = 'address'").toArray()[0];
+    return !r || r.v === "ready";
+  }
+
+  /** One pass of the v3 backfill. Returns true while rows remain, so the caller schedules an alarm. */
+  private backfillAddresses(): boolean {
+    if (this.addressReady()) return false;
+    const meta = this.getMeta();
+    const rows = this.sql.exec("SELECT id, x, y, z, t FROM obs WHERE r12 IS NULL LIMIT ?", SpaceObject.backfillPerPass).toArray();
+    if (!meta && rows.length) return false; // cannot happen: every write stores the meta first
+    this.ctx.storage.transactionSync(() => {
+      for (const r of rows) {
+        const a = addressOf(meta!.extents, epochOf(meta!), Number(r.x), Number(r.y), Number(r.z), Number(r.t));
+        this.sql.exec("UPDATE obs SET epoch = ?, r4 = ?, r8 = ?, r12 = ? WHERE id = ?", a.epoch, a.r4, a.r8, a.r12, r.id);
+      }
+      if (rows.length < SpaceObject.backfillPerPass) this.sql.exec("UPDATE meta SET v = 'ready' WHERE k = 'address'");
+    });
+    return rows.length === SpaceObject.backfillPerPass;
+  }
+
+  async alarm(): Promise<void> {
+    if (this.backfillAddresses()) await this.ctx.storage.setAlarm(Date.now() + BACKFILL_DELAY_MS);
   }
 
   private getMeta(): SpaceMeta | null {
@@ -178,7 +260,6 @@ export class SpaceObject extends DurableObject<Env> {
     let duplicates = 0;
     let updated = 0;
     let deleted = 0;
-    const { lo, hi } = meta.extents;
     this.ctx.storage.transactionSync(() => {
       for (const id of deletes) {
         const row = this.sql.exec("SELECT label, room FROM obs WHERE id = ?", id).toArray()[0];
@@ -192,6 +273,7 @@ export class SpaceObject extends DurableObject<Env> {
         ids.push(id);
         const frame = o.frame ?? meta.frame;
         const emb = o.embedding ? quantiseEmbedding(o.embedding) : null;
+        const a = addressOf(meta.extents, epochOf(meta), o.x, o.y, o.z, o.t);
         const metaJson = o.metadata ? JSON.stringify(o.metadata) : null;
         const old = upsert ? this.sql.exec("SELECT * FROM obs WHERE id = ?", id).toArray()[0] : undefined;
         if (old) {
@@ -212,21 +294,23 @@ export class SpaceObject extends DurableObject<Env> {
           this.sql.exec(
             `UPDATE obs SET frame = ?, x = ?, y = ?, z = ?, h8 = ?, t = ?, confidence = ?,
                emb = COALESCE(?, emb), emb_scale = CASE WHEN ? IS NULL THEN emb_scale ELSE ? END,
-               emb_model = COALESCE(?, emb_model), meta = COALESCE(?, meta), media = COALESCE(?, media), rev = ?
+               emb_model = COALESCE(?, emb_model), meta = COALESCE(?, meta), media = COALESCE(?, media), rev = ?,
+               epoch = ?, r4 = ?, r8 = ?, r12 = ?
              WHERE id = ?`,
-            frame, o.x, o.y, o.z, hilbert3(vec3InUnit([o.x, o.y, o.z], lo, hi), HILBERT_ORDER), o.t, confidence,
+            frame, o.x, o.y, o.z, a.h8, o.t, confidence,
             emb?.blob ?? null, emb?.blob ?? null, emb?.scale ?? null, emb ? (o.embedding_model ?? null) : null,
-            metaJson, o.media ?? null, rev, id,
+            metaJson, o.media ?? null, rev, a.epoch, a.r4, a.r8, a.r12, id,
           );
           updated++;
           continue;
         }
         const cur = this.sql.exec(
-          `INSERT OR IGNORE INTO obs (id, device_id, label, frame, room, x, y, z, h8, t, confidence, emb, emb_scale, emb_model, meta, media, rev)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          id, deviceId, o.label, frame, o.room ?? null, o.x, o.y, o.z, hilbert3(vec3InUnit([o.x, o.y, o.z], lo, hi), HILBERT_ORDER), o.t,
+          `INSERT OR IGNORE INTO obs (id, device_id, label, frame, room, x, y, z, h8, t, confidence, emb, emb_scale, emb_model, meta, media, rev,
+                                      epoch, r4, r8, r12)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          id, deviceId, o.label, frame, o.room ?? null, o.x, o.y, o.z, a.h8, o.t,
           o.confidence ?? 1, emb?.blob ?? null, emb?.scale ?? null, o.embedding_model ?? null,
-          metaJson, o.media ?? null, rev,
+          metaJson, o.media ?? null, rev, a.epoch, a.r4, a.r8, a.r12,
         );
         if (cur.rowsWritten > 0) accepted++;
         else duplicates++;
@@ -362,11 +446,27 @@ export class SpaceObject extends DurableObject<Env> {
       where.push(sql);
       args.push(...values);
     };
-    if (spec.region) {
-      // Hilbert cell ranges narrow the scan through obs_h8; the exact bounds decide membership.
-      const { lo, hi } = meta.extents;
+    // Index pre-filters, as in the library; the exact bounds below decide membership.
+    const { lo, hi } = meta.extents;
+    const epochMs = epochOf(meta);
+    const { timeStart: t0, timeEnd: t1 } = spec;
+    if (t0 !== null && t1 !== null && Math.floor(t0 / epochMs) === Math.floor(t1 / epochMs) && this.addressReady()) {
+      // A window inside one epoch: the 4D address, through obs_epoch_r12.
+      const epoch = Math.floor(t0 / epochMs);
+      cond("epoch = ?", epoch);
+      if (spec.region) {
+        const tn = (t: number) => (t - epoch * epochMs) / epochMs;
+        const ranges = hilbertRanges(
+          [...vec3InUnit(spec.region.lo, lo, hi), tn(t0)], [...vec3InUnit(spec.region.hi, lo, hi), tn(t1)], 12,
+        );
+        cond(`(${ranges.map(() => "r12 BETWEEN ? AND ?").join(" OR ")})`, ...ranges.flat());
+      }
+    } else if (spec.region) {
+      // Spanning epochs, or no window: the 3D cell through obs_h8, and time through obs_t.
       const ranges = hilbertRanges3(vec3InUnit(spec.region.lo, lo, hi), vec3InUnit(spec.region.hi, lo, hi), HILBERT_ORDER);
       cond(`(${ranges.map(() => "h8 BETWEEN ? AND ?").join(" OR ")})`, ...ranges.flat());
+    }
+    if (spec.region) {
       const [rlo, rhi] = [spec.region.lo, spec.region.hi];
       cond("x BETWEEN ? AND ? AND y BETWEEN ? AND ? AND z BETWEEN ? AND ?", rlo[0], rhi[0], rlo[1], rhi[1], rlo[2], rhi[2]);
     }
@@ -377,13 +477,7 @@ export class SpaceObject extends DurableObject<Env> {
     if (spec.minConfidence !== null) cond("confidence >= ?", spec.minConfidence);
     if (spec.vector) cond("emb IS NOT NULL");
     const filter = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const hit = (r: Row, similarity: number | null, score: number | null): QueryHit => ({
-      obs: rowToObs(r),
-      sdk: rowToSdk(r),
-      similarity,
-      score,
-      embedding: spec.includeEmbedding && r.emb ? decodeEmbedding(r.emb as ArrayBuffer, r.emb_scale as number | null) : null,
-    });
+    const hit = (r: Row, similarity: number | null, score: number | null) => rowToHit(r, spec.includeEmbedding, similarity, score);
 
     if (!spec.vector) {
       const rows = this.sql.exec(`SELECT * FROM obs ${filter} ORDER BY t DESC, id LIMIT ?`, ...args, spec.limit).toArray();
@@ -421,6 +515,25 @@ export class SpaceObject extends DurableObject<Env> {
     return this.query(meta, spec);
   }
 
+  /** Latest state of `scene` strictly before `t` (ties: the last written), as loci's _find_latest_predecessor. */
+  private predecessor(scene: string, t: number): string | null {
+    const r = this.sql.exec("SELECT id FROM obs WHERE scene = ? AND t < ? ORDER BY t DESC, rowid DESC LIMIT 1", scene, t).toArray()[0];
+    return r ? String(r.id) : null;
+  }
+
+  /** One SDK state, with an exact float32 vector and both Hilbert keys. */
+  private writeState(meta: SpaceMeta, s: SdkStateIn, label: string, deviceId: string | null, id: string, rev: number, prev: string | null) {
+    const a = addressOf(meta.extents, epochOf(meta), s.x, s.y, s.z, s.timestamp_ms);
+    this.sql.exec(
+      `INSERT INTO obs (id, device_id, label, frame, room, x, y, z, h8, t, confidence, emb, emb_scale, emb_model, meta, media, rev,
+                        scene, scale, prev_id, next_id, epoch, r4, r8, r12)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id, deviceId, label, meta.frame, s.x, s.y, s.z, a.h8, s.timestamp_ms,
+      s.confidence, new Float32Array(s.vector).buffer, Object.keys(s.metadata).length ? JSON.stringify(s.metadata) : null, rev,
+      s.scene_id, s.scale_level, prev, s.next_state_id, a.epoch, a.r4, a.r8, a.r12,
+    );
+  }
+
   /**
    * SDK /insert: one WorldState, stored with an exact float32 vector. Links it after the latest earlier
    * state of the same scene (that state's next_state_id becomes this id), as LociClient.insert does.
@@ -431,24 +544,83 @@ export class SpaceObject extends DurableObject<Env> {
     if (dim !== null && s.vector.length !== dim) return { error: `vector must have ${dim} dimensions, got ${s.vector.length}` };
     const id = crypto.randomUUID();
     const rev = this.rev() + 1;
-    const { lo, hi } = meta.extents;
     this.ctx.storage.transactionSync(() => {
-      const pred = this.sql
-        .exec("SELECT id FROM obs WHERE scene = ? AND t < ? ORDER BY t DESC, rowid DESC LIMIT 1", s.scene_id, s.timestamp_ms)
-        .toArray()[0];
-      if (pred) this.sql.exec("UPDATE obs SET next_id = ? WHERE id = ?", id, pred.id);
-      this.sql.exec(
-        `INSERT INTO obs (id, device_id, label, frame, room, x, y, z, h8, t, confidence, emb, emb_scale, emb_model, meta, media, rev,
-                          scene, scale, prev_id, next_id)
-         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?, ?, ?, ?)`,
-        id, deviceId, label, meta.frame, s.x, s.y, s.z, hilbert3(vec3InUnit([s.x, s.y, s.z], lo, hi), HILBERT_ORDER), s.timestamp_ms,
-        s.confidence, new Float32Array(s.vector).buffer, Object.keys(s.metadata).length ? JSON.stringify(s.metadata) : null, rev,
-        s.scene_id, s.scale_level, pred ? String(pred.id) : s.prev_state_id, s.next_state_id,
-      );
+      const pred = this.predecessor(s.scene_id, s.timestamp_ms);
+      if (pred) this.sql.exec("UPDATE obs SET next_id = ? WHERE id = ?", id, pred);
+      this.writeState(meta, s, label, deviceId, id, rev, pred ?? s.prev_state_id);
       if (dim === null) this.sql.exec("INSERT INTO meta (k, v) VALUES ('sdk_dim', ?)", String(s.vector.length));
       this.setRev(rev);
     });
     return { id, rev };
+  }
+
+  /**
+   * SDK /insert_batch, as LocalLociClient.insert_batch: states are linked per scene in (scene, time) order.
+   * The first state of a scene follows `chains[scene]` (the last id of the previous chunk) or else the latest
+   * earlier state in the store, and keeps its own prev_state_id when there is neither. Every state that ends
+   * up with a predecessor becomes that state's next_state_id. Returns ids in input order and, per scene, the
+   * last id, which the SDK passes on with the next chunk.
+   */
+  insertStates(
+    meta: SpaceMeta, states: SdkStateIn[], labels: string[], chains: Record<string, string>, deviceId: string | null,
+  ): BatchResult | { error: string } {
+    if (!this.getMeta()) this.configure(meta);
+    const known = this.sdkDim();
+    const dim = known ?? states[0]?.vector.length ?? 0;
+    for (const [i, st] of states.entries()) {
+      if (st.vector.length !== dim) return { error: `states[${i}].vector must have ${dim} dimensions, got ${st.vector.length}` };
+    }
+    const order = states.map((_, i) => i).sort((a, b) => {
+      const [sa, sb] = [states[a]!, states[b]!];
+      return (sa.scene_id < sb.scene_id ? -1 : sa.scene_id > sb.scene_id ? 1 : 0) || sa.timestamp_ms - sb.timestamp_ms;
+    });
+    const ids = states.map(() => crypto.randomUUID());
+    const chain = new Map(Object.entries(chains));
+    const rev = this.rev() + 1;
+    this.ctx.storage.transactionSync(() => {
+      const links: [string, string][] = [];
+      for (const i of order) {
+        const st = states[i]!;
+        const prev = chain.get(st.scene_id) ?? this.predecessor(st.scene_id, st.timestamp_ms) ?? st.prev_state_id;
+        this.writeState(meta, st, labels[i] ?? "", deviceId, ids[i]!, rev, prev);
+        chain.set(st.scene_id, ids[i]!);
+        if (prev) links.push([prev, ids[i]!]);
+      }
+      for (const [prev, id] of links) this.sql.exec("UPDATE obs SET next_id = ? WHERE id = ?", id, prev);
+      if (known === null && states.length) this.sql.exec("INSERT INTO meta (k, v) VALUES ('sdk_dim', ?)", String(dim));
+      if (states.length) this.setRev(rev);
+    });
+    const scenes = new Set(states.map((st) => st.scene_id));
+    return { ids, chains: Object.fromEntries([...chain].filter(([scene]) => scenes.has(scene))), rev: states.length ? rev : rev - 1 };
+  }
+
+  /** As LociClient.get_trajectory: the anchor's scene in time order, `back` states before it and `forward` after. */
+  trajectory(id: string, back: number, forward: number, includeEmbedding: boolean): QueryHit[] {
+    const a = this.sql.exec("SELECT *, rowid AS rid FROM obs WHERE id = ?", id).toArray()[0];
+    if (!a) return [];
+    if (!a.scene) return [rowToHit(a, includeEmbedding)];
+    const before = this.sql
+      .exec(
+        "SELECT * FROM obs WHERE scene = ? AND (t < ? OR (t = ? AND rowid < ?)) ORDER BY t DESC, rowid DESC LIMIT ?",
+        a.scene, a.t, a.t, a.rid, back,
+      )
+      .toArray()
+      .reverse();
+    const after = this.sql
+      .exec("SELECT * FROM obs WHERE scene = ? AND (t > ? OR (t = ? AND rowid > ?)) ORDER BY t, rowid LIMIT ?", a.scene, a.t, a.t, a.rid, forward)
+      .toArray();
+    return [...before, a, ...after].map((r) => rowToHit(r, includeEmbedding));
+  }
+
+  /** As LociClient.get_causal_context: the anchor's scene within ±windowMs, in time order (anchor included). */
+  causalContext(id: string, windowMs: number, includeEmbedding: boolean): QueryResult {
+    const a = this.sql.exec("SELECT scene, t FROM obs WHERE id = ?", id).toArray()[0];
+    if (!a || !a.scene) return { hits: [], truncated: false };
+    const at = Number(a.t);
+    const rows = this.sql
+      .exec("SELECT * FROM obs WHERE scene = ? AND t BETWEEN ? AND ? ORDER BY t, rowid LIMIT ?", a.scene, at - windowMs, at + windowMs, MAX_CONTEXT + 1)
+      .toArray();
+    return { hits: rows.slice(0, MAX_CONTEXT).map((r) => rowToHit(r, includeEmbedding)), truncated: rows.length > MAX_CONTEXT };
   }
 
   ask(text: string, nowMs: number = Date.now()): { answer: string; intent: string; label: string | null; results: Observation[] } {

@@ -13,3 +13,5 @@ bool wifi_link_connected(void);
 bool wifi_link_wait(uint32_t timeout_ms);
 int wifi_link_rssi(void);
 const char *wifi_link_ip(void);
+// Test aid (console `wifi off` / `wifi on`): drop the connection and stay off, or reconnect.
+void wifi_link_pause(bool off);

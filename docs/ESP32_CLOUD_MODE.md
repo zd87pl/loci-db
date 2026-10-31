@@ -61,11 +61,12 @@ card cache ◄── GET board/memory, board/memory.pcm, board/phrase.pcm (every
 | `location <room>` · `location clear` | The room sent with this board's sightings |
 | `ask <question>` | In cloud mode: the card first ("where is my cup"), then the cloud |
 | `detect [n]` | Run the on-board detector on `n` live frames and print labels and timing |
+| `wifi off` · `wifi on` | Test aid: drop Wi-Fi and stay off (the offline paths and the card queue), then reconnect |
 
 ## What the board does in cloud mode
 
 **Sightings**
-- Every 2 s (`LOCI_DETECT_INTERVAL_MS`) a frame goes through the detector (`firmware/common/loci_detect`, ESP-DL COCO YOLO11n 320×320 int8).
+- Every 2 s (`LOCI_DETECT_INTERVAL_MS`) a frame goes through the detector (`firmware/common/loci_detect`, ESP-DL COCO YOLO11n 320×320 int8). On the P4 a 1280×960 frame takes 51 ms to decode (hardware JPEG) and about 645 ms to detect.
 - **Merging:** detections with a score of at least 0.5 are merged per object. The same label seen again within 60 s and within 0.15 of the frame of its last position keeps its id (`d_<device>_<boot>_<nonce>_<n>`) and is re-sent as an upsert at most every 30 s. Anything else starts a new sighting.
 - **Not sent:** people are left out. Nothing is recorded until SNTP has set the clock (`pool.ntp.org`), so no sighting lands in 1970.
 - **Batches** of up to 50 go to `POST spaces/<s>/observations` with `"upsert": true` and the image frame, x and y at the box centre and `room` from `location`.
@@ -77,7 +78,7 @@ card cache ◄── GET board/memory, board/memory.pcm, board/phrase.pcm (every
 - **Everything else** goes to `board/voice`: "what do you see", other objects, free-form questions.
   - Silence or Whisper's stock phrases give a short low tone.
   - With no cloud, the board plays the card's summary or the offline prompt.
-- **Typed `ask`** does the same: the card first, then `board/ask`.
+- **Typed `ask`** does the same: the card first, then `board/ask`, then the card's summary.
 
 **Cache**
 - `board/memory` returns the newest sighting per label in the space, from this board, other boards and the Mac's mirror.
@@ -117,6 +118,25 @@ card cache ◄── GET board/memory, board/memory.pcm, board/phrase.pcm (every
 ## Status
 
 - ✅ Both boards build (IDF 6.1).
-- ⬜ **Board-tested: nothing yet.** Flashing the P4 (the live board) or the S3 needs the user's OK.
-  - The first checks: retention RAM at boot, `cloud claim` against staging, `detect 10` timing on the P4, a push-to-talk answer from `board/voice`, and a Wi-Fi-off run that fills and drains the card queue.
-- ⬜ The `board/*` routes and upsert are in the Worker PR and need to be deployed to staging, then production, before a board can use them. Claim, token and plain writes work against today's production.
+- ✅ **P4 tested against staging on 2026-10-30.** Flashed with main (`3fac7d9`) plus `wifi off|on`, and claimed as `dev_4b582c9cb3b20ec3`, room `office`, in staging project `qzjibr9prr5h`.
+  - **Boot:** the new partition layout boots. Free retention RAM at `app_main` is 9,136 B, above the 8 kB floor. At runtime, TLS sessions use it all up (`cloud status` reports "retention RAM LOW"), but that only matters at boot.
+  - **Claim:** `cloud claim` stored the credentials, fetched a token and switched to `mode cloud`. The claim survived several reboots.
+  - **Cache:** the card cache filled from `board/memory` (15 objects, 15 s spoken summary) and was refreshed after the board's own sightings.
+  - **`detect 10`:** decode 51 ms, detect 647 ms on average.
+  - **Sightings:** live sightings (laptop, tv, chair) reached staging filed under `office`, one row per object.
+  - **Push-to-talk:** two questions. MultiNet missed both: one was matched to a word not on the card, the other recognised nothing. So both went to `board/voice`. Whisper heard "Where is my laptop?" and "Where is my TV?". The answers took 1.5 s and 2.6 s; the second was "Your tv was last seen in the office, just now."
+    - The laptop question came 4 s after the laptop was first detected, before the 5 s flush had sent it, so the cloud had not seen it yet.
+  - **Typed `ask`:** "where is my cup" was answered from the card in about 1 s. "what changed in the kitchen" was answered by the cloud in about 2 s.
+  - **`wifi off`:**
+    - Card answers still play, and `offline` plays the card summary.
+    - Sightings queue on the card. One run queued 2.6 kB, which was uploaded after a reboot as 13 upserts that became 2 rows, with their original times and ids.
+    - `wifi on` reconnects in about 4 s, and the next cloud answer included the chair queued while offline.
+- ⬜ **Not tested yet:**
+  - the S3 against staging;
+  - a recognised "where is my X" on push-to-talk being answered from the card;
+  - typed `ask` falling back to the card summary while offline (fixed after the test run, not flashed yet).
+- ✅ **Production** runs main `3fac7d9` since 2026-10-31, with the `board/*` routes and upsert. Its smoke test changed no data: `board/ask` answered in 0.7 s, and an upsert by another writer was refused as a conflict.
+  - The P4 is still claimed on staging. Moving it to production takes a claim code from `devices.py` with the production env file, then `cloud forget` and `cloud claim` on the board.
+- **Findings:**
+  - The board power-cycled each time it was picked up. USB dropped and the board booted again several times within a few seconds. It looks like the cable or the power supply, not the firmware: a `wifi off` with nobody touching the board did not reset it.
+  - The detector reports detections below the 0.5 score that sightings need, so a faint TV is printed but not tracked. COCO also gives some false positives (a "traffic light" on a desk).

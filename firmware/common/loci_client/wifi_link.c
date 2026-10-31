@@ -14,6 +14,7 @@ static const char *TAG = "wifi";
 static EventGroupHandle_t s_events;
 static char s_ip[16] = "0.0.0.0";
 static int s_retries;
+static bool s_paused;  // `wifi off`: stay disconnected until `wifi on`
 #define CONNECTED_BIT BIT0
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
@@ -21,6 +22,10 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     esp_wifi_connect();
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
     xEventGroupClearBits(s_events, CONNECTED_BIT);
+    if (s_paused) {
+      ESP_LOGW(TAG, "disconnected (wifi off)");
+      return;
+    }
     s_retries++;
     ESP_LOGW(TAG, "disconnected (reason %d), reconnecting (%d)",
              ((wifi_event_sta_disconnected_t *)data)->reason, s_retries);
@@ -76,3 +81,14 @@ int wifi_link_rssi(void) {
 }
 
 const char *wifi_link_ip(void) { return s_ip; }
+
+void wifi_link_pause(bool off) {
+  if (!s_events || off == s_paused) return;
+  s_paused = off;
+  if (off) {
+    esp_wifi_disconnect();
+  } else {
+    s_retries = 0;
+    esp_wifi_connect();
+  }
+}

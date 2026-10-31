@@ -51,8 +51,7 @@
         {
           "binding": "DB",
           "database_name": "loci-control-staging",
-          // Replace with the id printed by `wrangler d1 create loci-control-staging`.
-          "database_id": "00000000-0000-0000-0000-000000000000",
+          "database_id": "9f6a5ac9-c541-4995-a213-dbb9525af7c7",
           "migrations_dir": "migrations"
         }
       ],

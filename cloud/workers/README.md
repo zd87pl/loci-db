@@ -266,7 +266,9 @@ For the Python SDK instead, `bootstrap.py --sdk` prints `LOCI_BASE_URL` and `LOC
 
 ## Production (Phase 0)
 
-Deployed 2026-10-27 to `https://loci-cloud.zd-66b.workers.dev` (D1 `loci-control`, id in `wrangler.jsonc`). `GET /health` reports the deployed commit (`sha`, `dev` for a deploy without one). The admin token lives outside the repo in `~/.loci/cloud-admin-token` on the operator's machine; project credentials from `bootstrap.py` go to `~/.loci/cloud.env` (mode 600).
+Deployed 2026-10-27 to `https://loci-cloud.zd-66b.workers.dev` (D1 `loci-control`, id in `wrangler.jsonc`). Last deployed 2026-10-31 by hand: main `3fac7d9`, Worker version `2380d1ad`, after migration 0002. The previous version, the rollback target, is `10d4150f` (`npx wrangler rollback 10d4150f`). Migration 0002 only adds a column, so the old code still runs.
+
+Staging: `https://loci-cloud-staging.zd-66b.workers.dev` (D1 `loci-control-staging`). Its admin token is in `~/.loci/cloud-admin-token-staging` and its project credentials in `~/.loci/cloud-staging.env`. `GET /health` reports the deployed commit (`sha`, `dev` for a deploy without one). The admin token lives outside the repo in `~/.loci/cloud-admin-token` on the operator's machine; project credentials from `bootstrap.py` go to `~/.loci/cloud.env` (mode 600).
 
 Clients must send their own `User-Agent`: Cloudflare's edge rejects the default `Python-urllib/x.y` agent with error 1010 (`cloud_sync.py` and `bootstrap.py` do).
 

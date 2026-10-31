@@ -177,7 +177,9 @@ static void ask_text(const char *text) {
     return;
   }
   if (answer_text_locally(text)) return;
-  if (cloud_link_ask(text) != ESP_OK) ESP_LOGW(TAG, "no answer from the cloud (cloud status for details)");
+  if (cloud_link_ask(text) == ESP_OK) return;
+  ESP_LOGW(TAG, "no answer from the cloud (cloud status for details)");
+  answer_offline();  // as for a spoken question: the card's summary, or the offline prompt
 }
 
 // Cloud mode: the board's own recogniser first; what it cannot answer from the card goes to the cloud,
@@ -511,6 +513,8 @@ static void run_console_command(const char *line) {
     ESP_LOGI(TAG, "device token %s", host_link_has_token() ? "stored" : "cleared");
   } else if (!strcmp(line, "offline")) {
     answer_offline();
+  } else if (!strcmp(line, "wifi off") || !strcmp(line, "wifi on")) {  // test the offline paths
+    wifi_link_pause(line[6] == 'f');
   } else if (!strcmp(line, "recog")) {  // self-test: record 4 s from the mic, recognise on the board
     if (!audio_mic_ready() || !s_ptt_buf) {
       ESP_LOGW(TAG, "[recog] no microphone");
@@ -567,7 +571,7 @@ static void run_console_command(const char *line) {
   } else if (s_cfg->console_extra && s_cfg->console_extra(line)) {
     // handled by the board
   } else {
-    ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | requeue | reboot | offline | recog | snap | beep | audio "
+    ESP_LOGI(TAG, "commands: status | sd | sdformat yes | objects | cache | requeue | reboot | offline | wifi off|on | recog | snap | beep | audio "
                   "| ask <question> | say <text> | fps <n> | vol <0-100> | host <url>|default | token <value>|clear "
                   "| mode cloud|host | location <room>|clear | cloud claim|status|ask|cache|forget%s%s",
              s_cfg->console_extra_help ? " | " : "", s_cfg->console_extra_help ? s_cfg->console_extra_help : "");

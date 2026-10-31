@@ -136,7 +136,11 @@ card cache ◄── GET board/memory, board/memory.pcm, board/phrase.pcm (every
   - a recognised "where is my X" on push-to-talk being answered from the card;
   - typed `ask` falling back to the card summary while offline (fixed after the test run, not flashed yet).
 - ✅ **Production** runs main `3fac7d9` since 2026-10-31, with the `board/*` routes and upsert. Its smoke test changed no data: `board/ask` answered in 0.7 s, and an upsert by another writer was refused as a conflict.
-  - The P4 is still claimed on staging. Moving it to production takes a claim code from `devices.py` with the production env file, then `cloud forget` and `cloud claim` on the board.
+  - The live host's mirror moved to main the same day. It adopted all 1,229 sighting ids and sent nothing.
+  - The P4 moved to production the same day: a claim code from `devices.py` with the production env file, then `cloud forget` and `cloud claim` on the board. It is `dev_9161e7f1e43a98d5`, room `office`.
+    - It filled its card cache from production, and a typed cloud question was answered in 2 s.
+    - It kept the claim across a reboot. Its first sighting (a book) became one production row with room `office` and a 4D address.
+  - The staging device `dev_4b582c9cb3b20ec3` is no longer used.
 - **Findings:**
   - The board power-cycled each time it was picked up. USB dropped and the board booted again several times within a few seconds. It looks like the cable or the power supply, not the firmware: a `wifi off` with nobody touching the board did not reset it.
   - The detector reports detections below the 0.5 score that sightings need, so a faint TV is printed but not tracked. COCO also gives some false positives (a "traffic light" on a desk).

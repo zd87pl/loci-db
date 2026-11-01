@@ -121,16 +121,32 @@ bool voice_local_init(void) {
 
 bool voice_local_ready(void) { return s_ready; }
 
+static int cmp_label(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+
 void voice_local_set_labels(const char labels[][32], int count) {
-  static char before[MAX_LABELS][LABEL_LEN];
+  // two scratch tables in PSRAM: as .bss they would come out of the P4's retention RAM (see the
+  // P4 README), where every kB counts
+  static char (*before)[LABEL_LEN], (*sorted)[LABEL_LEN];
+  if (!before) {
+    before = heap_caps_calloc(2 * MAX_LABELS, LABEL_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!before) before = heap_caps_calloc(2 * MAX_LABELS, LABEL_LEN, MALLOC_CAP_8BIT);
+    if (!before) return;
+    sorted = before + MAX_LABELS;
+  }
   int before_count = s_label_count;
-  memcpy(before, s_labels, sizeof(before));
+  memcpy(before, s_labels, sizeof(s_labels));
+  // memory.json lists the newest sighting first and that order changes with every refresh; sorted,
+  // the list (and with it the command ids) only changes when an object is added or dropped
+  if (count > MAX_LABELS) count = MAX_LABELS;
+  for (int i = 0; i < count; i++) snprintf(sorted[i], LABEL_LEN, "%s", labels[i]);
+  qsort(sorted, count, LABEL_LEN, cmp_label);
   s_label_count = 0;
-  for (int i = 0; i < count; i++) add_label(labels[i]);  // remembered objects first: they must fit
+  memset(s_labels, 0, sizeof(s_labels));  // so the comparison below sees no stale rows
+  for (int i = 0; i < count; i++) add_label(sorted[i]);  // remembered objects first: they must fit
   for (size_t i = 0; i < sizeof(k_default_labels) / sizeof(k_default_labels[0]); i++) add_label(k_default_labels[i]);
   // Every memory refresh lands here, but a moved object changes no phrase: MultiNet is only
   // rebuilt (a few hundred ms in the frame loop) when the list of objects itself changed.
-  if (s_label_count == before_count && !memcmp(before, s_labels, sizeof(before))) return;
+  if (s_label_count == before_count && !memcmp(before, s_labels, sizeof(s_labels))) return;
   rebuild_commands();
 }
 

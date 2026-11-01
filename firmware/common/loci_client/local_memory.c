@@ -197,22 +197,57 @@ void local_backlog_quarantine(const char *path, const char *why) {
   }
 }
 
+// Requeueing moves one file per call: each rename into a backlog of thousands of files costs FatFs
+// ~0.5 s (it scans the folder for a free 8.3 alias), and moving 490 at once froze the main loop,
+// button included, for 4 minutes on the P4. One folder cursor serves the whole requeue: a frame the
+// host refuses again goes back into backlog_bad/ mostly behind it (FatFs reuses the slots freed before
+// it), so it does not starve the frames after it, as reopening the folder at its first entry did.
+static DIR *s_requeue_dir;
+static int s_requeue_left;
+
+static void requeue_stop(void) {
+  if (s_requeue_dir) closedir(s_requeue_dir);
+  s_requeue_dir = NULL;
+  s_requeue_left = 0;
+}
+
 int local_backlog_requeue(void) {
+  requeue_stop();
   if (!storage_ready() || !s_dir_backlog_bad[0]) return 0;
-  DIR *d = opendir(s_dir_backlog_bad);
-  if (!d) return 0;
-  int n = 0;
-  char from[112], to[112];
-  struct dirent *e;
-  while ((e = readdir(d)) != NULL) {
-    if (e->d_name[0] == '.') continue;
+  s_requeue_left = count_files(s_dir_backlog_bad);
+  if (s_requeue_left > 0) s_requeue_dir = opendir(s_dir_backlog_bad);
+  if (!s_requeue_dir) s_requeue_left = 0;
+  return s_requeue_left;
+}
+
+bool local_backlog_requeue_step(void) {
+  if (s_requeue_left <= 0 || !s_requeue_dir) return false;
+  if (!storage_ready()) {
+    requeue_stop();
+    return false;
+  }
+  // A frame quarantined across the cursor reads back as its 8.3 alias ("176191~1.JPG"): it came in
+  // after the cursor passed, and moving it under that name would lose its capture time.
+  struct dirent *e = readdir(s_requeue_dir);
+  while (e && (e->d_name[0] == '.' || strchr(e->d_name, '~'))) e = readdir(s_requeue_dir);
+  bool moved = false;
+  if (e) {
+    char from[112], to[112];
     snprintf(from, sizeof(from), "%s/%.40s", s_dir_backlog_bad, e->d_name);
     snprintf(to, sizeof(to), "%s/%.40s", s_dir_backlog, e->d_name);
-    if (rename(from, to) == 0) n++;
+    moved = rename(from, to) == 0;
   }
-  closedir(d);
-  s_backlog_count = count_files(s_dir_backlog);
-  return n;
+  if (moved) {
+    s_backlog_count = s_backlog_count < 0 ? 1 : s_backlog_count + 1;
+    s_requeue_left--;
+  } else {
+    s_requeue_left = 0;  // end of the folder (or the rename failed): stop rather than spin
+  }
+  if (s_requeue_left == 0 || (s_requeue_left % 50) == 0)
+    ESP_LOGI(TAG, "backlog: requeue, %d quarantined frames left, %d in the queue", s_requeue_left,
+             local_backlog_count());
+  if (s_requeue_left == 0) requeue_stop();
+  return true;
 }
 
 uint8_t *local_read_file(const char *path, size_t *len_out) {
@@ -295,23 +330,25 @@ static void save_rev(const char *rev) {
   snprintf(s_cached_rev, sizeof(s_cached_rev), "%s", rev);
 }
 
-void local_memory_refresh(const char *rev) {
-  if (!storage_ready() || !rev || !rev[0] || !strcmp(rev, s_cached_rev)) return;
+bool local_memory_refresh(const char *rev) {
+  if (!storage_ready() || !rev || !rev[0] || !strcmp(rev, s_cached_rev)) return false;
   int64_t now = esp_timer_get_time() / 1000;
-  if (now - s_last_refresh_attempt_ms < 10000) return;  // the host's memory can change every frame
+  if (now - s_last_refresh_attempt_ms < 10000) return false;  // the host's memory can change every frame
   s_last_refresh_attempt_ms = now;
   size_t n1 = 0, n2 = 0;
   char q[96];
   snprintf(q, sizeof(q), "/api/esp32/memory?device=%s", host_device_id());
-  if (s_fetch(q, MEMORY_JSON, &n1) != ESP_OK) return;
+  if (s_fetch(q, MEMORY_JSON, &n1) != ESP_OK) return false;
+  bool fresh = true;  // memory.json is new from here on, even if the spoken summary fails below
   if (audio_speaker_ready()) {  // the spoken summary is of no use to a board without a speaker
     snprintf(q, sizeof(q), "/api/esp32/memory.pcm?device=%s", host_device_id());
-    if (s_fetch(q, MEMORY_PCM, &n2) != ESP_OK) return;
+    if (s_fetch(q, MEMORY_PCM, &n2) != ESP_OK) return fresh;  // rev not saved: retried
   }
   save_rev(rev);
   ESP_LOGI(TAG, "memory cache refreshed (rev %s): %u B json, %.1f s of speech", rev, (unsigned)n1,
            n2 / (2.0f * LOCI_AUDIO_RATE));
   local_memory_cache_object_phrases();
+  return fresh;
 }
 
 // The rev of a memory.json as written by the host or the cloud ({"rev":"<hex>",...}).

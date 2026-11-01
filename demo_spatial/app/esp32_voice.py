@@ -15,6 +15,7 @@ module sits between that raw audio and the demo's :class:`VoicePipeline`:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -186,7 +187,14 @@ class Esp32VoiceBridge:
         """Typed question → answer text (+ PCM when ``speak``)."""
         t0 = time.perf_counter()
         self.queries += 1
-        result = await self._voice.handle_text_query(text)
+        handle = self._voice.handle_text_query
+        if "synthesize_response" in inspect.signature(handle).parameters:
+            # one TTS pass, ours: letting the pipeline render too meant a slow engine (edge-tts, up
+            # to TTS_TIMEOUT_S) was waited for twice, past the board's voice timeout, and a board
+            # without a speaker (speak=False) still paid for a render nobody hears
+            result = await handle(text, synthesize_response=False)
+        else:
+            result = await handle(text)
         pcm, err = b"", None
         if speak:
             audio = result.answer_audio or b""

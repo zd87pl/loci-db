@@ -85,8 +85,12 @@ static void load_mode(void) {
   set_mode(!strcmp(mode, "cloud") || (!mode[0] && cloud_link_configured()), false);
 }
 
+static int64_t s_button_up_us;  // the last time a poll saw the button released
+
 static bool button_down(void) {
-  return s_cfg->button_gpio >= 0 && gpio_get_level(s_cfg->button_gpio) == 0;
+  bool down = s_cfg->button_gpio >= 0 && gpio_get_level(s_cfg->button_gpio) == 0;
+  if (!down) s_button_up_us = esp_timer_get_time();
+  return down;
 }
 
 static void print_status(void) {
@@ -210,7 +214,10 @@ static void refresh_offline_commands(void) {
 
 // ---- push-to-talk --------------------------------------------------------------------------
 static void record_and_ask(void) {
-  int64_t pressed_us = esp_timer_get_time();
+  // The press began after a poll last saw the button up. A busy loop (a frame upload, a detect pass)
+  // notices it late, so date it back, by at most the ~300 ms the I2S ring still holds.
+  int64_t pressed_us = esp_timer_get_time() - 300000;
+  if (s_button_up_us > pressed_us) pressed_us = s_button_up_us;
   vTaskDelay(pdMS_TO_TICKS(30));  // debounce
   if (!button_down() || !audio_mic_ready() || !s_ptt_buf) return;
   ESP_LOGI(TAG, "[ptt] recording... release the button to ask");
@@ -222,6 +229,7 @@ static void record_and_ask(void) {
   if (busy_us > 0) {
     vTaskDelay(pdMS_TO_TICKS(busy_us / 1000 + 1));
     audio_flush_mic();
+    pressed_us = esp_timer_get_time();  // the wait is not hold time: nothing said during it is kept
   }
   const size_t chunk = LOCI_AUDIO_RATE / 50;  // 20 ms
   size_t samples = 0;
@@ -233,10 +241,11 @@ static void record_and_ask(void) {
   }
   while (button_down()) vTaskDelay(pdMS_TO_TICKS(10));
   float seconds = samples / (float)LOCI_AUDIO_RATE;
-  // a tap is judged by how long the button was held: the pre-roll alone is ~0.3 s of audio
+  // a tap is judged by how long the button was held (the pre-roll alone is ~0.3 s of audio); a clip
+  // too short to hold a question (released while the speaker drained) counts as one too
   int64_t held_ms = (esp_timer_get_time() - pressed_us) / 1000;
   ESP_LOGI(TAG, "[ptt] %.1f s captured, button held %lld ms", seconds, held_ms);
-  if (held_ms < 300) {
+  if (held_ms < 300 || samples < LOCI_AUDIO_RATE / 4) {
     audio_beep(220.0f, 80);
     return;
   }
@@ -479,6 +488,7 @@ static void run_console_command(const char *line) {
       ESP_LOGW(TAG, "[sd] already mounted; nothing to format");
     } else if (storage_init(true) == ESP_OK) {
       local_memory_init();
+      refresh_offline_commands();  // the card's objects, even when its memory rev is already current
       ESP_LOGI(TAG, "[sd] formatted and mounted");
     } else {
       ESP_LOGE(TAG, "[sd] format failed");
@@ -491,7 +501,8 @@ static void run_console_command(const char *line) {
     esp_restart();
   } else if (!strcmp(line, "requeue")) {  // quarantined backlog frames go back in the upload queue
     int n = local_backlog_requeue();
-    ESP_LOGI(TAG, "[backlog] requeueing %d quarantined frames, one every 250 ms; %d in the queue", n,
+    ESP_LOGI(TAG, "[backlog] requeueing %d quarantined frames, one every 250 ms%s; %d in the queue", n,
+             s_cloud_mode || !wifi_link_connected() ? " once the board streams to the host again" : "",
              local_backlog_count());
   } else if (!strcmp(line, "cache")) {  // fetch the per-object answers the card lacks
     local_memory_cache_object_phrases();

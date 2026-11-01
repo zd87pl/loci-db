@@ -141,10 +141,11 @@ A 64 GB card arrives formatted as exFAT, which IDF's FatFs cannot read. The firm
 "card has no FAT filesystem"; build with `-DLOCI_SD_FORMAT_IF_NEEDED=1` once (it formats the card as
 FAT32, erasing it) or format it on a computer. Console: `sd` (card info), `objects` (cached memory),
 `offline` (play the cached summary), `requeue` (put backlog frames the host refused, kept in
-`backlog_bad/`, back in the upload queue), `reboot` (soft reset: the clock taken from the host
-survives it, a power cut does not; `status` shows the boot number and the clock's source). After a
-panic or watchdog reset the kept clock is off by the RTC slow clock's drift over the previous boot
-(about 0.1-1 %, so up to minutes after hours of uptime) until the host answers again.
+`backlog_bad/`, back in the upload queue, one every 250 ms while the board streams to the host),
+`reboot` (soft reset: the clock taken from the host survives it, a power cut does not; `status` shows
+the boot number and the clock's source). After a panic or watchdog reset the kept clock is off by
+the RTC slow clock's drift over the previous boot (about 0.1-1 %, so up to minutes after hours of
+uptime) until the host answers again.
 
 Backlog and voice files are named `<ms>_<boot>_<seq>`, so frames recorded before the clock is known
 (their `<ms>` counts from boot) no longer overwrite each other across resets.

@@ -199,37 +199,54 @@ void local_backlog_quarantine(const char *path, const char *why) {
 
 // Requeueing moves one file per call: each rename into a backlog of thousands of files costs FatFs
 // ~0.5 s (it scans the folder for a free 8.3 alias), and moving 490 at once froze the main loop,
-// button included, for 4 minutes on the P4.
+// button included, for 4 minutes on the P4. One folder cursor serves the whole requeue: a frame the
+// host refuses again goes back into backlog_bad/ mostly behind it (FatFs reuses the slots freed before
+// it), so it does not starve the frames after it, as reopening the folder at its first entry did.
+static DIR *s_requeue_dir;
 static int s_requeue_left;
 
+static void requeue_stop(void) {
+  if (s_requeue_dir) closedir(s_requeue_dir);
+  s_requeue_dir = NULL;
+  s_requeue_left = 0;
+}
+
 int local_backlog_requeue(void) {
+  requeue_stop();
   if (!storage_ready() || !s_dir_backlog_bad[0]) return 0;
   s_requeue_left = count_files(s_dir_backlog_bad);
+  if (s_requeue_left > 0) s_requeue_dir = opendir(s_dir_backlog_bad);
+  if (!s_requeue_dir) s_requeue_left = 0;
   return s_requeue_left;
 }
 
 bool local_backlog_requeue_step(void) {
-  if (s_requeue_left <= 0 || !storage_ready()) return false;
-  DIR *d = opendir(s_dir_backlog_bad);
-  struct dirent *e = d ? readdir(d) : NULL;
-  while (e && e->d_name[0] == '.') e = readdir(d);
-  char from[112], to[112];
+  if (s_requeue_left <= 0 || !s_requeue_dir) return false;
+  if (!storage_ready()) {
+    requeue_stop();
+    return false;
+  }
+  // A frame quarantined across the cursor reads back as its 8.3 alias ("176191~1.JPG"): it came in
+  // after the cursor passed, and moving it under that name would lose its capture time.
+  struct dirent *e = readdir(s_requeue_dir);
+  while (e && (e->d_name[0] == '.' || strchr(e->d_name, '~'))) e = readdir(s_requeue_dir);
   bool moved = false;
   if (e) {
+    char from[112], to[112];
     snprintf(from, sizeof(from), "%s/%.40s", s_dir_backlog_bad, e->d_name);
     snprintf(to, sizeof(to), "%s/%.40s", s_dir_backlog, e->d_name);
     moved = rename(from, to) == 0;
   }
-  if (d) closedir(d);
   if (moved) {
     s_backlog_count = s_backlog_count < 0 ? 1 : s_backlog_count + 1;
     s_requeue_left--;
   } else {
-    s_requeue_left = 0;  // folder empty (or the rename failed): stop rather than spin
+    s_requeue_left = 0;  // end of the folder (or the rename failed): stop rather than spin
   }
   if (s_requeue_left == 0 || (s_requeue_left % 50) == 0)
     ESP_LOGI(TAG, "backlog: requeue, %d quarantined frames left, %d in the queue", s_requeue_left,
              local_backlog_count());
+  if (s_requeue_left == 0) requeue_stop();
   return true;
 }
 

@@ -116,7 +116,7 @@ for name, view in [("the mug", mug), ("something new", rng.normal(size=64))]:
     print(f"{name}: novelty={r.prediction_novelty:.2f}")   # the mug: 0.00, something new: 0.69
 ```
 
-Swap `LocalLociClient` for `LociClient("http://localhost:6333", ...)` to use the same code on a persistent Qdrant backend (see [Production setup](#production-setup)).
+Swap `LocalLociClient` for `LociClient("http://localhost:6333", ...)` to use the same code on a persistent Qdrant backend (see [Production setup](#production-setup)). Three runnable scripts in [`examples/`](examples/) cover local use, Qdrant use and predict-then-retrieve.
 
 ## Three demos you can run today
 
@@ -171,6 +171,8 @@ flowchart LR
 | Outage | frames to the card, uploaded on reconnect; six hundred backlog frames drained while live frames kept flowing |
 
 **What it is not yet.** This is a development board with a camera ribbon, not a product: no enclosure, no battery measurement, no clinical or user study. The detector knows the 80 COCO classes, so it finds cups and scissors but not keys or glasses; open-vocabulary detection is the next quality step. The next hardware stage is a phone-tethered pendant, then a standalone one on LTE.
+
+**Other boards.** The same host protocol and most of the firmware also run on ESP32-S3 camera boards (Meshnology W11, Seeed XIAO ESP32S3 Sense) in [`firmware/esp32-s3-client/`](firmware/esp32-s3-client/), which share the host link, microSD memory and offline commands with the P4 through [`firmware/common/`](firmware/common/); [docs/MESHOLOGY_EVALUATION.md](docs/MESHOLOGY_EVALUATION.md) measures the S3 against the P4 as a pendant base. A smaller PlatformIO sketch in [`firmware/esp32-cam-client/`](firmware/esp32-cam-client/) streams frames and plays answers from an AI-Thinker ESP32-CAM, XIAO Sense or Freenove S3 CAM without the offline features.
 
 **If you would wear one, or build one.** Everything needed to reproduce the prototype is here: firmware, host, protocol, pin maps, the pitfalls we hit on the way (several of them in ESP-IDF itself). Tell us in [Discussions](https://github.com/zd87pl/loci-db/discussions) what you would need from a pendant; that conversation decides whether this becomes a kit or a crowdfunded device.
 
@@ -465,8 +467,6 @@ See [docs/WORLD_MODEL_INTEGRATION.md](docs/WORLD_MODEL_INTEGRATION.md) for
 integration guides.
 </details>
 
-## Performance
-
 ## FAQ
 
 **Isn't this just a vector database with a few payload filters?**
@@ -521,6 +521,7 @@ The [method of loci](https://en.wikipedia.org/wiki/Method_of_loci) is the 2,500-
 - [ARCHITECTURE.md](ARCHITECTURE.md): system design
 - [docs/ESP32_THIN_CLIENT_DEMO.md](docs/ESP32_THIN_CLIENT_DEMO.md): the pendant thin client, protocol and measurements
 - [firmware/esp32-p4-client/README.md](firmware/esp32-p4-client/README.md): board facts, flashing, online mode, troubleshooting
+- [firmware/esp32-s3-client/README.md](firmware/esp32-s3-client/README.md) and [docs/MESHOLOGY_EVALUATION.md](docs/MESHOLOGY_EVALUATION.md): the ESP32-S3 client and how it compares with the P4
 - [docs/HANDHELD_DEMO_DESIGN.md](docs/HANDHELD_DEMO_DESIGN.md): the Pi 5 + OAK-D Lite handheld
 - [docs/MCP_SERVER.md](docs/MCP_SERVER.md): MCP server reference
 - [docs/WORLD_MODEL_INTEGRATION.md](docs/WORLD_MODEL_INTEGRATION.md): world-model integration guides
